@@ -10,10 +10,14 @@ Pi loads available models from a built-in registry and an optional user-defined 
 
 ## Schema
 
-The root object contains a `providers` map.
+The root object contains a `providers` map and may contain a top-level
+`toolUseProfiles` map.
 
 ```json
 {
+  "toolUseProfiles": {
+    "weak-openai-compatible": { "...": "..." }
+  },
   "providers": {
     "openai": { ... },
     "anthropic": { ... },
@@ -33,6 +37,7 @@ The root object contains a `providers` map.
 | `headers` | object | Custom HTTP headers |
 | `authHeader` | boolean | If true, sends key in `Authorization: Bearer <key>` |
 | `compat` | object | Compatibility flags |
+| `toolUseProfile` | string | Optional default tool-use profile name for this provider |
 
 If `models` is provided, built-in models for that provider are replaced with the list in `models.json`.
 
@@ -47,6 +52,38 @@ If `models` is provided, built-in models for that provider are replaced with the
 | `reasoning` | boolean | True if model supports extended thinking |
 | `input` | string[] | `["text", "image"]` |
 | `cost` | object | Cost per million tokens |
+| `toolUseProfile` | string | Optional tool-use profile override for this model |
+
+### Tool-Use Profiles (`toolUseProfiles`)
+
+`toolUseProfiles` is a top-level map of named, configuration-defined tool-use
+hardening profiles. Providers and models reference a profile by name with
+`toolUseProfile`.
+
+Resolution order:
+
+1. `model.toolUseProfile`, when present.
+2. `provider.toolUseProfile`, when present.
+3. No profile.
+
+Unknown profile names fail closed as a configuration error. Pi does not
+auto-detect weak models, does not fetch profiles from remote locations, and
+does not read a separate `tool-use-profiles.json` file.
+
+Supported first-pass fields:
+
+| Field | Description |
+|-------|-------------|
+| `appendSystemPrompt` | Extra system prompt text appended only when tools are enabled |
+| `pathSchema.fileTools` | Tools whose `path` is a required file path |
+| `pathSchema.optionalPathTools` | Tools whose `path` is optional |
+| `pathSchema.filePathDescription` | Description used for `path` in `fileTools` |
+| `pathSchema.optionalPathDescription` | Description used for `path` in `optionalPathTools` |
+| `pathSchema.genericPathDescription` | Fallback description for other tools with `path` |
+| `argumentRepair.repairDegeneratePathFromUserText` | Repair degenerate/absolute path values from one explicit relative path in user text |
+| `argumentRepair.repairGrepDegenerateGlob` | Repair `grep` when `glob` degenerates to the current directory or a non-wildcard dot-prefixed literal, and one explicit file is present |
+| `postToolGuard.rewriteRepeatedSuccessfulToolCall` | Convert repeated same-name/same-argument successful tool calls into the prior tool result |
+| `postToolGuard.stripReadLinePrefixes` | Strip `read` line metadata like `1→TEXT` when reusing a prior read result |
 
 ### Compatibility Flags (`compat`)
 
@@ -121,6 +158,62 @@ Azure requires resource-specific URLs and `api-key` header instead of Bearer tok
         {
           "id": "llama3",
           "contextWindow": 8192
+        }
+      ]
+    }
+  }
+}
+```
+
+### 4. Local MiniCPM5 via OpenAI-compatible server
+
+MiniCPM5-style weak OpenAI-compatible tool-use hardening is configured as data,
+not as a Rust-side preset. You can rename the profile as long as the provider or
+model references the same name.
+
+```json
+{
+  "toolUseProfiles": {
+    "weak-openai-compatible": {
+      "appendSystemPrompt": "- If a task needs a tool, output the tool call first.\\n- Do not repeat a successful tool call.\\n- Tool results are the only source of file facts.",
+      "pathSchema": {
+        "fileTools": ["read", "edit", "write", "hashline_edit"],
+        "optionalPathTools": ["grep", "find", "ls"],
+        "filePathDescription": "Relative file path copied from the user's request. Never use absolute paths.",
+        "optionalPathDescription": "Optional relative file or directory path. Omit it when the user gives no explicit path.",
+        "genericPathDescription": "Relative file or directory path. Never use absolute paths."
+      },
+      "argumentRepair": {
+        "repairDegeneratePathFromUserText": true,
+        "repairGrepDegenerateGlob": true
+      },
+      "postToolGuard": {
+        "rewriteRepeatedSuccessfulToolCall": true,
+        "stripReadLinePrefixes": true
+      }
+    }
+  },
+  "providers": {
+    "local-minicpm5": {
+      "api": "openai-completions",
+      "baseUrl": "http://127.0.0.1:18081/v1",
+      "apiKey": "local",
+      "authHeader": false,
+      "toolUseProfile": "weak-openai-compatible",
+      "compat": {
+        "supportsTools": true,
+        "supportsStreaming": true,
+        "supportsUsageInStreaming": false,
+        "supportsParallelToolCalls": false
+      },
+      "models": [
+        {
+          "id": "/Users/cuiluming/local_doc/l_dev/my/rust/fast-infer/models/MiniCPM5-1B",
+          "name": "MiniCPM5-1B",
+          "contextWindow": 131072,
+          "maxTokens": 4096,
+          "reasoning": false,
+          "input": ["text"]
         }
       ]
     }

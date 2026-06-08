@@ -934,6 +934,7 @@ pub fn create_provider(
                     .with_provider_name(entry.model.provider.clone())
                     .with_base_url(normalize_openai_base(&entry.model.base_url))
                     .with_compat(entry.compat.clone())
+                    .with_tool_use_profile(entry.tool_use_profile.clone())
                     .with_client(client),
             ))
         }
@@ -1795,6 +1796,7 @@ export default function init(pi) {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     }

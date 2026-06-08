@@ -1746,6 +1746,11 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         options.include_cwd_in_prompt,
     )
     .map_err(|err| Error::validation(err.to_string()))?;
+    let system_prompt = app::append_tool_use_profile_system_prompt(
+        system_prompt,
+        &selection.model_entry,
+        &enabled_tools,
+    );
 
     let provider = providers::create_provider(&selection.model_entry, None)
         .map_err(|e| Error::provider("sdk", e.to_string()))?;
@@ -1762,6 +1767,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         stream_options,
         block_images: config.image_block_images(),
         fail_closed_hooks: config.fail_closed_hooks(),
+        tool_use_profile: selection.model_entry.tool_use_profile.clone(),
         tool_approval: None,
     };
 
@@ -2121,6 +2127,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_use_profile: None,
                 tool_approval: None,
             },
         );
@@ -2218,6 +2225,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }]);
         let entry = registry
@@ -2234,6 +2242,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_use_profile: None,
                 tool_approval: None,
             },
         );

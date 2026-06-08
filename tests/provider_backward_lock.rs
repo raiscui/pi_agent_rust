@@ -650,6 +650,7 @@ fn factory_routes_anthropic_correctly() {
         headers: HashMap::new(),
         auth_header: false,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 
@@ -687,6 +688,7 @@ fn factory_routes_openai_completions_correctly() {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 
@@ -724,6 +726,7 @@ fn factory_routes_openai_responses_correctly() {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 
@@ -761,6 +764,7 @@ fn factory_routes_cohere_correctly() {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 
@@ -798,6 +802,7 @@ fn factory_routes_google_correctly() {
         headers: HashMap::new(),
         auth_header: false,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 
@@ -836,6 +841,7 @@ fn oai_compat_entry(provider: &str, base_url: &str) -> pi::models::ModelEntry {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     }
 }
@@ -962,6 +968,7 @@ fn factory_routes_gitlab_native_provider() {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
     let p = create_provider(&entry, None).expect("factory should route gitlab");

@@ -66,6 +66,7 @@ fn make_entry(provider: &str, model_id: &str, base_url: &str) -> ModelEntry {
         headers: HashMap::new(),
         auth_header: false,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     }
 }

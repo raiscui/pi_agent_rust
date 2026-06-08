@@ -161,6 +161,7 @@ fn agent_loop_openai_vcr_basic() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         };
         let agent = Agent::new(Arc::new(provider), tools, agent_config);
@@ -344,6 +345,7 @@ fn agent_loop_anthropic_simple_text() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         };
         let agent = Agent::new(Arc::new(provider), tools, agent_config);
@@ -444,6 +446,7 @@ fn agent_loop_anthropic_error_stream() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         };
         let agent = Agent::new(Arc::new(provider), tools, agent_config);
@@ -527,6 +530,7 @@ fn agent_loop_anthropic_tool_call_stop() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         };
         let agent = Agent::new(Arc::new(provider), tools, agent_config);

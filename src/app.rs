@@ -207,6 +207,48 @@ pub fn build_system_prompt(
     Ok(prompt)
 }
 
+/// Append configured tool-use profile rules after the normal Pi prompt.
+///
+/// Profile contents come from `models.json.toolUseProfiles`. 这里不根据
+/// provider/model 字符串推断弱兼容模型, 只消费 `ModelEntry` 上已经解析好的
+/// profile, 让模型配置成为唯一真相源。
+#[must_use]
+pub fn append_tool_use_profile_system_prompt(
+    mut prompt: String,
+    model_entry: &ModelEntry,
+    enabled_tools: &[&str],
+) -> String {
+    if enabled_tools.is_empty() {
+        return prompt;
+    }
+
+    let Some(profile) = model_entry.tool_use_profile.as_ref() else {
+        return prompt;
+    };
+    let Some(append_system_prompt) = profile
+        .append_system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    else {
+        return prompt;
+    };
+    let marker = tool_use_profile_prompt_marker(&profile.name);
+    if prompt.contains(&marker) {
+        return prompt;
+    }
+
+    prompt.push_str("\n\n");
+    prompt.push_str(&marker);
+    prompt.push('\n');
+    prompt.push_str(append_system_prompt);
+    prompt
+}
+
+fn tool_use_profile_prompt_marker(profile_name: &str) -> String {
+    format!("# Tool-use profile: {profile_name}")
+}
+
 fn resolve_prompt_input(input: Option<&str>, description: &str) -> Result<Option<String>> {
     let Some(value) = input else {
         return Ok(None);
@@ -1231,12 +1273,80 @@ mod tests {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     }
 
     fn registry_with_entries(entries: Vec<ModelEntry>) -> ModelRegistry {
         ModelRegistry::from_entries_for_tests(entries)
+    }
+
+    fn with_tool_use_prompt(mut entry: ModelEntry, profile_name: &str, prompt: &str) -> ModelEntry {
+        entry.tool_use_profile = Some(crate::models::ToolUseProfile {
+            name: profile_name.to_string(),
+            append_system_prompt: Some(prompt.to_string()),
+            path_schema: None,
+            argument_repair: None,
+            post_tool_guard: None,
+        });
+        entry
+    }
+
+    #[test]
+    fn append_tool_use_profile_system_prompt_appends_configured_prompt() {
+        let entry = with_tool_use_prompt(
+            test_model_entry("any-model", "any-openai-compatible", false),
+            "weak-openai-compatible",
+            "If a task needs a tool, output the tool call first.",
+        );
+
+        let prompt = append_tool_use_profile_system_prompt("BASE".to_string(), &entry, &["read"]);
+
+        assert!(prompt.contains("BASE"));
+        assert!(prompt.contains("# Tool-use profile: weak-openai-compatible"));
+        assert!(prompt.contains("output the tool call first"));
+    }
+
+    #[test]
+    fn append_tool_use_profile_system_prompt_skips_without_profile() {
+        let entry = test_model_entry("profiled-model", "profiled-provider", false);
+
+        let prompt = append_tool_use_profile_system_prompt("BASE".to_string(), &entry, &["write"]);
+
+        assert_eq!(prompt, "BASE");
+    }
+
+    #[test]
+    fn append_tool_use_profile_system_prompt_skips_when_tools_are_disabled() {
+        let entry = with_tool_use_prompt(
+            test_model_entry("profiled-model", "profiled-provider", false),
+            "weak-openai-compatible",
+            "Tool prompt",
+        );
+
+        let prompt = append_tool_use_profile_system_prompt("BASE".to_string(), &entry, &[]);
+
+        assert_eq!(prompt, "BASE");
+    }
+
+    #[test]
+    fn append_tool_use_profile_system_prompt_is_idempotent_by_profile_name() {
+        let entry = with_tool_use_prompt(
+            test_model_entry("profiled-model", "profiled-provider", false),
+            "renamed-profile",
+            "Tool prompt",
+        );
+
+        let prompt = append_tool_use_profile_system_prompt("BASE".to_string(), &entry, &["write"]);
+        let prompt = append_tool_use_profile_system_prompt(prompt, &entry, &["write"]);
+
+        assert_eq!(
+            prompt
+                .matches("# Tool-use profile: renamed-profile")
+                .count(),
+            1
+        );
     }
 
     #[test]

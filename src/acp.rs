@@ -1178,7 +1178,11 @@ fn handle_session_new(
         .map_err(|e| Error::provider("acp", e.to_string()))?;
 
     // Build system prompt directly (avoids constructing a Cli struct).
-    let system_prompt = build_acp_system_prompt(&cwd, &enabled_tools);
+    let system_prompt = crate::app::append_tool_use_profile_system_prompt(
+        build_acp_system_prompt(&cwd, &enabled_tools),
+        &model_entry,
+        &enabled_tools,
+    );
 
     // Resolve API key from auth storage and model entry.
     let api_key = options
@@ -1203,6 +1207,7 @@ fn handle_session_new(
         stream_options,
         block_images: options.config.image_block_images(),
         fail_closed_hooks: options.config.fail_closed_hooks(),
+        tool_use_profile: model_entry.tool_use_profile.clone(),
         tool_approval: permission_client
             .map(|client| client.handler_for_session(session_id.clone())),
     };
@@ -1533,6 +1538,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     }

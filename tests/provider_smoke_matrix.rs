@@ -53,6 +53,7 @@ fn make_smoke_entry(provider: &str, model_id: &str, base_url: &str) -> ModelEntr
         auth_header: false,
         compat: None,
         oauth_config: None,
+        tool_use_profile: None,
     }
 }
 

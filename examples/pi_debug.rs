@@ -221,6 +221,7 @@ async fn run_debug(mut cli: cli::Cli, runtime_handle: RuntimeHandle) -> Result<(
         stream_options,
         block_images: config.image_block_images(),
         fail_closed_hooks: config.fail_closed_hooks(),
+        tool_use_profile: selection.model_entry.tool_use_profile.clone(),
         tool_approval: None,
     };
     let tools = ToolRegistry::new(&enabled_tools, &cwd, Some(&config));

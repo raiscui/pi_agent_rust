@@ -1135,6 +1135,9 @@ pub async fn run(
                                 .map(crate::extensions::ExtensionRegion::manager),
                         )?;
                         guard.agent.set_provider(provider_impl);
+                        guard
+                            .agent
+                            .set_tool_use_profile(entry.tool_use_profile.clone());
                         guard.agent.stream_options_mut().api_key.clone_from(&key);
                         guard
                             .agent
@@ -5260,6 +5263,9 @@ async fn cycle_model_for_rpc(
             .map(crate::extensions::ExtensionRegion::manager),
     )?;
     guard.agent.set_provider(provider_impl);
+    guard
+        .agent
+        .set_tool_use_profile(next_entry.tool_use_profile.clone());
 
     guard.agent.stream_options_mut().api_key.clone_from(&key);
     guard
@@ -5347,6 +5353,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     }
@@ -7907,6 +7914,7 @@ export default function init(pi) {
                 headers: HashMap::new(),
                 auth_header: true,
                 compat: None,
+                tool_use_profile: None,
                 oauth_config: None,
             };
 
