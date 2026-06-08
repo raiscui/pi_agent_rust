@@ -14,7 +14,7 @@ use crate::model::{
     AssistantMessage, ContentBlock, Message, StopReason, StreamEvent, TextContent, ThinkingContent,
     ToolCall, Usage, UserContent,
 };
-use crate::models::CompatConfig;
+use crate::models::{CompatConfig, ToolUsePathSchemaConfig, ToolUseProfile};
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::sse::SseStream;
 use async_trait::async_trait;
@@ -32,7 +32,6 @@ const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 const OPENROUTER_DEFAULT_HTTP_REFERER: &str = "https://github.com/Dicklesworthstone/pi_agent_rust";
 const OPENROUTER_DEFAULT_X_TITLE: &str = "Pi Agent Rust";
-
 /// Map a role string (which may come from compat config at runtime) to a `Cow<'_, str>`.
 ///
 /// The OpenAI API uses a small, well-known set of role names.  When the value
@@ -104,6 +103,7 @@ pub struct OpenAIProvider {
     base_url: String,
     provider: String,
     compat: Option<CompatConfig>,
+    tool_use_profile: Option<ToolUseProfile>,
 }
 
 impl OpenAIProvider {
@@ -115,6 +115,7 @@ impl OpenAIProvider {
             base_url: OPENAI_API_URL.to_string(),
             provider: "openai".to_string(),
             compat: None,
+            tool_use_profile: None,
         }
     }
 
@@ -152,6 +153,16 @@ impl OpenAIProvider {
         self
     }
 
+    /// Attach a resolved tool-use profile from `models.json`.
+    ///
+    /// 这里接收的是 `ModelEntry` 上已经解析完成的 profile clone。
+    /// OpenAI provider 不再根据 provider/model 名称自行推断弱兼容模型。
+    #[must_use]
+    pub fn with_tool_use_profile(mut self, profile: Option<ToolUseProfile>) -> Self {
+        self.tool_use_profile = profile;
+        self
+    }
+
     /// Build the request body for the OpenAI API.
     pub fn build_request<'a>(
         &'a self,
@@ -174,7 +185,15 @@ impl OpenAIProvider {
         let tools: Option<Vec<OpenAITool<'a>>> = if context.tools.is_empty() || !tools_supported {
             None
         } else {
-            Some(context.tools.iter().map(convert_tool_to_openai).collect())
+            Some(
+                context
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        convert_tool_to_openai_with_profile(tool, self.tool_use_profile.as_ref())
+                    })
+                    .collect(),
+            )
         };
 
         // Determine which max-tokens field to populate based on compat config.
@@ -926,9 +945,9 @@ struct OpenAITool<'a> {
 
 #[derive(Debug, Serialize)]
 struct OpenAIFunction<'a> {
-    name: &'a str,
-    description: &'a str,
-    parameters: &'a serde_json::Value,
+    name: Cow<'a, str>,
+    description: Cow<'a, str>,
+    parameters: serde_json::Value,
 }
 
 // ============================================================================
@@ -1162,14 +1181,95 @@ fn convert_user_content(content: &UserContent) -> OpenAIContent<'_> {
 }
 
 fn convert_tool_to_openai(tool: &ToolDef) -> OpenAITool<'_> {
+    convert_tool_to_openai_with_profile(tool, None)
+}
+
+fn convert_tool_to_openai_with_profile<'a>(
+    tool: &'a ToolDef,
+    profile: Option<&ToolUseProfile>,
+) -> OpenAITool<'a> {
+    let mut parameters = tool.parameters.clone();
+    if let Some(path_schema) = profile.and_then(|profile| profile.path_schema.as_ref()) {
+        normalize_profiled_path_arguments(&tool.name, &mut parameters, path_schema);
+    }
+
     OpenAITool {
         r#type: "function",
         function: OpenAIFunction {
-            name: &tool.name,
-            description: &tool.description,
-            parameters: &tool.parameters,
+            name: Cow::Borrowed(&tool.name),
+            description: Cow::Borrowed(&tool.description),
+            parameters,
         },
     }
+}
+
+fn normalize_profiled_path_arguments(
+    tool_name: &str,
+    schema: &mut serde_json::Value,
+    path_schema: &ToolUsePathSchemaConfig,
+) {
+    let Some(path_description) = profiled_path_description_for_tool(tool_name, path_schema) else {
+        return;
+    };
+    rewrite_path_argument_descriptions(schema, path_description);
+}
+
+fn rewrite_path_argument_descriptions(schema: &mut serde_json::Value, path_description: &str) {
+    match schema {
+        serde_json::Value::Object(object) => {
+            if let Some(properties) = object
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for (name, property) in properties {
+                    if name == "path" {
+                        // 某些 OpenAI-compatible 模型会强跟随 tool schema。
+                        // 因此 path 约束由配置 profile 提供, 而不是写死到某个模型名。
+                        if let serde_json::Value::Object(property_object) = property {
+                            property_object.insert(
+                                "description".to_string(),
+                                serde_json::Value::String(path_description.to_string()),
+                            );
+                        }
+                    }
+                    rewrite_path_argument_descriptions(property, path_description);
+                }
+            }
+
+            for value in object.values_mut() {
+                rewrite_path_argument_descriptions(value, path_description);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                rewrite_path_argument_descriptions(item, path_description);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+fn profiled_path_description_for_tool<'a>(
+    tool_name: &str,
+    path_schema: &'a ToolUsePathSchemaConfig,
+) -> Option<&'a str> {
+    if tool_name_is_listed(path_schema.file_tools.as_deref(), tool_name) {
+        return path_schema.file_path_description.as_deref();
+    }
+    if tool_name_is_listed(path_schema.optional_path_tools.as_deref(), tool_name) {
+        return path_schema.optional_path_description.as_deref();
+    }
+    path_schema.generic_path_description.as_deref()
+}
+
+fn tool_name_is_listed(tool_names: Option<&[String]>, tool_name: &str) -> bool {
+    tool_names
+        .into_iter()
+        .flatten()
+        .any(|configured| configured.eq_ignore_ascii_case(tool_name))
 }
 
 // ============================================================================
@@ -1221,12 +1321,157 @@ mod tests {
         assert_eq!(converted.function.description, "A test tool");
         assert_eq!(
             converted.function.parameters,
-            &serde_json::json!({
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "arg": {"type": "string"}
                 }
             })
+        );
+    }
+
+    fn tool_use_path_schema_profile(name: &str) -> ToolUseProfile {
+        ToolUseProfile {
+            name: name.to_string(),
+            append_system_prompt: None,
+            path_schema: Some(ToolUsePathSchemaConfig {
+                file_tools: Some(vec![
+                    "read".to_string(),
+                    "edit".to_string(),
+                    "write".to_string(),
+                    "hashline_edit".to_string(),
+                ]),
+                optional_path_tools: Some(vec![
+                    "grep".to_string(),
+                    "find".to_string(),
+                    "ls".to_string(),
+                ]),
+                file_path_description: Some("Configured file path description".to_string()),
+                optional_path_description: Some("Configured optional path description".to_string()),
+                generic_path_description: Some("Configured generic path description".to_string()),
+            }),
+            argument_repair: None,
+            post_tool_guard: None,
+        }
+    }
+
+    #[test]
+    fn tool_use_profile_conversion_rewrites_path_descriptions_from_config() {
+        let tool = ToolDef {
+            name: "generic_path_tool".to_string(),
+            description: "A generic path tool".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to use (relative or absolute)"
+                    },
+                    "nested": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Nested path"
+                            }
+                        }
+                    }
+                }
+            }),
+        };
+
+        let default_converted = convert_tool_to_openai(&tool);
+        assert_eq!(
+            default_converted.function.parameters["properties"]["path"]["description"],
+            "Path to use (relative or absolute)"
+        );
+
+        let profile = tool_use_path_schema_profile("renamed-compatible-profile");
+        let profiled_converted = convert_tool_to_openai_with_profile(&tool, Some(&profile));
+        assert_eq!(
+            profiled_converted.function.parameters["properties"]["path"]["description"],
+            "Configured generic path description"
+        );
+        assert_eq!(
+            profiled_converted.function.parameters["properties"]["nested"]["properties"]["path"]["description"],
+            "Configured generic path description"
+        );
+        assert_eq!(profiled_converted.function.name, "generic_path_tool");
+        assert_eq!(
+            profiled_converted.function.description,
+            "A generic path tool"
+        );
+    }
+
+    #[test]
+    fn tool_use_profile_conversion_uses_configured_tool_categories() {
+        let file_tool = ToolDef {
+            name: "write".to_string(),
+            description: "Write a file".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to write"
+                    }
+                }
+            }),
+        };
+        let listed_tool = ToolDef {
+            name: "ls".to_string(),
+            description: "List files".to_string(),
+            parameters: file_tool.parameters.clone(),
+        };
+
+        let profile = tool_use_path_schema_profile("weak-openai-compatible");
+        let file_converted = convert_tool_to_openai_with_profile(&file_tool, Some(&profile));
+        assert_eq!(
+            file_converted.function.parameters["properties"]["path"]["description"],
+            "Configured file path description"
+        );
+
+        let listed_converted = convert_tool_to_openai_with_profile(&listed_tool, Some(&profile));
+        assert_eq!(
+            listed_converted.function.parameters["properties"]["path"]["description"],
+            "Configured optional path description"
+        );
+    }
+
+    #[test]
+    fn tool_use_profile_conversion_skips_generic_path_without_description() {
+        let tool = ToolDef {
+            name: "unknown_path_tool".to_string(),
+            description: "Unknown path tool".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Original path description"
+                    }
+                }
+            }),
+        };
+        let profile = ToolUseProfile {
+            name: "file-only-profile".to_string(),
+            append_system_prompt: None,
+            path_schema: Some(ToolUsePathSchemaConfig {
+                file_tools: Some(vec!["write".to_string()]),
+                optional_path_tools: None,
+                file_path_description: Some("Configured file path description".to_string()),
+                optional_path_description: None,
+                generic_path_description: None,
+            }),
+            argument_repair: None,
+            post_tool_guard: None,
+        };
+
+        let converted = convert_tool_to_openai_with_profile(&tool, Some(&profile));
+
+        assert_eq!(
+            converted.function.parameters["properties"]["path"]["description"],
+            "Original path description"
         );
     }
 

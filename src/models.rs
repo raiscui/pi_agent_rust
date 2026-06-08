@@ -21,6 +21,12 @@ pub struct ModelEntry {
     pub headers: HashMap<String, String>,
     pub auth_header: bool,
     pub compat: Option<CompatConfig>,
+    /// 已经从 models.json 解析完成的工具调用行为 profile。
+    ///
+    /// 这里保存的是"解析后的结果", 而不是 profile 名称。
+    /// 后续 prompt / provider / agent 层只消费这个单一真相源,
+    /// 避免各层重复用 provider/model 字符串做硬编码判断。
+    pub tool_use_profile: Option<ToolUseProfile>,
     /// OAuth config for extension-registered providers that require browser-based auth.
     pub oauth_config: Option<OAuthConfig>,
 }
@@ -92,6 +98,8 @@ pub struct OAuthConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsConfig {
+    #[serde(default)]
+    pub tool_use_profiles: HashMap<String, ToolUseProfileConfig>,
     pub providers: HashMap<String, ProviderConfig>,
 }
 
@@ -104,6 +112,7 @@ pub struct ProviderConfig {
     pub headers: Option<HashMap<String, String>>,
     pub auth_header: Option<bool>,
     pub compat: Option<CompatConfig>,
+    pub tool_use_profile: Option<String>,
     pub models: Option<Vec<ModelConfig>>,
 }
 
@@ -120,6 +129,67 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     pub headers: Option<HashMap<String, String>>,
     pub compat: Option<CompatConfig>,
+    pub tool_use_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseProfile {
+    /// profile 的配置名, 用于生成 idempotence marker 和诊断信息。
+    pub name: String,
+    /// 可追加到 system prompt 的 profile 文本。
+    pub append_system_prompt: Option<String>,
+    /// OpenAI-compatible tools schema 的 path 字段收窄配置。
+    pub path_schema: Option<ToolUsePathSchemaConfig>,
+    /// 模型输出 tool arguments 后的保守修复开关。
+    pub argument_repair: Option<ToolUseArgumentRepairConfig>,
+    /// 工具返回后的重复调用 / 文本收束保护开关。
+    pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
+}
+
+impl ToolUseProfile {
+    fn from_config(name: &str, config: &ToolUseProfileConfig) -> Self {
+        Self {
+            name: name.to_string(),
+            append_system_prompt: config.append_system_prompt.clone(),
+            path_schema: config.path_schema.clone(),
+            argument_repair: config.argument_repair.clone(),
+            post_tool_guard: config.post_tool_guard.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseProfileConfig {
+    pub append_system_prompt: Option<String>,
+    pub path_schema: Option<ToolUsePathSchemaConfig>,
+    pub argument_repair: Option<ToolUseArgumentRepairConfig>,
+    pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUsePathSchemaConfig {
+    pub file_tools: Option<Vec<String>>,
+    pub optional_path_tools: Option<Vec<String>>,
+    pub file_path_description: Option<String>,
+    pub optional_path_description: Option<String>,
+    pub generic_path_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseArgumentRepairConfig {
+    pub repair_degenerate_path_from_user_text: Option<bool>,
+    pub repair_grep_degenerate_glob: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUsePostToolGuardConfig {
+    pub rewrite_repeated_successful_tool_call: Option<bool>,
+    pub strip_read_line_prefixes: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -572,6 +642,61 @@ pub fn model_catalog_cache_fingerprint() -> u64 {
     })
 }
 
+fn validate_tool_use_profile_references(config: &ModelsConfig) -> Result<(), Error> {
+    for (provider_id, provider_cfg) in &config.providers {
+        validate_tool_use_profile_name(
+            &config.tool_use_profiles,
+            provider_cfg.tool_use_profile.as_deref(),
+            || format!("provider `{provider_id}`"),
+        )?;
+
+        for model_cfg in provider_cfg.models.iter().flatten() {
+            validate_tool_use_profile_name(
+                &config.tool_use_profiles,
+                model_cfg.tool_use_profile.as_deref(),
+                || format!("model `{}` under provider `{provider_id}`", model_cfg.id),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tool_use_profile_name(
+    profiles: &HashMap<String, ToolUseProfileConfig>,
+    profile_name: Option<&str>,
+    describe_owner: impl FnOnce() -> String,
+) -> Result<(), Error> {
+    let Some(profile_name) = profile_name else {
+        return Ok(());
+    };
+    let trimmed = profile_name.trim();
+    if trimmed.is_empty() {
+        return Err(Error::config(format!(
+            "Empty toolUseProfile reference for {}",
+            describe_owner()
+        )));
+    }
+    if !profiles.contains_key(trimmed) {
+        return Err(Error::config(format!(
+            "Unknown toolUseProfile `{trimmed}` referenced by {}",
+            describe_owner()
+        )));
+    }
+
+    Ok(())
+}
+
+fn resolve_tool_use_profile(
+    profiles: &HashMap<String, ToolUseProfileConfig>,
+    profile_name: Option<&str>,
+) -> Option<ToolUseProfile> {
+    let profile_name = profile_name?.trim();
+    profiles
+        .get(profile_name)
+        .map(|config| ToolUseProfile::from_config(profile_name, config))
+}
+
 pub(crate) fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
     api_key.and_then(|key| {
         let trimmed = key.trim();
@@ -631,7 +756,9 @@ impl ModelRegistry {
                 match std::fs::read_to_string(&path)
                     .map_err(|e| Error::config(format!("Failed to read models.json: {e}")))
                     .and_then(|s| serde_json::from_str::<ModelsConfig>(&s).map_err(Error::from))
-                {
+                    .and_then(|config| {
+                        validate_tool_use_profile_references(&config).map(|()| config)
+                    }) {
                     Ok(config) => {
                         apply_custom_models(auth, &mut models, &config, path.parent());
                     }
@@ -1053,6 +1180,7 @@ fn append_upstream_nonlegacy_models(
                 headers: HashMap::new(),
                 auth_header: defaults.auth_header,
                 compat: None,
+                tool_use_profile: None,
                 oauth_config: None,
             });
         }
@@ -1188,6 +1316,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             } else {
                 None
             },
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1243,6 +1372,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1292,6 +1422,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1337,6 +1468,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1386,6 +1518,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1431,6 +1564,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1476,6 +1610,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1522,6 +1657,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1567,6 +1703,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1607,6 +1744,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1647,6 +1785,7 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1729,6 +1868,10 @@ fn apply_custom_models(
         let auth_header = provider_cfg
             .auth_header
             .unwrap_or_else(|| provider_defaults.is_some_and(|defaults| defaults.auth_header));
+        let provider_tool_use_profile = resolve_tool_use_profile(
+            &config.tool_use_profiles,
+            provider_cfg.tool_use_profile.as_deref(),
+        );
 
         if provider_defaults.is_some() {
             tracing::debug!(
@@ -1769,6 +1912,11 @@ fn apply_custom_models(
                 }
                 if provider_cfg.auth_header.is_some() {
                     entry.auth_header = auth_header;
+                }
+                if provider_cfg.tool_use_profile.is_some() {
+                    entry
+                        .tool_use_profile
+                        .clone_from(&provider_tool_use_profile);
                 }
             }
             continue;
@@ -1834,6 +1982,12 @@ fn apply_custom_models(
                 provider_defaults.map_or(128_000, |defaults| defaults.context_window);
             let default_max_tokens =
                 provider_defaults.map_or(16_384, |defaults| defaults.max_tokens);
+            let tool_use_profile = model_cfg.tool_use_profile.as_deref().map_or_else(
+                || provider_tool_use_profile.clone(),
+                |profile_name| {
+                    resolve_tool_use_profile(&config.tool_use_profiles, Some(profile_name))
+                },
+            );
 
             let model = Model {
                 id: normalized_model_id.clone(),
@@ -1865,6 +2019,7 @@ fn apply_custom_models(
                 headers: model_headers,
                 auth_header,
                 compat: merge_compat(provider_cfg.compat.as_ref(), model_cfg.compat.as_ref()),
+                tool_use_profile,
                 oauth_config: None,
             });
         }
@@ -2193,6 +2348,7 @@ where
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2226,6 +2382,7 @@ where
         headers: HashMap::new(),
         auth_header: defaults.auth_header,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     })
 }
@@ -2588,6 +2745,7 @@ mod tests {
         provider_headers.insert("x-provider".to_string(), "provider-header".to_string());
 
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -2600,6 +2758,7 @@ mod tests {
                         supports_store: Some(true),
                         ..CompatConfig::default()
                     }),
+                    tool_use_profile: None,
                     models: None,
                 },
             )]),
@@ -2652,10 +2811,12 @@ mod tests {
             headers: HashMap::from([("x-built-in".to_string(), "keep-me".to_string())]),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }];
 
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -2706,10 +2867,12 @@ mod tests {
             headers: HashMap::from([("x-built-in".to_string(), "remove-me".to_string())]),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }];
 
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -2732,6 +2895,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "cohere".to_string(),
                 ProviderConfig {
@@ -2767,6 +2931,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "custom-openai".to_string(),
                 ProviderConfig {
@@ -2837,6 +3002,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -2875,6 +3041,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "codex".to_string(),
                 ProviderConfig {
@@ -2907,6 +3074,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([
                 (
                     "gemini-cli".to_string(),
@@ -2976,6 +3144,7 @@ mod tests {
 
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "kimi".to_string(),
                 ProviderConfig {
@@ -3109,6 +3278,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         };
 
@@ -3141,6 +3311,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "openrouter".to_string(),
                 ProviderConfig {
@@ -3334,6 +3505,236 @@ mod tests {
             Some("model-level")
         );
         assert_eq!(acme.model.input, vec![InputType::Text, InputType::Image]);
+        assert!(acme.tool_use_profile.is_none());
+    }
+
+    #[test]
+    fn model_registry_loads_tool_use_profiles_and_provider_default() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+
+        let models_json = serde_json::json!({
+            "toolUseProfiles": {
+                "weak-openai-compatible": {
+                    "appendSystemPrompt": "Use actual tool calls when tools are needed.",
+                    "pathSchema": {
+                        "fileTools": ["read", "write", "edit"],
+                        "optionalPathTools": ["grep", "find", "ls"],
+                        "filePathDescription": "Relative file path only.",
+                        "optionalPathDescription": "Optional relative path.",
+                        "genericPathDescription": "Relative path when provided."
+                    },
+                    "argumentRepair": {
+                        "repairDegeneratePathFromUserText": true,
+                        "repairGrepDegenerateGlob": true
+                    },
+                    "postToolGuard": {
+                        "rewriteRepeatedSuccessfulToolCall": true,
+                        "stripReadLinePrefixes": true
+                    }
+                }
+            },
+            "providers": {
+                "acme-profiled": {
+                    "baseUrl": "https://acme.example/v1",
+                    "api": "openai-completions",
+                    "toolUseProfile": "weak-openai-compatible",
+                    "models": [
+                        { "id": "acme-chat" }
+                    ]
+                }
+            }
+        });
+
+        std::fs::write(
+            &models_path,
+            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+        )
+        .expect("write models.json");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        assert!(registry.error().is_none(), "{:?}", registry.error());
+        let acme = registry
+            .find("acme-profiled", "acme-chat")
+            .expect("profiled custom model should load");
+        let profile = acme
+            .tool_use_profile
+            .as_ref()
+            .expect("provider profile should resolve");
+
+        assert_eq!(profile.name, "weak-openai-compatible");
+        assert_eq!(
+            profile.append_system_prompt.as_deref(),
+            Some("Use actual tool calls when tools are needed.")
+        );
+        let path_schema = profile
+            .path_schema
+            .as_ref()
+            .expect("path schema should deserialize");
+        assert_eq!(
+            path_schema.file_tools.as_deref(),
+            Some(&["read".to_string(), "write".to_string(), "edit".to_string()][..])
+        );
+        assert_eq!(
+            profile
+                .argument_repair
+                .as_ref()
+                .and_then(|repair| repair.repair_grep_degenerate_glob),
+            Some(true)
+        );
+        assert_eq!(
+            profile
+                .post_tool_guard
+                .as_ref()
+                .and_then(|guard| guard.strip_read_line_prefixes),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn model_registry_model_tool_use_profile_overrides_provider_default() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+
+        let models_json = serde_json::json!({
+            "toolUseProfiles": {
+                "provider-profile": {
+                    "appendSystemPrompt": "provider prompt"
+                },
+                "model-profile": {
+                    "appendSystemPrompt": "model prompt"
+                }
+            },
+            "providers": {
+                "acme-override": {
+                    "baseUrl": "https://acme.example/v1",
+                    "api": "openai-completions",
+                    "toolUseProfile": "provider-profile",
+                    "models": [
+                        { "id": "inherits-provider" },
+                        {
+                            "id": "uses-model",
+                            "toolUseProfile": "model-profile"
+                        }
+                    ]
+                }
+            }
+        });
+
+        std::fs::write(
+            &models_path,
+            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+        )
+        .expect("write models.json");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        assert!(registry.error().is_none(), "{:?}", registry.error());
+        let inherited = registry
+            .find("acme-override", "inherits-provider")
+            .expect("provider default model should load");
+        let overridden = registry
+            .find("acme-override", "uses-model")
+            .expect("model override should load");
+
+        assert_eq!(
+            inherited
+                .tool_use_profile
+                .as_ref()
+                .map(|profile| profile.name.as_str()),
+            Some("provider-profile")
+        );
+        assert_eq!(
+            overridden
+                .tool_use_profile
+                .as_ref()
+                .map(|profile| profile.name.as_str()),
+            Some("model-profile")
+        );
+    }
+
+    #[test]
+    fn model_registry_unknown_provider_tool_use_profile_fails_closed() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+
+        let models_json = serde_json::json!({
+            "toolUseProfiles": {},
+            "providers": {
+                "acme-broken-provider": {
+                    "baseUrl": "https://acme.example/v1",
+                    "api": "openai-completions",
+                    "toolUseProfile": "missing-profile",
+                    "models": [
+                        { "id": "should-not-load" }
+                    ]
+                }
+            }
+        });
+
+        std::fs::write(
+            &models_path,
+            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+        )
+        .expect("write models.json");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        let error = registry
+            .error()
+            .expect("unknown provider-level profile must be a config error");
+        assert!(error.contains("Unknown toolUseProfile `missing-profile`"));
+        assert!(error.contains("provider `acme-broken-provider`"));
+        assert!(
+            registry
+                .find("acme-broken-provider", "should-not-load")
+                .is_none(),
+            "broken custom provider must not be partially applied as no-profile"
+        );
+    }
+
+    #[test]
+    fn model_registry_unknown_model_tool_use_profile_fails_closed() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+
+        let models_json = serde_json::json!({
+            "toolUseProfiles": {
+                "known-profile": {
+                    "appendSystemPrompt": "known prompt"
+                }
+            },
+            "providers": {
+                "acme-broken-model": {
+                    "baseUrl": "https://acme.example/v1",
+                    "api": "openai-completions",
+                    "toolUseProfile": "known-profile",
+                    "models": [
+                        {
+                            "id": "should-not-load",
+                            "toolUseProfile": "missing-model-profile"
+                        }
+                    ]
+                }
+            }
+        });
+
+        std::fs::write(
+            &models_path,
+            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+        )
+        .expect("write models.json");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        let error = registry
+            .error()
+            .expect("unknown model-level profile must be a config error");
+        assert!(error.contains("Unknown toolUseProfile `missing-model-profile`"));
+        assert!(error.contains("model `should-not-load` under provider `acme-broken-model`"));
+        assert!(
+            registry
+                .find("acme-broken-model", "should-not-load")
+                .is_none(),
+            "broken custom model must not be partially applied as no-profile"
+        );
     }
 
     #[test]
@@ -3421,6 +3822,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     }
@@ -4234,6 +4636,7 @@ mod tests {
         assert!(anthropic_before > 0);
 
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -4271,6 +4674,7 @@ mod tests {
         assert!(google_before > 0);
 
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "gemini".to_string(),
                 ProviderConfig {
@@ -4309,6 +4713,7 @@ mod tests {
         assert!(google_before > 0);
 
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "gemini".to_string(),
                 ProviderConfig {
@@ -4345,6 +4750,7 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "gemini".to_string(),
                 ProviderConfig {
@@ -4676,6 +5082,7 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
+                tool_use_profile: None,
                 oauth_config: None,
             }
         }

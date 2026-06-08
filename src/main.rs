@@ -1412,6 +1412,11 @@ async fn run(
         test_mode,
         !cli.hide_cwd_in_prompt,
     )?;
+    let system_prompt = pi::app::append_tool_use_profile_system_prompt(
+        system_prompt,
+        &selection.model_entry,
+        &enabled_tools,
+    );
     let provider =
         providers::create_provider(&selection.model_entry, None).map_err(anyhow::Error::new)?;
     let stream_options =
@@ -1430,6 +1435,7 @@ async fn run(
         stream_options,
         block_images: config.image_block_images(),
         fail_closed_hooks: config.fail_closed_hooks(),
+        tool_use_profile: selection.model_entry.tool_use_profile.clone(),
         tool_approval: None,
     };
 
@@ -1587,6 +1593,11 @@ async fn run(
                         test_mode,
                         !cli.hide_cwd_in_prompt,
                     )?;
+                    let system_prompt = pi::app::append_tool_use_profile_system_prompt(
+                        system_prompt,
+                        &selection.model_entry,
+                        &enabled_tools,
+                    );
                     agent_session.agent.set_system_prompt(Some(system_prompt));
                 }
             }
@@ -1643,6 +1654,9 @@ async fn run(
         )
         .map_err(anyhow::Error::new)?;
         agent_session.agent.set_provider(provider);
+        agent_session
+            .agent
+            .set_tool_use_profile(selection.model_entry.tool_use_profile.clone());
         {
             let stream_options = agent_session.agent.stream_options_mut();
             stream_options.api_key.clone_from(&resolved_key);
@@ -1699,7 +1713,7 @@ async fn run(
                 thinking_level: sm.thinking_level,
             })
             .collect::<Vec<_>>();
-        run_rpc_mode(
+        Box::pin(run_rpc_mode(
             agent_session,
             resources,
             config.clone(),
@@ -1708,7 +1722,7 @@ async fn run(
             cli.api_key.clone(),
             auth.clone(),
             runtime_handle.clone(),
-        )
+        ))
         .await
     } else if is_interactive {
         let model_scope = selection

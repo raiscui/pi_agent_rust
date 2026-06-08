@@ -40,7 +40,8 @@ use crate::model::{
     UserContent, UserMessage,
 };
 use crate::models::{
-    ModelEntry, ModelRegistry, model_requires_configured_credential, normalize_api_key_opt,
+    ModelEntry, ModelRegistry, ToolUseProfile, model_requires_configured_credential,
+    normalize_api_key_opt,
 };
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::semantic_workspace_graph::{ContextBundleItem, SemanticContextBundle};
@@ -641,6 +642,9 @@ pub struct AgentConfig {
     /// Fail closed when extension tool hooks error or time out.
     pub fail_closed_hooks: bool,
 
+    /// Resolved tool-use profile from `models.json`, if this model configured one.
+    pub tool_use_profile: Option<ToolUseProfile>,
+
     /// Optional approval gate invoked before a tool executes.
     pub tool_approval: Option<ToolApprovalHandler>,
 }
@@ -653,6 +657,10 @@ impl fmt::Debug for AgentConfig {
             .field("stream_options", &self.stream_options)
             .field("block_images", &self.block_images)
             .field("fail_closed_hooks", &self.fail_closed_hooks)
+            .field(
+                "tool_use_profile",
+                &self.tool_use_profile.as_ref().map(|profile| &profile.name),
+            )
             .field("tool_approval", &self.tool_approval.is_some())
             .finish()
     }
@@ -693,9 +701,342 @@ impl Default for AgentConfig {
             stream_options: StreamOptions::default(),
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         }
     }
+}
+
+fn repair_profiled_tool_calls_for_user_text(
+    profile: Option<&ToolUseProfile>,
+    user_text: Option<&str>,
+    tool_calls: &[ToolCall],
+) -> Vec<ToolCall> {
+    let repair_path = profile
+        .and_then(|profile| profile.argument_repair.as_ref())
+        .and_then(|repair| repair.repair_degenerate_path_from_user_text)
+        .unwrap_or(false);
+    let repair_grep_glob = profile
+        .and_then(|profile| profile.argument_repair.as_ref())
+        .and_then(|repair| repair.repair_grep_degenerate_glob)
+        .unwrap_or(false);
+    if !repair_path && !repair_grep_glob {
+        return tool_calls.to_vec();
+    }
+
+    let Some(user_text) = user_text else {
+        return tool_calls.to_vec();
+    };
+    let candidates = extract_explicit_relative_path_candidates(user_text);
+    let [candidate] = candidates.as_slice() else {
+        return tool_calls.to_vec();
+    };
+
+    tool_calls
+        .iter()
+        .map(|tool_call| {
+            repair_profiled_tool_call_arguments(tool_call, candidate, repair_path, repair_grep_glob)
+        })
+        .collect()
+}
+
+fn rewrite_repeated_successful_tool_call(
+    profile: Option<&ToolUseProfile>,
+    history: &[Message],
+    mut message: AssistantMessage,
+) -> AssistantMessage {
+    let Some(post_tool_guard) = profile.and_then(|profile| profile.post_tool_guard.as_ref()) else {
+        return message;
+    };
+    if post_tool_guard.rewrite_repeated_successful_tool_call != Some(true) {
+        return message;
+    }
+    let strip_read_line_prefixes = post_tool_guard.strip_read_line_prefixes.unwrap_or(false);
+
+    let current_tool_call = match message.content.as_slice() {
+        [ContentBlock::ToolCall(tool_call)] => tool_call.clone(),
+        _ => return message,
+    };
+
+    let Some(result) = find_successful_tool_result_for_repeated_call(history, &current_tool_call)
+    else {
+        return message;
+    };
+    let Some(answer_text) = tool_result_text_for_final_answer(
+        &current_tool_call.name,
+        result,
+        strip_read_line_prefixes,
+    ) else {
+        return message;
+    };
+
+    // 弱 OpenAI-compatible 模型有时在工具成功后, 仍重复同名同参调用。
+    // 这里由 profile 显式开启, 不再次执行工具, 只复用上一轮真实 ToolResult。
+    tracing::debug!(
+        tool_name = %current_tool_call.name,
+        tool_arguments = %current_tool_call.arguments,
+        "rewrote repeated profiled tool call into final tool-result text"
+    );
+    message.content = vec![ContentBlock::Text(TextContent::new(answer_text))];
+    message.stop_reason = StopReason::Stop;
+    message.error_message = None;
+    message
+}
+
+fn find_successful_tool_result_for_repeated_call<'a>(
+    history: &'a [Message],
+    current_tool_call: &ToolCall,
+) -> Option<&'a ToolResultMessage> {
+    for (index, message) in history.iter().enumerate().rev() {
+        if matches!(message, Message::User(_)) {
+            break;
+        }
+
+        let Message::Assistant(assistant) = message else {
+            continue;
+        };
+
+        for block in assistant.content.iter().rev() {
+            let ContentBlock::ToolCall(previous_tool_call) = block else {
+                continue;
+            };
+            if !tool_calls_have_same_name_and_arguments(previous_tool_call, current_tool_call) {
+                continue;
+            }
+
+            if let Some(result) =
+                find_successful_tool_result_after_call(&history[index + 1..], previous_tool_call)
+            {
+                return Some(result);
+            }
+        }
+    }
+    None
+}
+
+fn tool_calls_have_same_name_and_arguments(previous: &ToolCall, current: &ToolCall) -> bool {
+    previous.name == current.name && previous.arguments == current.arguments
+}
+
+fn find_successful_tool_result_after_call<'a>(
+    messages: &'a [Message],
+    tool_call: &ToolCall,
+) -> Option<&'a ToolResultMessage> {
+    for message in messages {
+        let Message::ToolResult(result) = message else {
+            continue;
+        };
+
+        if result.tool_call_id == tool_call.id
+            && result.tool_name == tool_call.name
+            && !result.is_error
+        {
+            return Some(result.as_ref());
+        }
+    }
+    None
+}
+
+fn tool_result_text_for_final_answer(
+    tool_name: &str,
+    result: &ToolResultMessage,
+    strip_read_line_prefixes: bool,
+) -> Option<String> {
+    let text = collect_tool_result_text_blocks(result)?;
+    if strip_read_line_prefixes && tool_name == "read" {
+        Some(strip_read_tool_line_prefixes(&text))
+    } else {
+        Some(text)
+    }
+}
+
+fn collect_tool_result_text_blocks(result: &ToolResultMessage) -> Option<String> {
+    let mut text = String::new();
+    let mut saw_text = false;
+
+    for block in &result.content {
+        let ContentBlock::Text(text_content) = block else {
+            continue;
+        };
+
+        if saw_text {
+            text.push('\n');
+        }
+        text.push_str(&text_content.text);
+        saw_text = true;
+    }
+
+    saw_text.then_some(text)
+}
+
+fn strip_read_tool_line_prefixes(text: &str) -> String {
+    let mut stripped_lines = Vec::new();
+    let mut stripped_any = false;
+
+    for line in text.lines() {
+        if let Some(content) = strip_read_tool_line_prefix(line) {
+            stripped_lines.push(content.to_string());
+            stripped_any = true;
+        } else {
+            stripped_lines.push(line.to_string());
+        }
+    }
+
+    if stripped_any {
+        stripped_lines.join("\n")
+    } else {
+        text.to_string()
+    }
+}
+
+fn strip_read_tool_line_prefix(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let (line_number, content) = trimmed.split_once('→')?;
+    (!line_number.is_empty() && line_number.chars().all(|ch| ch.is_ascii_digit()))
+        .then_some(content)
+}
+
+fn repair_profiled_tool_call_arguments(
+    tool_call: &ToolCall,
+    candidate: &str,
+    repair_path: bool,
+    repair_grep_glob: bool,
+) -> ToolCall {
+    let repaired = if repair_path {
+        repair_profiled_tool_call_path(tool_call, candidate)
+    } else {
+        tool_call.clone()
+    };
+    if repair_grep_glob {
+        repair_profiled_grep_file_argument(&repaired, candidate)
+    } else {
+        repaired
+    }
+}
+
+fn repair_profiled_tool_call_path(tool_call: &ToolCall, candidate: &str) -> ToolCall {
+    let Some(path) = tool_call
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return tool_call.clone();
+    };
+
+    if !should_repair_profiled_path(&tool_call.name, path) {
+        return tool_call.clone();
+    }
+
+    let mut repaired = tool_call.clone();
+    if let serde_json::Value::Object(arguments) = &mut repaired.arguments {
+        arguments.insert(
+            "path".to_string(),
+            serde_json::Value::String(candidate.to_string()),
+        );
+    }
+    repaired
+}
+
+fn repair_profiled_grep_file_argument(tool_call: &ToolCall, candidate: &str) -> ToolCall {
+    if tool_call.name != "grep" || !candidate.contains('.') {
+        return tool_call.clone();
+    }
+
+    let Some(arguments) = tool_call.arguments.as_object() else {
+        return tool_call.clone();
+    };
+
+    let has_path = arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|path| !path.trim().is_empty());
+    let has_repairable_glob = arguments
+        .get("glob")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|glob| should_repair_profiled_grep_glob(glob, candidate));
+
+    if has_path || !has_repairable_glob {
+        return tool_call.clone();
+    }
+
+    let mut repaired = tool_call.clone();
+    if let serde_json::Value::Object(arguments) = &mut repaired.arguments {
+        // 部分弱工具调用模型会把用户给出的目标文件放丢,
+        // 同时把 `glob` 漂成 `.` / `.grep_01.txt` / `.git` 一类点前缀字面量。
+        // 在用户文本只有一个明确文件候选时, 将它还原为 grep 的 `path`。
+        arguments.remove("glob");
+        arguments.insert(
+            "path".to_string(),
+            serde_json::Value::String(candidate.to_string()),
+        );
+    }
+    repaired
+}
+
+fn should_repair_profiled_grep_glob(glob: &str, candidate: &str) -> bool {
+    let trimmed = glob.trim();
+    if matches!(trimmed, "." | "./") {
+        return true;
+    }
+
+    let without_current_dir = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    let Some(dot_prefixed_suffix) = without_current_dir.strip_prefix('.') else {
+        return false;
+    };
+
+    // 部分弱兼容模型会把 `matrix_grep_01.txt` 漂移成 `.grep_01.txt` 或 `.git`。
+    // 只有当用户文本里已经收敛出唯一相对文件候选, 且这个 glob 是无通配符点前缀字面量时,
+    // 才把它修回候选文件, 避免把正常的 `*.rs` / `src/**/*.rs` 这类 glob 误改成 path。
+    let has_glob_wildcard = dot_prefixed_suffix
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']'));
+    !dot_prefixed_suffix.is_empty()
+        && !has_glob_wildcard
+        && (candidate.ends_with(dot_prefixed_suffix) || !dot_prefixed_suffix.contains('/'))
+}
+
+fn should_repair_profiled_path(tool_name: &str, path: &str) -> bool {
+    let trimmed = path.trim();
+    trimmed.starts_with('/')
+        || trimmed.contains('"')
+        || (is_file_path_tool(tool_name) && matches!(trimmed, "." | "./"))
+}
+
+fn is_file_path_tool(tool_name: &str) -> bool {
+    ["read", "edit", "write", "hashline_edit"].contains(&tool_name)
+}
+
+fn extract_explicit_relative_path_candidates(text: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut token = String::new();
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
+            token.push(ch);
+        } else {
+            push_relative_path_candidate(&mut candidates, &token);
+            token.clear();
+        }
+    }
+    push_relative_path_candidate(&mut candidates, &token);
+
+    candidates
+}
+
+fn push_relative_path_candidate(candidates: &mut Vec<String>, token: &str) {
+    let token = token.trim_end_matches('.');
+    if token.is_empty()
+        || token.starts_with('/')
+        || token.contains("://")
+        || token == "."
+        || token == ".."
+        || !(token.contains('.') || token.contains('/'))
+        || candidates.iter().any(|candidate| candidate == token)
+    {
+        return;
+    }
+
+    candidates.push(token.to_string());
 }
 
 /// Opt-in semantic context bundle controls for a single agent session.
@@ -1161,6 +1502,29 @@ impl Agent {
         &self.messages
     }
 
+    fn latest_user_text_for_tool_repair(&self) -> Option<String> {
+        self.messages.iter().rev().find_map(|message| {
+            let Message::User(user_message) = message else {
+                return None;
+            };
+
+            match &user_message.content {
+                UserContent::Text(text) => Some(text.clone()),
+                UserContent::Blocks(blocks) => {
+                    let text = blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text(text) => Some(text.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (!text.is_empty()).then_some(text)
+                }
+            }
+        })
+    }
+
     /// Clear the message history.
     pub fn clear_messages(&mut self) {
         self.messages.clear();
@@ -1186,6 +1550,11 @@ impl Agent {
     /// Replace the provider implementation (used for model/provider switching).
     pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {
         self.provider = provider;
+    }
+
+    /// Replace the resolved tool-use profile when switching models.
+    pub fn set_tool_use_profile(&mut self, profile: Option<ToolUseProfile>) {
+        self.config.tool_use_profile = profile;
     }
 
     /// Register async fetchers for queued steering/follow-up messages.
@@ -2628,6 +2997,11 @@ impl Agent {
         on_event: &Arc<dyn Fn(AgentEvent) + Send + Sync>,
         added_partial: bool,
     ) -> AssistantMessage {
+        let message = rewrite_repeated_successful_tool_call(
+            self.config.tool_use_profile.as_ref(),
+            &self.messages,
+            message,
+        );
         let arc = Arc::new(message);
         if added_partial {
             if let Some(target) = self
@@ -2707,9 +3081,14 @@ impl Agent {
     ) -> Result<ToolExecutionOutcome> {
         let mut results = Vec::new();
         let mut steering_messages: Option<Vec<Message>> = None;
+        let tool_calls = repair_profiled_tool_calls_for_user_text(
+            self.config.tool_use_profile.as_ref(),
+            self.latest_user_text_for_tool_repair().as_deref(),
+            tool_calls,
+        );
 
         // Phase 1: Emit start events for ALL tools up front.
-        for tool_call in tool_calls {
+        for tool_call in &tool_calls {
             on_event(AgentEvent::ToolExecutionStart {
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
@@ -10278,6 +10657,7 @@ fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolCall> {
 mod tests {
     use super::*;
     use crate::auth::AuthCredential;
+    use crate::models::{ToolUseArgumentRepairConfig, ToolUsePostToolGuardConfig};
     use crate::provider::{InputType, Model, ModelCost};
     use asupersync::runtime::RuntimeBuilder;
     use async_trait::async_trait;
@@ -10313,6 +10693,408 @@ mod tests {
         {
             assert_eq!(text, expected);
         }
+    }
+
+    fn sample_tool_call(name: &str, path: &str) -> ToolCall {
+        ToolCall {
+            id: "call-1".to_string(),
+            name: name.to_string(),
+            arguments: json!({
+                "path": path,
+                "content": "ok"
+            }),
+            thought_signature: None,
+        }
+    }
+
+    fn sample_grep_tool_call_with_degenerate_glob() -> ToolCall {
+        ToolCall {
+            id: "call-1".to_string(),
+            name: "grep".to_string(),
+            arguments: json!({
+                "pattern": "needle",
+                "glob": ".",
+                "literal": true
+            }),
+            thought_signature: None,
+        }
+    }
+
+    fn sample_assistant_tool_call(tool_call: ToolCall) -> Message {
+        Message::assistant(AssistantMessage {
+            content: vec![ContentBlock::ToolCall(tool_call)],
+            api: "test-api".to_string(),
+            provider: "profiled-provider".to_string(),
+            model: "profiled-model".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        })
+    }
+
+    fn sample_tool_result(
+        tool_call_id: &str,
+        tool_name: &str,
+        text: &str,
+        is_error: bool,
+    ) -> Message {
+        Message::tool_result(ToolResultMessage {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: vec![ContentBlock::Text(TextContent::new(text))],
+            details: None,
+            is_error,
+            timestamp: 0,
+        })
+    }
+
+    fn sample_current_assistant_message(tool_call: ToolCall) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![ContentBlock::ToolCall(tool_call)],
+            api: "test-api".to_string(),
+            provider: "profiled-provider".to_string(),
+            model: "profiled-model".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    fn profile_with_tool_use_hardening() -> ToolUseProfile {
+        ToolUseProfile {
+            name: "test-profile".to_string(),
+            append_system_prompt: None,
+            path_schema: None,
+            argument_repair: Some(ToolUseArgumentRepairConfig {
+                repair_degenerate_path_from_user_text: Some(true),
+                repair_grep_degenerate_glob: Some(true),
+            }),
+            post_tool_guard: Some(ToolUsePostToolGuardConfig {
+                rewrite_repeated_successful_tool_call: Some(true),
+                strip_read_line_prefixes: Some(true),
+            }),
+        }
+    }
+
+    #[test]
+    fn profiled_repair_fixes_degenerate_path_from_unique_user_candidate() {
+        let profile = profile_with_tool_use_hardening();
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            Some(&profile),
+            Some("请在当前目录写一个文件 demo.txt, 内容是 ok。"),
+            &[sample_tool_call("write", ".\"")],
+        );
+
+        assert_eq!(repaired[0].arguments["path"], "demo.txt");
+    }
+
+    #[test]
+    fn profiled_repair_fixes_absolute_path_from_unique_user_candidate() {
+        let profile = profile_with_tool_use_hardening();
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            Some(&profile),
+            Some("请读取 src/main.rs。"),
+            &[sample_tool_call(
+                "read",
+                "/Users/ciluming/.pi/agent/packages/main.rs",
+            )],
+        );
+
+        assert_eq!(repaired[0].arguments["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn profiled_repair_fixes_grep_degenerate_glob_to_unique_file_path() {
+        let profile = profile_with_tool_use_hardening();
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            Some(&profile),
+            Some("请在当前目录的 search.txt 里搜索 needle。"),
+            &[sample_grep_tool_call_with_degenerate_glob()],
+        );
+
+        assert_eq!(repaired[0].arguments["path"], "search.txt");
+        assert!(repaired[0].arguments.get("glob").is_none());
+    }
+
+    #[test]
+    fn profiled_repair_fixes_grep_dot_prefixed_suffix_glob_to_unique_file_path() {
+        let profile = profile_with_tool_use_hardening();
+        let tool_call = ToolCall {
+            id: "call-1".to_string(),
+            name: "grep".to_string(),
+            arguments: json!({
+                "pattern": "needle",
+                "glob": ".grep_01.txt",
+                "literal": true
+            }),
+            thought_signature: None,
+        };
+
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            Some(&profile),
+            Some("请在当前目录的 matrix_grep_01.txt 里搜索 needle。"),
+            &[tool_call],
+        );
+
+        assert_eq!(repaired[0].arguments["path"], "matrix_grep_01.txt");
+        assert!(repaired[0].arguments.get("glob").is_none());
+    }
+
+    #[test]
+    fn profiled_repair_fixes_grep_hidden_literal_glob_to_unique_file_path() {
+        let profile = profile_with_tool_use_hardening();
+        let tool_call = ToolCall {
+            id: "call-1".to_string(),
+            name: "grep".to_string(),
+            arguments: json!({
+                "pattern": "needle",
+                "glob": ".git",
+                "literal": true
+            }),
+            thought_signature: None,
+        };
+
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            Some(&profile),
+            Some("请在当前目录的 matrix_grep_01.txt 里搜索 needle。"),
+            &[tool_call],
+        );
+
+        assert_eq!(repaired[0].arguments["path"], "matrix_grep_01.txt");
+        assert!(repaired[0].arguments.get("glob").is_none());
+    }
+
+    #[test]
+    fn profiled_repair_skips_grep_non_matching_glob() {
+        let profile = profile_with_tool_use_hardening();
+        let tool_call = ToolCall {
+            id: "call-1".to_string(),
+            name: "grep".to_string(),
+            arguments: json!({
+                "pattern": "needle",
+                "glob": "*.rs",
+                "literal": true
+            }),
+            thought_signature: None,
+        };
+
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            Some(&profile),
+            Some("请在当前目录的 matrix_grep_01.txt 里搜索 needle。"),
+            &[tool_call],
+        );
+
+        assert_eq!(repaired[0].arguments["glob"], "*.rs");
+        assert!(repaired[0].arguments.get("path").is_none());
+    }
+
+    #[test]
+    fn profiled_repair_skips_without_profile() {
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            None,
+            Some("请在当前目录写一个文件 demo.txt, 内容是 ok。"),
+            &[sample_tool_call("write", ".\"")],
+        );
+
+        assert_eq!(repaired[0].arguments["path"], ".\"");
+    }
+
+    #[test]
+    fn profiled_repair_skips_ambiguous_user_candidates() {
+        let profile = profile_with_tool_use_hardening();
+        let repaired = repair_profiled_tool_calls_for_user_text(
+            Some(&profile),
+            Some("比较 a.txt 和 b.txt。"),
+            &[sample_tool_call("read", ".\"")],
+        );
+
+        assert_eq!(repaired[0].arguments["path"], ".\"");
+    }
+
+    #[test]
+    fn profiled_repeat_guard_rewrites_successful_read_tool_call_to_final_text() {
+        let profile = profile_with_tool_use_hardening();
+        let previous_call = sample_tool_call("read", "demo.txt");
+        let current_call = ToolCall {
+            id: "call-2".to_string(),
+            name: "read".to_string(),
+            arguments: previous_call.arguments.clone(),
+            thought_signature: None,
+        };
+        let history = vec![
+            sample_assistant_tool_call(previous_call),
+            sample_tool_result(
+                "call-1",
+                "read",
+                "    1→PI_MINICPM5_MATRIX_READ_OK_01",
+                false,
+            ),
+        ];
+
+        let rewritten = rewrite_repeated_successful_tool_call(
+            Some(&profile),
+            &history,
+            sample_current_assistant_message(current_call),
+        );
+
+        assert_eq!(rewritten.stop_reason, StopReason::Stop);
+        assert!(rewritten.error_message.is_none());
+        assert!(extract_tool_calls(&rewritten.content).is_empty());
+        assert!(
+            matches!(
+                rewritten.content.as_slice(),
+                [ContentBlock::Text(TextContent { text, .. })]
+                    if text == "PI_MINICPM5_MATRIX_READ_OK_01"
+            ),
+            "expected final text to come from the read tool result, got {:?}",
+            rewritten.content
+        );
+    }
+
+    #[test]
+    fn profiled_repeat_guard_skips_without_profile() {
+        let previous_call = sample_tool_call("read", "demo.txt");
+        let current_call = ToolCall {
+            id: "call-2".to_string(),
+            name: "read".to_string(),
+            arguments: previous_call.arguments.clone(),
+            thought_signature: None,
+        };
+        let history = vec![
+            sample_assistant_tool_call(previous_call),
+            sample_tool_result("call-1", "read", "    1→OK", false),
+        ];
+
+        let rewritten = rewrite_repeated_successful_tool_call(
+            None,
+            &history,
+            sample_current_assistant_message(current_call),
+        );
+
+        assert_eq!(rewritten.stop_reason, StopReason::ToolUse);
+        assert_eq!(extract_tool_calls(&rewritten.content).len(), 1);
+    }
+
+    #[test]
+    fn profiled_repeat_guard_skips_different_arguments() {
+        let profile = profile_with_tool_use_hardening();
+        let previous_call = sample_tool_call("read", "demo.txt");
+        let current_call = sample_tool_call("read", "other.txt");
+        let history = vec![
+            sample_assistant_tool_call(previous_call),
+            sample_tool_result("call-1", "read", "    1→OK", false),
+        ];
+
+        let rewritten = rewrite_repeated_successful_tool_call(
+            Some(&profile),
+            &history,
+            sample_current_assistant_message(current_call),
+        );
+
+        assert_eq!(rewritten.stop_reason, StopReason::ToolUse);
+        assert_eq!(extract_tool_calls(&rewritten.content).len(), 1);
+    }
+
+    #[test]
+    fn profiled_repeat_guard_skips_failed_tool_result() {
+        let profile = profile_with_tool_use_hardening();
+        let previous_call = sample_tool_call("read", "demo.txt");
+        let current_call = ToolCall {
+            id: "call-2".to_string(),
+            name: "read".to_string(),
+            arguments: previous_call.arguments.clone(),
+            thought_signature: None,
+        };
+        let history = vec![
+            sample_assistant_tool_call(previous_call),
+            sample_tool_result("call-1", "read", "Error: missing file", true),
+        ];
+
+        let rewritten = rewrite_repeated_successful_tool_call(
+            Some(&profile),
+            &history,
+            sample_current_assistant_message(current_call),
+        );
+
+        assert_eq!(rewritten.stop_reason, StopReason::ToolUse);
+        assert_eq!(extract_tool_calls(&rewritten.content).len(), 1);
+    }
+
+    #[test]
+    fn profiled_repeat_guard_keeps_read_line_prefixes_when_not_configured() {
+        let mut profile = profile_with_tool_use_hardening();
+        if let Some(guard) = profile.post_tool_guard.as_mut() {
+            guard.strip_read_line_prefixes = Some(false);
+        }
+        let previous_call = sample_tool_call("read", "demo.txt");
+        let current_call = ToolCall {
+            id: "call-2".to_string(),
+            name: "read".to_string(),
+            arguments: previous_call.arguments.clone(),
+            thought_signature: None,
+        };
+        let history = vec![
+            sample_assistant_tool_call(previous_call),
+            sample_tool_result("call-1", "read", "    1→OK", false),
+        ];
+
+        let rewritten = rewrite_repeated_successful_tool_call(
+            Some(&profile),
+            &history,
+            sample_current_assistant_message(current_call),
+        );
+
+        assert!(
+            matches!(
+                rewritten.content.as_slice(),
+                [ContentBlock::Text(TextContent { text, .. })] if text == "    1→OK"
+            ),
+            "expected raw read result when stripReadLinePrefixes is disabled, got {:?}",
+            rewritten.content
+        );
+    }
+
+    #[test]
+    fn profiled_repeat_guard_reuses_non_read_tool_result_verbatim() {
+        let profile = profile_with_tool_use_hardening();
+        let previous_call = ToolCall {
+            id: "call-1".to_string(),
+            name: "grep".to_string(),
+            arguments: json!({
+                "pattern": "needle",
+                "path": "demo.txt",
+                "literal": true
+            }),
+            thought_signature: None,
+        };
+        let current_call = ToolCall {
+            id: "call-2".to_string(),
+            name: "grep".to_string(),
+            arguments: previous_call.arguments.clone(),
+            thought_signature: None,
+        };
+        let history = vec![
+            sample_assistant_tool_call(previous_call),
+            sample_tool_result("call-1", "grep", "demo.txt:1:needle", false),
+        ];
+
+        let rewritten = rewrite_repeated_successful_tool_call(
+            Some(&profile),
+            &history,
+            sample_current_assistant_message(current_call),
+        );
+
+        assert!(extract_tool_calls(&rewritten.content).is_empty());
+        assert!(
+            matches!(
+                rewritten.content.as_slice(),
+                [ContentBlock::Text(TextContent { text, .. })] if text == "demo.txt:1:needle"
+            ),
+            "expected grep result text to be reused verbatim, got {:?}",
+            rewritten.content
+        );
     }
 
     fn sample_image_block() -> ContentBlock {
@@ -11136,6 +11918,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: true,
                 fail_closed_hooks: false,
+                tool_use_profile: None,
                 tool_approval: None,
             },
         );
@@ -11169,6 +11952,7 @@ mod tests {
                 stream_options: StreamOptions::default(),
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_use_profile: None,
                 tool_approval: None,
             },
         );
@@ -11363,6 +12147,7 @@ mod tests {
                 stream_options,
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_use_profile: None,
                 tool_approval: None,
             },
         );
@@ -11473,6 +12258,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }]);
 
@@ -11520,6 +12306,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }]);
 
@@ -11681,6 +12468,7 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
+                tool_use_profile: None,
                 oauth_config: None,
             }]);
 
@@ -11806,6 +12594,7 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
+                tool_use_profile: None,
                 oauth_config: None,
             }]);
 
@@ -11891,6 +12680,7 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
+                tool_use_profile: None,
                 oauth_config: None,
             }]);
 

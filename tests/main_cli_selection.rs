@@ -72,6 +72,7 @@ fn custom_model_entry(provider: &str, api_key: Option<&str>) -> ModelEntry {
         auth_header: true,
         compat: None,
         oauth_config: None,
+        tool_use_profile: None,
     }
 }
 
