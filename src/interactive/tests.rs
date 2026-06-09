@@ -74,6 +74,7 @@ fn test_model_entry() -> ModelEntry {
         headers: std::collections::HashMap::new(),
         auth_header: false,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     }
 }

@@ -1120,6 +1120,7 @@ mod tests {
             headers,
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     }

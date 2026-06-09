@@ -826,6 +826,7 @@ fn make_model_entry(provider: &str, oauth: Option<OAuthConfig>) -> pi::models::M
         headers: HashMap::new(),
         auth_header: false,
         compat: None,
+        tool_use_profile: None,
         oauth_config: oauth,
     }
 }

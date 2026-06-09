@@ -371,6 +371,7 @@ fn oai_entry(provider: &str, api: &str, base_url: &str) -> pi::models::ModelEntr
         headers: std::collections::HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     }
 }
@@ -429,6 +430,7 @@ fn factory_dispatches_native_established_providers() {
             headers: std::collections::HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     };
@@ -461,6 +463,7 @@ fn factory_dispatches_native_established_providers() {
             headers: std::collections::HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     };
@@ -493,6 +496,7 @@ fn factory_dispatches_native_established_providers() {
             headers: std::collections::HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     };
@@ -525,6 +529,7 @@ fn factory_dispatches_native_established_providers() {
             headers: std::collections::HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     };

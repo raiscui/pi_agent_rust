@@ -58,6 +58,7 @@ fn make_model_entry(provider: &str, api: &str, base_url: &str) -> ModelEntry {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     }
 }
@@ -319,6 +320,7 @@ fn model_entry_clamp_thinking_non_reasoning() {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 
@@ -355,6 +357,7 @@ fn model_entry_clamp_thinking_xhigh_downgrade() {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 
@@ -393,6 +396,7 @@ fn model_entry_clamp_thinking_xhigh_supported() {
         headers: HashMap::new(),
         auth_header: true,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     };
 

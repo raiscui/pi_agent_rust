@@ -81,6 +81,7 @@ fn test_entry(id: &str, reasoning: bool) -> ModelEntry {
         headers: HashMap::new(),
         auth_header: false,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     }
 }

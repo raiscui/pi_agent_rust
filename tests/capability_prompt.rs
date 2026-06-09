@@ -100,6 +100,7 @@ fn dummy_model_entry() -> ModelEntry {
         headers: HashMap::new(),
         auth_header: false,
         compat: None,
+        tool_use_profile: None,
         oauth_config: None,
     }
 }

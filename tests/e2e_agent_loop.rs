@@ -700,6 +700,7 @@ fn run_scenario(
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         };
         let agent = Agent::new(provider, tools, config);
@@ -987,6 +988,7 @@ fn context_intelligence_no_mock_harness() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         },
     );

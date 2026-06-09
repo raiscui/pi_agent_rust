@@ -224,6 +224,7 @@ fn make_agent(provider: Arc<dyn Provider>, cwd: &std::path::Path, max_iters: usi
         },
         block_images: false,
         fail_closed_hooks: false,
+        tool_use_profile: None,
         tool_approval: None,
     };
     Agent::new(provider, tools, config)
@@ -1395,6 +1396,7 @@ fn repeated_interruption_cycles_no_corruption() {
                 },
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_use_profile: None,
                 tool_approval: None,
             };
             let agent = Agent::new(provider, tools, config);
@@ -1518,6 +1520,7 @@ fn session_resume_after_interruption() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         };
         let agent1 = Agent::new(provider1, tools, config.clone());
@@ -1953,6 +1956,7 @@ fn partial_write_tool_failure_recovers_without_state_corruption() {
                 },
                 block_images: false,
                 fail_closed_hooks: false,
+                tool_use_profile: None,
                 tool_approval: None,
             },
         );
