@@ -368,15 +368,12 @@ pub struct Cli {
 
     /// Disable terminal mouse capture in the interactive TUI.
     ///
-    /// Pi normally captures all mouse motion to enable in-app wheel scrolling.
-    /// On Windows / CMD.exe / Windows Terminal that capture blocks the
-    /// terminal-native click-to-select / right-click-paste / Shift-Insert
-    /// behaviour, making it effectively impossible to copy out the OAuth
-    /// authorization URL (which is ~600 characters). Setting this flag (or
-    /// `disable_mouse_capture: true` in settings, or `PI_NO_MOUSE_CAPTURE=1`)
-    /// turns the capture off so terminal-native copy/paste keeps working.
-    /// In-app mouse wheel scrolling is sacrificed; users can still scroll
-    /// with Page Up/Down or arrow keys.
+    /// Pi enables narrow mouse capture by default so the interactive TUI can
+    /// receive wheel events for conversation scrolling. It avoids all-motion
+    /// tracking by default, so ordinary mouse movement is not continuously
+    /// routed into stdin. Setting this flag (or `disable_mouse_capture: true`,
+    /// or `PI_NO_MOUSE_CAPTURE=1`) turns mouse capture off completely. Keyboard
+    /// scrolling with Page Up/Down or arrow keys remains available.
     ///
     /// Note: the env-var path is intentionally read in `run_interactive`
     /// (not via `#[arg(env = "...")]` here) so the truthiness semantics

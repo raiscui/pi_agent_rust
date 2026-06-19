@@ -10775,6 +10775,8 @@ mod tests {
                 rewrite_repeated_successful_tool_call: Some(true),
                 strip_read_line_prefixes: Some(true),
             }),
+            tools: None,
+            skills: None,
         }
     }
 

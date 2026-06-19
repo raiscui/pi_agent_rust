@@ -776,6 +776,7 @@ impl RpcTransportClient {
 
     #[allow(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "SDK RPC transport keeps an async public API"
     )]
     pub async fn request(&mut self, command: &str, payload: Map<String, Value>) -> Result<Value> {
@@ -1043,6 +1044,7 @@ impl RpcTransportClient {
 
     #[allow(
         clippy::unused_async,
+        clippy::unused_async_trait_impl,
         reason = "SDK RPC transport keeps an async public API"
     )]
     pub async fn prompt_with_options(

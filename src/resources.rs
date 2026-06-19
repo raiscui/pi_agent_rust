@@ -7,6 +7,7 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::models::ModelEntry;
 use crate::package_manager::{
     PackageManager, PackageScope, ResolveExtensionSourcesOptions, ResolvedResource, ResourceOrigin,
 };
@@ -542,6 +543,62 @@ impl ResourceLoader {
         }
 
         Ok(())
+    }
+
+    /// 装配 model 启动时需要加载到 system prompt 的 skills。
+    ///
+    /// 同时支持两条路径, 向后兼容:
+    /// 1. 旧约定: `~/.pi/agent/skills/<model_id>/SKILL.md` (隐式目录约定)
+    ///    历史原因: 用户在 2026-06-18 已经用这条路径放 gemma-4-e2b 的 SKILL.md symlink。
+    ///    保留它是为了不破坏当前 work 的隐式绑定。
+    /// 2. 新约定: `ToolUseProfile.skills: ["rdog-control"]` 解析后, 加载
+    ///    `~/.pi/agent/skills/<skill_name>/SKILL.md` (用 skill 名字, 不是 model id)
+    ///    这条路径在 `models.json` 的 `toolUseProfiles` 块里显式声明,
+    ///    不依赖 model id 路径约定。
+    ///
+    /// `ModelEntry` 上不增加 `preload_skill` 字段, 因为 `src/models.rs:251` 注释
+    /// 明确禁止给 `ModelEntry` 再增加并列真相源。 skill 绑定统一在 `ToolUseProfile`
+    /// 体系下管理。
+    pub fn extend_with_model_skills(&mut self, cwd: &Path, model_entry: &ModelEntry) -> Result<()> {
+        let agent_dir = Config::global_dir();
+        self.extend_with_model_skills_from_agent_dir(cwd, model_entry, &agent_dir)
+    }
+
+    fn extend_with_model_skills_from_agent_dir(
+        &mut self,
+        cwd: &Path,
+        model_entry: &ModelEntry,
+        agent_dir: &Path,
+    ) -> Result<()> {
+        let mut paths = ExtensionResourcePaths::default();
+
+        // 旧机制: model_id 路径 (向后兼容, 不破坏)
+        let model_id = &model_entry.model.id;
+        if !model_id.is_empty() {
+            let model_skill_dir = agent_dir.join("skills").join(model_id);
+            if model_skill_dir.exists() {
+                paths.skill_paths.push(model_skill_dir);
+            }
+        }
+
+        // 新机制: toolUseProfile.skills 路径 (用户表达 "model → profile → skill" 绑定)
+        if let Some(profile) = model_entry.tool_use_profile.as_ref() {
+            if let Some(skills) = profile.skills.as_ref() {
+                for skill_name in skills {
+                    // skill_name 已经是验证过的字符串, 不做 normalization,
+                    // 缺哪个就是用户配置错误, 静默跳过 (跟 model_id 路径一样 fail-soft)。
+                    let skill_dir = agent_dir.join("skills").join(skill_name);
+                    if skill_dir.exists() {
+                        paths.skill_paths.push(skill_dir);
+                    }
+                }
+            }
+        }
+
+        if paths.skill_paths.is_empty() {
+            return Ok(());
+        }
+        self.extend_with_paths(cwd, &paths)
     }
 
     pub fn extensions(&self) -> &[PathBuf] {
@@ -2994,6 +3051,97 @@ still frontmatter",
             })
             .collect();
         assert_eq!(names, vec!["a.md", "z.md"]);
+    }
+    #[test]
+    fn test_end_to_end_profile_skills_loads_rdog_control_skill() {
+        // 端到端 smoke: 验证 extend_with_model_skills 真的能根据
+        // ToolUseProfile.skills 加载 <agent_dir>/skills/<name>/SKILL.md。
+        // 测试只读临时目录,避免依赖开发者本机 ~/.pi/agent/models.json。
+        use crate::auth::AuthStorage;
+        use crate::models::ModelRegistry;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_dir = dir.path().join("agent");
+        let skill_dir = agent_dir.join("skills").join("rdog-control");
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: rdog-control\ndescription: rustdog control bridge\n---\n\n# rdog-control\n",
+        )
+        .expect("write skill");
+
+        let models_path = dir.path().join("models.json");
+        fs::write(
+            &models_path,
+            serde_json::json!({
+                "toolUseProfiles": {
+                    "rdog-control-bash": {
+                        "tools": ["bash"],
+                        "skills": ["rdog-control"]
+                    }
+                },
+                "providers": {
+                    "local": {
+                        "baseUrl": "http://127.0.0.1:18081/v1",
+                        "api": "openai-completions",
+                        "apiKey": "local-no-key-needed",
+                        "authHeader": false,
+                        "models": [
+                            {
+                                "id": "local-rdog-model",
+                                "name": "Local RDOG Model",
+                                "toolUseProfile": "rdog-control-bash"
+                            }
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write models json");
+
+        let auth_path = dir.path().join("auth.json");
+        let auth = AuthStorage::load(auth_path).expect("load auth");
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        assert!(
+            registry.error().is_none(),
+            "registry error: {:?}",
+            registry.error()
+        );
+        let entry = registry
+            .find("local", "local-rdog-model")
+            .expect("local rdog model should be registered");
+        let profile = entry
+            .tool_use_profile
+            .as_ref()
+            .expect("tool_use_profile must be resolved");
+        assert_eq!(profile.name, "rdog-control-bash");
+        let skills = profile
+            .skills
+            .as_ref()
+            .expect("profile.skills must be Some(vec)");
+        assert_eq!(skills.as_slice(), &["rdog-control".to_string()][..]);
+
+        // 走 extend_with_model_skills_from_agent_dir 全链路。
+        // 生产路径仍通过 extend_with_model_skills 读取 Config::global_dir(),
+        // 测试路径显式传入 agent_dir,避免环境变量串扰并保持并发测试安全。
+        let cwd = dir.path();
+        let mut loader = ResourceLoader::empty(false);
+        loader
+            .extend_with_model_skills_from_agent_dir(cwd, &entry, &agent_dir)
+            .expect("extend_with_model_skills should succeed");
+        let names: Vec<&str> = loader.skills().iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"rdog-control"),
+            "rdog-control skill should be loaded, got: {:?}",
+            names
+        );
+        let rdog = loader
+            .skills()
+            .iter()
+            .find(|s| s.name == "rdog-control")
+            .unwrap();
+        assert!(rdog.description.contains("rustdog"));
     }
 
     #[test]

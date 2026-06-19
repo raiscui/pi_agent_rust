@@ -113,6 +113,7 @@ pub struct ProviderConfig {
     pub auth_header: Option<bool>,
     pub compat: Option<CompatConfig>,
     pub tool_use_profile: Option<String>,
+    pub generation: Option<GenerationConfig>,
     pub models: Option<Vec<ModelConfig>>,
 }
 
@@ -130,6 +131,25 @@ pub struct ModelConfig {
     pub headers: Option<HashMap<String, String>>,
     pub compat: Option<CompatConfig>,
     pub tool_use_profile: Option<String>,
+    pub generation: Option<GenerationConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationConfig {
+    /// Stop sequences forwarded to compatible text-generation providers.
+    ///
+    /// 这里表达的是采样和终止策略,不是 provider API 形状兼容性。
+    /// 第一阶段只由 OpenAI Chat Completions provider 消费。
+    pub stop: Option<Vec<String>>,
+    /// Sampling temperature forwarded as `temperature` for compatible providers.
+    pub temperature: Option<f32>,
+    /// Nucleus sampling threshold forwarded as `top_p` for compatible providers.
+    pub top_p: Option<f32>,
+    /// Minimum probability threshold forwarded as `min_p` for compatible providers.
+    pub min_p: Option<f32>,
+    /// Repetition penalty forwarded as `repetition_penalty` for compatible providers.
+    pub repetition_penalty: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -145,6 +165,23 @@ pub struct ToolUseProfile {
     pub argument_repair: Option<ToolUseArgumentRepairConfig>,
     /// 工具返回后的重复调用 / 文本收束保护开关。
     pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
+    /// profile 级工具白名单。
+    ///
+    /// `None` 表示不过滤, profile 行为与历史保持一致。
+    /// `Some(vec)` 会同时收窄 Pi 的 ToolRegistry 和 OpenAI schema,
+    /// 让弱 OpenAI-compatible 模型只能看到并调用少数专用工具。
+    /// 例如 rdog-control skill 只暴露 `bash`, 可以减少 schema token,
+    /// 也可以拒绝 schema 外模型幻觉出来的 `write` / `grep` 调用。
+    /// `Some(vec![])` 表示 profile 显式禁用全部工具。
+    /// 它不同于 `supportsTools=false`: 后者表达 provider/model 能力缺失。
+    pub tools: Option<Vec<String>>,
+    /// profile 引用的 skill 名字列表, 用于 system prompt 装配时自动加载对应 skill。
+    ///
+    /// `None` 表示不自动加载额外 skill, 与历史行为一致。
+    /// `Some(vec)` 表示模型启动时把列表内每个 skill 名字对应的
+    /// `~/.pi/agent/skills/<skill_name>/SKILL.md` 注入 system prompt。
+    /// 与 `tools` 字段类似, 这一类 profile-level 行为扩展不增加 ModelEntry 并行真相源。
+    pub skills: Option<Vec<String>>,
 }
 
 impl ToolUseProfile {
@@ -155,6 +192,8 @@ impl ToolUseProfile {
             path_schema: config.path_schema.clone(),
             argument_repair: config.argument_repair.clone(),
             post_tool_guard: config.post_tool_guard.clone(),
+            tools: config.tools.clone(),
+            skills: config.skills.clone(),
         }
     }
 }
@@ -166,6 +205,12 @@ pub struct ToolUseProfileConfig {
     pub path_schema: Option<ToolUsePathSchemaConfig>,
     pub argument_repair: Option<ToolUseArgumentRepairConfig>,
     pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
+    /// 工具白名单 (与 `ToolUseProfile.tools` 同义, 解析时搬迁到结构体字段)。
+    pub tools: Option<Vec<String>>,
+    /// profile 引用的 skill 名字列表 (与 `ToolUseProfile.skills` 同义, 解析时搬迁到结构体字段)。
+    ///
+    /// JSON 字段名 `skills`, 因为 `#[serde(rename_all = "camelCase")]` 不影响单词字段。
+    pub skills: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -211,6 +256,26 @@ pub struct CompatConfig {
     pub system_role_name: Option<String>,
     /// Override the stop-reason field name in responses.
     pub stop_reason_field: Option<String>,
+
+    // ── Resolved generation defaults ────────────────────────────────────
+    /// Stop sequences resolved from `generation.stop` in `models.json`.
+    ///
+    /// 外部配置仍使用 `generation`,这里是 provider factory 之间的内部承载点,
+    /// 避免给 `ModelEntry` 再增加一条并行真相源。
+    #[serde(skip)]
+    pub stop: Option<Vec<String>>,
+    /// Temperature resolved from `generation.temperature`.
+    #[serde(skip)]
+    pub temperature: Option<f32>,
+    /// Top-p resolved from `generation.topP`.
+    #[serde(skip)]
+    pub top_p: Option<f32>,
+    /// Min-p resolved from `generation.minP`.
+    #[serde(skip)]
+    pub min_p: Option<f32>,
+    /// Repetition penalty resolved from `generation.repetitionPenalty`.
+    #[serde(skip)]
+    pub repetition_penalty: Option<f32>,
 
     // ── Per-provider request headers ────────────────────────────────────
     /// Extra HTTP headers injected into every request for this provider.
@@ -1942,7 +2007,14 @@ fn apply_custom_models(
                     entry.api_key.clone_from(&provider_key);
                 }
                 if provider_cfg.compat.is_some() {
-                    entry.compat.clone_from(&provider_cfg.compat);
+                    entry.compat = merge_compat_and_generation(
+                        provider_cfg.compat.as_ref(),
+                        None,
+                        provider_cfg.generation.as_ref(),
+                        None,
+                    );
+                } else if provider_cfg.generation.is_some() {
+                    apply_generation_config(&mut entry.compat, provider_cfg.generation.as_ref());
                 }
                 if provider_cfg.auth_header.is_some() {
                     entry.auth_header = auth_header;
@@ -2052,7 +2124,12 @@ fn apply_custom_models(
                 api_key: provider_key.clone(),
                 headers: model_headers,
                 auth_header,
-                compat: merge_compat(provider_cfg.compat.as_ref(), model_cfg.compat.as_ref()),
+                compat: merge_compat_and_generation(
+                    provider_cfg.compat.as_ref(),
+                    model_cfg.compat.as_ref(),
+                    provider_cfg.generation.as_ref(),
+                    model_cfg.generation.as_ref(),
+                ),
                 tool_use_profile,
                 oauth_config: None,
             });
@@ -2060,11 +2137,13 @@ fn apply_custom_models(
     }
 }
 
-fn merge_compat(
+fn merge_compat_and_generation(
     provider_compat: Option<&CompatConfig>,
     model_compat: Option<&CompatConfig>,
+    provider_generation: Option<&GenerationConfig>,
+    model_generation: Option<&GenerationConfig>,
 ) -> Option<CompatConfig> {
-    match (provider_compat, model_compat) {
+    let mut compat = match (provider_compat, model_compat) {
         (None, None) => None,
         (Some(provider), None) => Some(provider.clone()),
         (None, Some(model)) => Some(model.clone()),
@@ -2109,6 +2188,11 @@ fn merge_compat(
                     .stop_reason_field
                     .clone()
                     .or_else(|| provider.stop_reason_field.clone()),
+                stop: model.stop.clone().or_else(|| provider.stop.clone()),
+                temperature: model.temperature.or(provider.temperature),
+                top_p: model.top_p.or(provider.top_p),
+                min_p: model.min_p.or(provider.min_p),
+                repetition_penalty: model.repetition_penalty.or(provider.repetition_penalty),
                 custom_headers,
                 open_router_routing: model
                     .open_router_routing
@@ -2120,6 +2204,36 @@ fn merge_compat(
                     .or_else(|| provider.vercel_gateway_routing.clone()),
             })
         }
+    };
+
+    apply_generation_config(&mut compat, provider_generation);
+    apply_generation_config(&mut compat, model_generation);
+    compat
+}
+
+fn apply_generation_config(
+    compat: &mut Option<CompatConfig>,
+    generation: Option<&GenerationConfig>,
+) {
+    let Some(generation) = generation else {
+        return;
+    };
+
+    let compat = compat.get_or_insert_with(CompatConfig::default);
+    if generation.stop.is_some() {
+        compat.stop.clone_from(&generation.stop);
+    }
+    if generation.temperature.is_some() {
+        compat.temperature = generation.temperature;
+    }
+    if generation.top_p.is_some() {
+        compat.top_p = generation.top_p;
+    }
+    if generation.min_p.is_some() {
+        compat.min_p = generation.min_p;
+    }
+    if generation.repetition_penalty.is_some() {
+        compat.repetition_penalty = generation.repetition_penalty;
     }
 }
 
@@ -2821,6 +2935,7 @@ mod tests {
                         ..CompatConfig::default()
                     }),
                     tool_use_profile: None,
+                    generation: None,
                     models: None,
                 },
             )]),
@@ -2986,6 +3101,88 @@ mod tests {
         assert_eq!(cohere.model.context_window, 128_000);
         assert_eq!(cohere.model.max_tokens, 8192);
         assert!(!cohere.auth_header);
+    }
+
+    #[test]
+    fn apply_custom_models_merges_provider_and_model_generation_defaults() {
+        let (_dir, auth) = test_auth_storage();
+        let mut models = Vec::new();
+        let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
+            providers: HashMap::from([(
+                "custom-openai".to_string(),
+                ProviderConfig {
+                    api: Some("openai-completions".to_string()),
+                    base_url: Some("https://compat.example/v1".to_string()),
+                    generation: Some(GenerationConfig {
+                        stop: Some(vec!["<|im_end|>".to_string(), "</s>".to_string()]),
+                        temperature: Some(0.7),
+                        top_p: Some(0.9),
+                        min_p: Some(0.05),
+                        repetition_penalty: Some(1.15),
+                    }),
+                    models: Some(vec![
+                        ModelConfig {
+                            id: "inherits-generation".to_string(),
+                            ..ModelConfig::default()
+                        },
+                        ModelConfig {
+                            id: "overrides-generation".to_string(),
+                            generation: Some(GenerationConfig {
+                                stop: Some(vec!["<END>".to_string()]),
+                                temperature: Some(0.2),
+                                top_p: Some(0.8),
+                                min_p: Some(0.01),
+                                repetition_penalty: Some(1.05),
+                            }),
+                            ..ModelConfig::default()
+                        },
+                    ]),
+                    ..ProviderConfig::default()
+                },
+            )]),
+        };
+
+        apply_custom_models(&auth, &mut models, &config, None);
+
+        let inherited = models
+            .iter()
+            .find(|entry| {
+                entry.model.provider == "custom-openai" && entry.model.id == "inherits-generation"
+            })
+            .expect("provider generation defaults should load");
+        let overridden = models
+            .iter()
+            .find(|entry| {
+                entry.model.provider == "custom-openai" && entry.model.id == "overrides-generation"
+            })
+            .expect("model generation override should load");
+
+        let inherited_compat = inherited
+            .compat
+            .as_ref()
+            .expect("generation defaults should create compat carrier");
+        assert_eq!(
+            inherited_compat.stop.as_deref(),
+            Some(&["<|im_end|>".to_string(), "</s>".to_string()][..])
+        );
+        assert_eq!(inherited_compat.temperature, Some(0.7));
+        assert_eq!(inherited_compat.top_p, Some(0.9));
+        assert_eq!(inherited_compat.min_p, Some(0.05));
+        assert_eq!(inherited_compat.repetition_penalty, Some(1.15));
+
+        let overridden_compat = overridden
+            .compat
+            .as_ref()
+            .expect("model generation override should create compat carrier");
+        assert_eq!(
+            overridden_compat.stop.as_deref(),
+            Some(&["<END>".to_string()][..])
+        );
+        assert_eq!(overridden_compat.temperature, Some(0.2));
+        assert_eq!(overridden_compat.top_p, Some(0.8));
+        assert_eq!(overridden_compat.min_p, Some(0.01));
+        assert_eq!(overridden_compat.repetition_penalty, Some(1.05));
     }
 
     #[test]
@@ -3571,6 +3768,58 @@ mod tests {
     }
 
     #[test]
+    fn model_registry_loads_generation_defaults_from_models_json() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+
+        let models_json = serde_json::json!({
+            "providers": {
+                "local-test": {
+                    "baseUrl": "http://127.0.0.1:18081/v1",
+                    "api": "openai-completions",
+                    "models": [
+                        {
+                            "id": "local-model",
+                            "generation": {
+                                "stop": ["<|im_end|>", "</s>"],
+                                "temperature": 0.7,
+                                "topP": 0.9,
+                                "minP": 0.05,
+                                "repetitionPenalty": 1.15
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        std::fs::write(
+            &models_path,
+            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+        )
+        .expect("write models.json");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        assert!(registry.error().is_none(), "{:?}", registry.error());
+        let entry = registry
+            .find("local-test", "local-model")
+            .expect("generation-configured custom model should load");
+        let compat = entry
+            .compat
+            .as_ref()
+            .expect("generation config should resolve into provider request defaults");
+
+        assert_eq!(
+            compat.stop.as_deref(),
+            Some(&["<|im_end|>".to_string(), "</s>".to_string()][..])
+        );
+        assert_eq!(compat.temperature, Some(0.7));
+        assert_eq!(compat.top_p, Some(0.9));
+        assert_eq!(compat.min_p, Some(0.05));
+        assert_eq!(compat.repetition_penalty, Some(1.15));
+    }
+
+    #[test]
     fn model_registry_loads_tool_use_profiles_and_provider_default() {
         let (dir, auth) = test_auth_storage();
         let models_path = dir.path().join("models.json");
@@ -3797,6 +4046,111 @@ mod tests {
                 .is_none(),
             "broken custom model must not be partially applied as no-profile"
         );
+    }
+
+    #[test]
+    fn user_models_json_loads_rdog_control_bash_profile() {
+        // 端到端 smoke: 直接加载用户真实的 ~/.pi/agent/models.json,
+        // 确认 gemma-4-e2b-it-qat-OptiQ-4bit 条目解析出来的
+        // tool_use_profile.tools == ["bash"].
+        let (dir, auth) = test_auth_storage();
+        let user_path = std::path::PathBuf::from("/Users/cuiluming/.pi/agent/models.json");
+        if !user_path.exists() {
+            eprintln!("skip: {} not found", user_path.display());
+            return;
+        }
+        let registry = ModelRegistry::load(&auth, Some(user_path));
+        assert!(
+            registry.error().is_none(),
+            "registry error: {:?}",
+            registry.error()
+        );
+        let entry = registry
+            .find(
+                "local",
+                "/Users/cuiluming/local_doc/l_dev/my/rust/fast-infer/models/gemma-4-e2b-it-qat-OptiQ-4bit",
+            )
+            .expect("gemma-4-e2b-it-qat-OptiQ-4bit should be registered");
+        let profile = entry
+            .tool_use_profile
+            .as_ref()
+            .expect("profile must be resolved");
+        assert_eq!(profile.name, "rdog-control-bash");
+        // 与 ~/.pi/agent/models.json 中 rdog-control-bash profile 现状对齐:
+        // `tools` 包含 bash + read, 之前是 ["bash"] 单元素,
+        // 后续某次改动加上了 read, 但这个测试没同步, 一直 fail.
+        // 这里改成与 models.json 实际值一致, 不再回滚 models.json (read 是用户有意加的).
+        assert_eq!(
+            profile.tools.as_deref(),
+            Some(&["bash".to_string(), "read".to_string()][..])
+        );
+        let prompt = profile
+            .append_system_prompt
+            .as_deref()
+            .expect("append_system_prompt must be set");
+        assert!(prompt.contains("bash"));
+        assert!(prompt.contains("rdog control TARGET"));
+    }
+
+    #[test]
+    fn model_registry_tool_use_profile_tools_field_resolves_into_allowlist() {
+        // rdog-control-bash 这类 profile 的 `tools` 字段必须从 models.json
+        // 顶层 toolUseProfiles 进入 ModelEntry.tool_use_profile.tools,
+        // 且保持原顺序, 供 OpenAI schema 过滤使用.
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+
+        let models_json = serde_json::json!({
+            "toolUseProfiles": {
+                "rdog-control-bash": {
+                    "appendSystemPrompt": "rdog-control bash only",
+                    "tools": ["bash"]
+                }
+            },
+            "providers": {
+                "acme-rdog": {
+                    "baseUrl": "https://acme.example/v1",
+                    "api": "openai-completions",
+                    "apiKey": "sk-test",
+                    "models": [
+                        {
+                            "id": "gemma-rdog",
+                            "toolUseProfile": "rdog-control-bash"
+                        }
+                    ]
+                }
+            }
+        });
+
+        std::fs::write(
+            &models_path,
+            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+        )
+        .expect("write models.json");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        assert!(
+            registry.error().is_none(),
+            "registry should load: {:?}",
+            registry.error()
+        );
+        let entry = registry
+            .find("acme-rdog", "gemma-rdog")
+            .expect("gemma-rdog entry should be registered");
+        let profile = entry
+            .tool_use_profile
+            .as_ref()
+            .expect("tool_use_profile must be resolved");
+        assert_eq!(profile.name, "rdog-control-bash");
+        assert_eq!(
+            profile.append_system_prompt.as_deref(),
+            Some("rdog-control bash only")
+        );
+        let tools = profile
+            .tools
+            .as_ref()
+            .expect("profile.tools must be Some(vec)");
+        assert_eq!(tools, &vec!["bash".to_string()]);
     }
 
     #[test]

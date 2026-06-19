@@ -178,7 +178,7 @@ thiserror = "2"
 # Terminal output (rich_rust for beautiful TUI).
 # rich_rust is shared by non-TUI code paths (plain styled stdout/markdown
 # rendering in src/tui.rs and elsewhere), so it stays unconditional.
-rich_rust = { version = "0.2.0", features = ["markdown"] }
+rich_rust = { version = "=0.2.0", features = ["markdown"] }
 # crossterm is the low-level terminal driver used exclusively by the
 # interactive front-end, so it is gated behind the `tui` feature.
 crossterm = { version = "0.29", optional = true }

@@ -1,0 +1,85 @@
+{
+  "schema": "rdog.screenshot.v1",
+  "screenshot_id": "1781773361385",
+  "layout": "composite",
+  "coordinate_space": "os-logical",
+  "image_coordinate_space": "virtual-logical-pixels",
+  "capture_status": "complete",
+  "partial": false,
+  "backend_policy": "sck-rs-then-xcap",
+  "virtual_bounds": {
+    "x": 0,
+    "y": -124,
+    "width": 3390,
+    "height": 1080
+  },
+  "image_size": {
+    "width": 3390,
+    "height": 1080
+  },
+  "display_count": 2,
+  "transforms": {
+    "image_to_os": "os_x=image_x+virtual_bounds.x; os_y=image_y+virtual_bounds.y",
+    "os_to_image": "image_x=os_x-virtual_bounds.x; image_y=os_y-virtual_bounds.y"
+  },
+  "gaps": [
+    {
+      "x": 0,
+      "y": 0,
+      "width": 1470,
+      "height": 124
+    }
+  ],
+  "displays": [
+    {
+      "id": "1",
+      "name": "Display 1",
+      "is_primary": true,
+      "backend": "sck-rs",
+      "os_rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1470,
+        "height": 956
+      },
+      "image_rect": {
+        "x": 0,
+        "y": 124,
+        "width": 1470,
+        "height": 956
+      },
+      "native_capture_size": {
+        "width": 1470,
+        "height": 956
+      },
+      "scale_factor": 1.0,
+      "resize_applied": false,
+      "rotation": 0.0
+    },
+    {
+      "id": "2",
+      "name": "Display 2",
+      "is_primary": false,
+      "backend": "sck-rs",
+      "os_rect": {
+        "x": 1470,
+        "y": -124,
+        "width": 1920,
+        "height": 1080
+      },
+      "image_rect": {
+        "x": 1470,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "native_capture_size": {
+        "width": 1920,
+        "height": 1080
+      },
+      "scale_factor": 1.0,
+      "resize_applied": false,
+      "rotation": 0.0
+    }
+  ]
+}

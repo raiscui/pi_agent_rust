@@ -963,6 +963,7 @@ pub fn build_stream_options(
 ) -> StreamOptions {
     let mut options = StreamOptions {
         api_key,
+        max_tokens: Some(selection.model_entry.model.max_tokens),
         headers: selection.model_entry.headers.clone(),
         session_id: Some(session.header.id.clone()),
         ..Default::default()
@@ -1289,6 +1290,8 @@ mod tests {
             path_schema: None,
             argument_repair: None,
             post_tool_guard: None,
+            tools: None,
+            skills: None,
         });
         entry
     }
@@ -1579,6 +1582,25 @@ mod tests {
 
         assert_eq!(selection.model_entry.model.provider, "acme");
         assert_eq!(selection.model_entry.model.id, "local-model");
+    }
+
+    #[test]
+    fn build_stream_options_uses_selected_model_max_tokens() {
+        let config = Config::default();
+        let session = Session::in_memory();
+        let mut entry = test_model_entry("local-vlm", "local-diffusiongemma-vlm", false);
+        entry.model.max_tokens = 512;
+        let selection = ModelSelection {
+            model_entry: entry,
+            thinking_level: model::ThinkingLevel::Off,
+            scoped_models: Vec::new(),
+            fallback_message: None,
+        };
+
+        let options =
+            build_stream_options(&config, Some("local-key".to_string()), &selection, &session);
+
+        assert_eq!(options.max_tokens, Some(512));
     }
 
     #[test]

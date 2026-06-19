@@ -185,15 +185,30 @@ impl OpenAIProvider {
         let tools: Option<Vec<OpenAITool<'a>>> = if context.tools.is_empty() || !tools_supported {
             None
         } else {
-            Some(
-                context
-                    .tools
-                    .iter()
-                    .map(|tool| {
-                        convert_tool_to_openai_with_profile(tool, self.tool_use_profile.as_ref())
-                    })
-                    .collect(),
-            )
+            // profile.tools 是 OpenAI schema 层的 allowlist。
+            // ToolRegistry 层已经在调用方被同一份 profile.tools 硬过滤。
+            // 这里保留第二层过滤,保证请求体和客户端可执行工具保持同源一致。
+            // 白名单内但本次未启用的 tool 会被静默忽略, 与 pathSchema 风格一致。
+            let profile_tools = self
+                .tool_use_profile
+                .as_ref()
+                .and_then(|profile| profile.tools.as_ref());
+            let converted: Vec<OpenAITool<'a>> = context
+                .tools
+                .iter()
+                .filter(|tool| {
+                    profile_tools
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.iter().any(|name| name == &tool.name))
+                })
+                .map(|tool| {
+                    convert_tool_to_openai_with_profile(tool, self.tool_use_profile.as_ref())
+                })
+                .collect();
+            // profile 显式声明了空白名单, 等价于关闭 tool 能力.
+            // 这里返回 Some(vec) 而不是 None, 让 OpenAI request 显式表达
+            // "profile 决定禁掉所有 tool", 区别于 tools_supported=false 的能力缺失.
+            Some(converted)
         };
 
         // Determine which max-tokens field to populate based on compat config.
@@ -217,13 +232,24 @@ impl OpenAIProvider {
             .unwrap_or(true);
 
         let stream_options = Some(OpenAIStreamOptions { include_usage });
+        let stop = self.compat.as_ref().and_then(|c| c.stop.as_deref());
+        let temperature = options
+            .temperature
+            .or_else(|| self.compat.as_ref().and_then(|c| c.temperature));
+        let top_p = self.compat.as_ref().and_then(|c| c.top_p);
+        let min_p = self.compat.as_ref().and_then(|c| c.min_p);
+        let repetition_penalty = self.compat.as_ref().and_then(|c| c.repetition_penalty);
 
         OpenAIRequest {
             model: &self.model,
             messages,
             max_tokens,
             max_completion_tokens,
-            temperature: options.temperature,
+            temperature,
+            top_p,
+            min_p,
+            stop,
+            repetition_penalty,
             tools,
             stream: true,
             stream_options,
@@ -880,6 +906,14 @@ pub struct OpenAIRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repetition_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool<'a>>>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1352,6 +1386,8 @@ mod tests {
             }),
             argument_repair: None,
             post_tool_guard: None,
+            tools: None,
+            skills: None,
         }
     }
 
@@ -1465,6 +1501,8 @@ mod tests {
             }),
             argument_repair: None,
             post_tool_guard: None,
+            tools: None,
+            skills: None,
         };
 
         let converted = convert_tool_to_openai_with_profile(&tool, Some(&profile));
@@ -1538,6 +1576,153 @@ mod tests {
                 "required": ["q"]
             })
         );
+    }
+
+    // Helper: 从一组 ToolDef 构造一个最小 Context, 给 profile.tools 过滤测试用.
+    fn profiled_context_with_tools(tools: Vec<ToolDef>) -> Context<'static> {
+        Context {
+            system_prompt: Some("base".to_string().into()),
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: tools.into(),
+        }
+    }
+
+    // Helper: 给 build_request 注入 profile + tools + 解析出 JSON.
+    fn build_request_with_profile(
+        profile: Option<ToolUseProfile>,
+        tools: Vec<ToolDef>,
+    ) -> serde_json::Value {
+        let mut provider = OpenAIProvider::new("gemma-4-e2b-it-qat-OptiQ-4bit");
+        provider.tool_use_profile = profile;
+        let context = profiled_context_with_tools(tools);
+        let options = StreamOptions::default();
+        let request = provider.build_request(&context, &options);
+        serde_json::to_value(&request).expect("serialize request")
+    }
+
+    #[test]
+    fn profile_tools_allowlist_filters_to_named_tools_only() {
+        // rdog-control-bash 这类 profile 的核心约束: 模型只能看到 bash.
+        // 即使 Pi 内部启用了 read/write/grep, schema 也不应把它们暴露给模型.
+        let profile = ToolUseProfile {
+            name: "rdog-control-bash".to_string(),
+            append_system_prompt: None,
+            path_schema: None,
+            argument_repair: None,
+            post_tool_guard: None,
+            tools: Some(vec!["bash".to_string()]),
+            skills: None,
+        };
+        let tools = vec![
+            ToolDef {
+                name: "bash".to_string(),
+                description: "shell".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+            ToolDef {
+                name: "read".to_string(),
+                description: "read file".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+            ToolDef {
+                name: "write".to_string(),
+                description: "write file".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+        ];
+        let value = build_request_with_profile(Some(profile), tools);
+        let names: Vec<&str> = value["tools"]
+            .as_array()
+            .expect("tools should serialize as array")
+            .iter()
+            .map(|t| t["function"]["name"].as_str().expect("tool name"))
+            .collect();
+        assert_eq!(names, vec!["bash"]);
+    }
+
+    #[test]
+    fn profile_tools_allowlist_empty_disables_all_tools() {
+        // 空白名单应该让 model 完全看不到 tool, schema 数组为空.
+        // 这是"profile 显式禁用"语义, 与 tools_supported=false 区分.
+        let profile = ToolUseProfile {
+            name: "no-tools".to_string(),
+            append_system_prompt: None,
+            path_schema: None,
+            argument_repair: None,
+            post_tool_guard: None,
+            tools: Some(vec![]),
+            skills: None,
+        };
+        let tools = vec![ToolDef {
+            name: "bash".to_string(),
+            description: "shell".to_string(),
+            parameters: json!({"type": "object"}),
+        }];
+        let value = build_request_with_profile(Some(profile), tools);
+        let arr = value["tools"]
+            .as_array()
+            .expect("tools should serialize as array");
+        assert!(
+            arr.is_empty(),
+            "empty allowlist should drop every tool, got {arr:?}"
+        );
+    }
+
+    #[test]
+    fn profile_tools_none_keeps_historical_no_filter_behavior() {
+        // 没有 profile.tools 字段时, 维持原行为: 全部 tool 都进入 schema.
+        let tools = vec![
+            ToolDef {
+                name: "bash".to_string(),
+                description: "shell".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+            ToolDef {
+                name: "read".to_string(),
+                description: "read file".to_string(),
+                parameters: json!({"type": "object"}),
+            },
+        ];
+        let value = build_request_with_profile(None, tools);
+        let names: Vec<&str> = value["tools"]
+            .as_array()
+            .expect("tools should serialize as array")
+            .iter()
+            .map(|t| t["function"]["name"].as_str().expect("tool name"))
+            .collect();
+        assert_eq!(names, vec!["bash", "read"]);
+    }
+
+    #[test]
+    fn profile_tools_allowlist_silently_drops_unregistered_names() {
+        // 白名单里写了 Pi 内部没有的工具名, 不能 panic, 也不能污染 schema.
+        // 与 pathSchema 的"未启用的 tool 名被忽略"风格保持一致.
+        let profile = ToolUseProfile {
+            name: "rdog-control-bash".to_string(),
+            append_system_prompt: None,
+            path_schema: None,
+            argument_repair: None,
+            post_tool_guard: None,
+            tools: Some(vec!["bash".to_string(), "rdog-line-control".to_string()]),
+            skills: None,
+        };
+        let tools = vec![ToolDef {
+            name: "bash".to_string(),
+            description: "shell".to_string(),
+            parameters: json!({"type": "object"}),
+        }];
+        let value = build_request_with_profile(Some(profile), tools);
+        let names: Vec<&str> = value["tools"]
+            .as_array()
+            .expect("tools should serialize as array")
+            .iter()
+            .map(|t| t["function"]["name"].as_str().expect("tool name"))
+            .collect();
+        assert_eq!(names, vec!["bash"]);
     }
 
     #[test]
@@ -2339,6 +2524,77 @@ mod tests {
         assert_eq!(
             value["stream_options"]["include_usage"], false,
             "include_usage should be false when supports_usage_in_streaming=false"
+        );
+    }
+
+    #[test]
+    fn compat_generation_defaults_add_sampling_and_stop_controls() {
+        let provider = OpenAIProvider::new("local-model").with_compat(Some(CompatConfig {
+            stop: Some(vec!["<|im_end|>".to_string(), "</s>".to_string()]),
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            min_p: Some(0.05),
+            repetition_penalty: Some(1.15),
+            ..Default::default()
+        }));
+        let context = context_with_tools();
+        let options = default_stream_options();
+        let req = provider.build_request(&context, &options);
+        let value = serde_json::to_value(&req).expect("serialize");
+
+        assert_eq!(
+            value["stop"],
+            serde_json::json!(["<|im_end|>", "</s>"]),
+            "configured stop sequences should be forwarded to OpenAI-compatible backends"
+        );
+        let temperature = value["temperature"]
+            .as_f64()
+            .expect("temperature should serialize as number");
+        assert!(
+            (temperature - 0.7).abs() < 1e-6,
+            "configured temperature should be forwarded"
+        );
+        let top_p = value["top_p"]
+            .as_f64()
+            .expect("top_p should serialize as number");
+        assert!(
+            (top_p - 0.9).abs() < 1e-6,
+            "configured top_p should be forwarded"
+        );
+        let min_p = value["min_p"]
+            .as_f64()
+            .expect("min_p should serialize as number");
+        assert!(
+            (min_p - 0.05).abs() < 1e-6,
+            "configured min_p should be forwarded"
+        );
+        let repetition_penalty = value["repetition_penalty"]
+            .as_f64()
+            .expect("repetition penalty should serialize as number");
+        assert!(
+            (repetition_penalty - 1.15).abs() < 1e-6,
+            "configured repetition penalty should be forwarded"
+        );
+    }
+
+    #[test]
+    fn stream_options_temperature_overrides_generation_default() {
+        let provider = OpenAIProvider::new("local-model").with_compat(Some(CompatConfig {
+            temperature: Some(0.7),
+            ..Default::default()
+        }));
+        let context = context_with_tools();
+        let mut options = default_stream_options();
+        options.temperature = Some(0.2);
+        let req = provider.build_request(&context, &options);
+        let value = serde_json::to_value(&req).expect("serialize");
+        let temperature = value["temperature"]
+            .as_f64()
+            .expect("temperature should serialize as number");
+
+        assert!(
+            (temperature - 0.2).abs() < 1e-6,
+            "per-request temperature should override generation default"
         );
     }
 

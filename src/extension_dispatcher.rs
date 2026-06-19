@@ -2425,8 +2425,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
         }
     }
 
-    #[allow(clippy::future_not_send)]
-    async fn dispatch_hostcall_io_uring(&self, request: &HostcallRequest) -> IoUringBridgeDispatch {
+    fn dispatch_hostcall_io_uring(&self, request: &HostcallRequest) -> IoUringBridgeDispatch {
         if !self.js_runtime().is_hostcall_active(&request.call_id) {
             return IoUringBridgeDispatch {
                 outcome: HostcallOutcome::Error {
@@ -2612,7 +2611,7 @@ impl<C: SchedulerClock + 'static> ExtensionDispatcher<C> {
             let outcome = match lane_decision.lane {
                 HostcallDispatchLane::Fast => self.dispatch_hostcall_fast(&request).await,
                 HostcallDispatchLane::IoUring => {
-                    let bridge_dispatch = self.dispatch_hostcall_io_uring(&request).await;
+                    let bridge_dispatch = self.dispatch_hostcall_io_uring(&request);
                     self.emit_io_uring_bridge_telemetry(
                         &request,
                         bridge_dispatch.state,
@@ -13625,7 +13624,7 @@ mod tests {
                 trace_id: 1,
                 extension_id: Some("ext.cancel".to_string()),
             };
-            let bridge_dispatch = dispatcher.dispatch_hostcall_io_uring(&request).await;
+            let bridge_dispatch = dispatcher.dispatch_hostcall_io_uring(&request);
             assert_eq!(
                 bridge_dispatch.state,
                 IoUringBridgeState::CancelledBeforeDispatch
@@ -13673,7 +13672,7 @@ mod tests {
 
             let dispatcher = build_dispatcher(Rc::clone(&runtime));
             let request = requests.pop_front().expect("request");
-            let bridge_dispatch = dispatcher.dispatch_hostcall_io_uring(&request).await;
+            let bridge_dispatch = dispatcher.dispatch_hostcall_io_uring(&request);
             assert_eq!(
                 bridge_dispatch.state,
                 IoUringBridgeState::ExecutorUnavailable

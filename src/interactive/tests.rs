@@ -129,6 +129,113 @@ fn tempdir() -> tempfile::TempDir {
 }
 
 #[test]
+fn mouse_capture_is_enabled_by_default_for_wheel_support() {
+    let config = Config::default();
+
+    assert!(
+        should_enable_interactive_mouse_capture_with_env(&config, None),
+        "默认应启用精确 mouse capture,否则 TUI 无法收到滚轮事件"
+    );
+}
+
+#[test]
+fn mouse_capture_can_be_disabled_by_explicit_config() {
+    let config = Config {
+        disable_mouse_capture: Some(true),
+        ..Config::default()
+    };
+
+    assert!(
+        !should_enable_interactive_mouse_capture_with_env(&config, None),
+        "显式 disable_mouse_capture=true 应允许用户完全关闭鼠标捕获"
+    );
+}
+
+#[test]
+fn no_mouse_capture_env_overrides_default_mouse_capture() {
+    let config = Config {
+        disable_mouse_capture: Some(false),
+        ..Config::default()
+    };
+
+    assert!(
+        !should_enable_interactive_mouse_capture_with_env(&config, Some("1")),
+        "PI_NO_MOUSE_CAPTURE=1 必须覆盖持久配置里的鼠标捕获 opt-in"
+    );
+    assert!(
+        should_enable_interactive_mouse_capture_with_env(&config, Some("0")),
+        "只有 PI_NO_MOUSE_CAPTURE=1 才应按 truthy 处理"
+    );
+}
+
+#[test]
+fn terminal_mouse_enable_sequences_enable_wheel_without_all_motion() {
+    let mut output = Vec::new();
+
+    write_interactive_terminal_mouse_enable_sequences(&mut output)
+        .expect("write terminal mouse enable sequences");
+
+    let output = String::from_utf8(output).expect("terminal sequences are valid utf8");
+    assert!(
+        output.contains("\x1b[?1000h"),
+        "默认应启用 normal mouse tracking,让滚轮事件进入 TUI"
+    );
+    assert!(
+        output.contains("\x1b[?1006h"),
+        "默认应启用 SGR mouse mode,让 crossterm 按扩展坐标解析滚轮"
+    );
+    assert!(
+        !output.contains("\x1b[?1003h"),
+        "默认绝不能启用 all-motion,否则普通鼠标移动会持续写入 stdin"
+    );
+}
+
+#[test]
+fn terminal_restore_sequences_disable_mouse_capture_when_enabled() {
+    let mut output = Vec::new();
+
+    write_interactive_terminal_restore_sequences(&mut output, true)
+        .expect("write terminal restore sequences");
+
+    let output = String::from_utf8(output).expect("terminal sequences are valid utf8");
+    assert!(
+        output.contains("\x1b[?1006l"),
+        "退出恢复必须关闭 SGR mouse mode,否则 shell 可能显示 35;x;yM"
+    );
+    assert!(
+        output.contains("\x1b[?1003l"),
+        "退出恢复必须关闭 all-motion mouse mode,否则鼠标移动会继续生成输入"
+    );
+    assert!(
+        output.contains("\x1b[?2004l"),
+        "退出恢复应关闭 bracketed paste,把终端状态还给 shell"
+    );
+    assert!(output.contains("\x1b[?25h"), "退出恢复应显示硬件光标");
+    assert!(
+        output.contains("\x1b[?1049l"),
+        "退出恢复应离开 alternate screen"
+    );
+}
+
+#[test]
+fn terminal_restore_sequences_respect_disabled_mouse_capture() {
+    let mut output = Vec::new();
+
+    write_interactive_terminal_restore_sequences(&mut output, false)
+        .expect("write terminal restore sequences");
+
+    let output = String::from_utf8(output).expect("terminal sequences are valid utf8");
+    assert!(
+        !output.contains("\x1b[?1006l"),
+        "未启用 mouse capture 时不需要额外写 mouse disable 序列"
+    );
+    assert!(
+        output.contains("\x1b[?2004l"),
+        "即使禁用 mouse capture,也仍应恢复 paste/cursor/alt-screen 状态"
+    );
+}
+
+#[test]
 fn prepare_startup_changelog_skips_disk_write_when_persistence_disabled() {
     let dir = tempdir();
     let cwd = dir.path().join("workspace");

@@ -61,6 +61,15 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | `crossterm` | Low-level terminal control |
 | `thiserror` | Error type definitions |
 
+### Project Experience Index
+
+| File | Purpose | Read When |
+|------|---------|-----------|
+| `EXPERIENCE.md` | Project-specific lessons learned from verified fixes and workflow incidents. | Before changing terminal/TUI behavior, config defaults, cleanup paths, context-file writing rules, or provider/model profile schemas. |
+| `archive/manifests/ARCHIVE_MANIFEST__2026-06-19__continuous-learning.md` | 2026-06-19 持续学习归档清单 + 六文件摘要 (默认主线 + 6 个支线组)。 | When reviewing the minicpm5_* / rdog-control-bash / git_commit 收尾 trail, or before declaring "this is the first time we saw X". |
+| `archive/branch_contexts/<topic>/` | 未轮转旧支线归档, 包含 `task_plan__<topic>.md` 等。 | When files named `__<topic>` appear in the project but default `task_plan.md` doesn't reference them. |
+| `archive/default_history/` | 默认主线六文件的历史版本 (e.g. `task_plan_2026-06-10_163200.md`)。 | When you need to backtrack default-main history before a specific checkpoint. |
+
 ### Release Profile
 
 The default release build optimizes for shipping size while retaining LTO:

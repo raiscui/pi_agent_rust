@@ -20134,7 +20134,11 @@ mod native_runtime_duplicate_scaffold {
     // The native runtime handle mirrors the async JS runtime handle so
     // `ExtensionRuntimeHandle` can switch implementations without wrapper
     // shims. Several methods complete synchronously in this in-process lane.
-    #[allow(clippy::unused_async)]
+    #[allow(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "Native-rust runtime mirrors the async JS runtime handle; this in-process lane completes several operations synchronously."
+    )]
     impl NativeRustExtensionRuntimeHandle {
         pub async fn start() -> Result<Self> {
             tracing::info!(

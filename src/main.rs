@@ -1064,8 +1064,8 @@ async fn run(
         config.theme = Some(theme_spec.to_string());
     }
     if cli.no_mouse_capture {
-        // CLI flag (and PI_NO_MOUSE_CAPTURE env var, which clap reads via #[arg(env)])
-        // takes precedence over the persisted setting. Workaround for #78.
+        // CLI flag takes precedence over the persisted setting. The env var is
+        // read in `run_interactive` so only `PI_NO_MOUSE_CAPTURE=1` is truthy.
         config.disable_mouse_capture = Some(true);
     }
     // Apply the persisted request-timeout setting at the lowest precedence:
@@ -1392,6 +1392,22 @@ async fn run(
     };
 
     let enabled_tools = cli.enabled_tools();
+    // 硬限制: 如果当前 model entry 的 toolUseProfile 声明了 `tools` allowlist,
+    // 就用它过滤 enabled_tools. profile.tools 决定 ToolRegistry 实际注册的工具,
+    // 与 OpenAI schema 过滤独立. 即使 model 在 schema 之外 emit tool_call,
+    // pi 客户端的 ToolRegistry 也找不到该 tool, 工具调用会被 reject.
+    let enabled_tools: Vec<&str> = match selection
+        .model_entry
+        .tool_use_profile
+        .as_ref()
+        .and_then(|p| p.tools.as_ref())
+    {
+        Some(allowed) => enabled_tools
+            .into_iter()
+            .filter(|name| allowed.iter().any(|a| a == name))
+            .collect(),
+        None => enabled_tools,
+    };
     let skills_prompt = if enabled_tools.contains(&"read") {
         resources.format_skills_for_prompt()
     } else {
@@ -1613,6 +1629,42 @@ async fn run(
             flags = %rendered,
             "Extension flags provided but no extensions are loaded; ignoring."
         );
+    }
+
+    if !cli.no_skills {
+        if let Err(err) = resources.extend_with_model_skills(&cwd, &selection.model_entry) {
+            tracing::warn!(
+                event = "pi.resources.model_skills_failed",
+                error = %err,
+                "Failed to load model-specific skills"
+            );
+        } else {
+            let skills_prompt = if enabled_tools.contains(&"read") {
+                resources.format_skills_for_prompt()
+            } else {
+                String::new()
+            };
+            let system_prompt = pi::app::build_system_prompt(
+                &cli,
+                &cwd,
+                &enabled_tools,
+                if skills_prompt.is_empty() {
+                    None
+                } else {
+                    Some(skills_prompt.as_str())
+                },
+                &global_dir,
+                &package_dir,
+                test_mode,
+                !cli.hide_cwd_in_prompt,
+            )?;
+            let system_prompt = pi::app::append_tool_use_profile_system_prompt(
+                system_prompt,
+                &selection.model_entry,
+                &enabled_tools,
+            );
+            agent_session.agent.set_system_prompt(Some(system_prompt));
+        }
     }
 
     if has_extensions {

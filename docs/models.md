@@ -84,6 +84,7 @@ Supported first-pass fields:
 | `argumentRepair.repairGrepDegenerateGlob` | Repair `grep` when `glob` degenerates to the current directory or a non-wildcard dot-prefixed literal, and one explicit file is present |
 | `postToolGuard.rewriteRepeatedSuccessfulToolCall` | Convert repeated same-name/same-argument successful tool calls into the prior tool result |
 | `postToolGuard.stripReadLinePrefixes` | Strip `read` line metadata like `1→TEXT` when reusing a prior read result |
+| `tools` | Optional allowlist of tool names exposed to the model in the OpenAI schema. `null`/missing keeps the historical no-filter behavior. `[]` disables every tool (profile 显式禁 tool). A non-empty list exposes only the named tools; names not present in the current tool registry are silently ignored. |
 
 ### Compatibility Flags (`compat`)
 
@@ -220,6 +221,62 @@ model references the same name.
   }
 }
 ```
+
+### 5. rdog-control-bash profile (bash-only local model)
+
+Use this profile when a local OpenAI-compatible model is wired to the
+`rdog-control` skill and you want to expose only the `bash` tool — the
+single entry point that `rdog-control` needs to drive LAN hosts,
+hardware bridges, and microcontrollers. The `tools` allowlist removes
+every other tool from the OpenAI schema, so the model cannot drift into
+`read` / `write` / `grep` calls and the prompt stays focused on
+`rdog control TARGET` line-control commands.
+
+```json
+{
+  "toolUseProfiles": {
+    "rdog-control-bash": {
+      "appendSystemPrompt": "- You have exactly one tool: bash.\n- Use bash to invoke `rdog control TARGET` for remote control of LAN hosts, hardware bridges, and microcontrollers.\n- One line-control command per bash call: @ping, @capabilities, @bootstrap, @observe, @cmd, @key, @paste, @ax-action, @web-find, @web-act, @savefile, ...\n- For a real terminal session use `rdog control TARGET --pty -- COMMAND`.\n- Do not repeat a successful bash call. Parse the @response/@savefile/@pty-* frame, then answer briefly in plain text.",
+      "tools": ["bash"]
+    }
+  },
+  "providers": {
+    "local": {
+      "baseUrl": "http://127.0.0.1:18081/v1",
+      "api": "openai-completions",
+      "apiKey": "local-no-key-needed",
+      "authHeader": false,
+      "compat": {
+        "supportsTools": true,
+        "supportsUsageInStreaming": false
+      },
+      "models": [
+        {
+          "id": "/Users/cuiluming/local_doc/l_dev/my/rust/fast-infer/models/gemma-4-e2b-it-qat-OptiQ-4bit",
+          "name": "Local Gemma 4 E2B IT OptiQ 4bit",
+          "contextWindow": 128000,
+          "maxTokens": 4096,
+          "input": ["text"],
+          "reasoning": false,
+          "toolUseProfile": "rdog-control-bash"
+        }
+      ]
+    }
+  }
+}
+```
+
+Notes:
+
+- The `tools` allowlist is enforced in two places from the same
+  profile source: Pi first filters the ToolRegistry before tool
+  execution, then `OpenAIProvider::build_request` filters the OpenAI
+  request `tools` array. This keeps the model-visible schema and the
+  client-executable tool set aligned.
+- `tools: []` is a valid (and explicit) way to disable every tool via
+  the profile. It is intentionally distinct from
+  `compat.supportsTools: false`, which signals the upstream model
+  itself does not support tool calling.
 
 ## Secret Resolution
 

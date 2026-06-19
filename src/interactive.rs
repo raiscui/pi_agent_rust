@@ -25,7 +25,7 @@ use bubbletea::{
     WindowSizeMsg, batch, quit, sequence,
 };
 use chrono::Utc;
-use crossterm::{cursor, terminal};
+use crossterm::{cursor, event, terminal};
 use futures::future::BoxFuture;
 use glamour::StyleConfig as GlamourStyleConfig;
 use glob::Pattern;
@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::agent::{AbortHandle, Agent, AgentEvent, QueueMode};
 use crate::autocomplete::{AutocompleteCatalog, AutocompleteItem, AutocompleteItemKind};
@@ -1641,6 +1642,35 @@ const fn bool_label(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
+fn should_enable_interactive_mouse_capture(config: &Config) -> bool {
+    should_enable_interactive_mouse_capture_with_env(
+        config,
+        std::env::var("PI_NO_MOUSE_CAPTURE").ok().as_deref(),
+    )
+}
+
+fn should_enable_interactive_mouse_capture_with_env(
+    config: &Config,
+    no_mouse_capture_env: Option<&str>,
+) -> bool {
+    // 默认启用“精确鼠标捕获”。Pi 需要滚轮来滚动会话视图,但是不能
+    // 重新启用 crossterm::EnableMouseCapture 的 all-motion 默认组合,
+    // 因为 `?1003h` 会把普通鼠标移动也转成 SGR mouse report。
+    //
+    // 配置语义保持单一真相源: `disable_mouse_capture` 只表达是否禁用
+    // Pi 自己的鼠标捕获;环境变量 `PI_NO_MOUSE_CAPTURE=1` 始终最高优先级。
+    no_mouse_capture_env != Some("1") && config.disable_mouse_capture != Some(true)
+}
+
+fn apply_interactive_cursor_visibility(show_hardware_cursor: bool) {
+    let mut stdout = std::io::stdout();
+    if show_hardware_cursor {
+        let _ = crossterm::execute!(stdout, cursor::Show);
+    } else {
+        let _ = crossterm::execute!(stdout, cursor::Hide);
+    }
+}
+
 /// Run the interactive mode.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_interactive(
@@ -1664,23 +1694,8 @@ pub async fn run_interactive(
             .ok()
             .is_some_and(|val| val == "1")
     });
-    // Mouse capture defaults ON (preserves existing in-app wheel-scroll
-    // behaviour). Users on Windows/CMD/Windows Terminal can opt out via
-    // `--no-mouse-capture`, `disable_mouse_capture: true` in settings, or
-    // `PI_NO_MOUSE_CAPTURE=1` env var to restore terminal-native click-to-
-    // select / right-click-paste / Shift-Insert. See pi_agent_rust#78 for
-    // the OAuth-flow copy-out problem this solves.
-    let disable_mouse_capture = config.disable_mouse_capture.unwrap_or_else(|| {
-        std::env::var("PI_NO_MOUSE_CAPTURE")
-            .ok()
-            .is_some_and(|val| val == "1")
-    });
-    let mut stdout = std::io::stdout();
-    if show_hardware_cursor {
-        let _ = crossterm::execute!(stdout, cursor::Show);
-    } else {
-        let _ = crossterm::execute!(stdout, cursor::Hide);
-    }
+    let mouse_capture_enabled = should_enable_interactive_mouse_capture(&config);
+    apply_interactive_cursor_visibility(show_hardware_cursor);
 
     let (event_tx, mut event_rx) = mpsc::channel::<PiMsg>(1024);
     let shutdown_event_tx = event_tx.clone();
@@ -1735,12 +1750,12 @@ pub async fn run_interactive(
         conversation_from_session(&guard)
     };
 
-    // Build the bubbletea program. Mouse capture is conditional: ON by
-    // default (so in-app mouse-wheel scrolling routes to the TUI), but
-    // disabled when the user opts out via --no-mouse-capture / settings /
-    // PI_NO_MOUSE_CAPTURE so terminal-native copy/paste keeps working
-    // (Windows-specific UX win — see pi_agent_rust#78). When disabled,
-    // users scroll with Page Up/Down or arrow keys instead.
+    // Build the bubbletea program. Mouse capture is enabled by Pi itself rather
+    // than via `Program::with_mouse_*`, because the current charmed-bubbletea
+    // path delegates both cell-motion and all-motion to crossterm's
+    // `EnableMouseCapture`. That command enables `?1003h` all-motion, which is
+    // exactly the mode that can leak ordinary mouse-move reports into the shell
+    // around shutdown. Pi only needs button/wheel SGR reports by default.
     {
         let app = Box::new(PiApp::new(
             agent,
@@ -1762,13 +1777,13 @@ pub async fn run_interactive(
             messages,
             usage,
         ));
-        let mut program = Program::new(app)
+        let program = Program::new(app)
             .with_alt_screen()
             .with_input_receiver(ui_rx);
-        if !disable_mouse_capture {
-            program = program.with_mouse_all_motion();
-        }
-        program.run()?;
+        let _mouse_capture_guard = InteractiveMouseCaptureGuard::install(mouse_capture_enabled);
+        let run_result = program.run();
+        restore_interactive_terminal_after_program(mouse_capture_enabled);
+        run_result?;
     }
 
     // Tell the async bridge to exit promptly even if some background task still
@@ -1781,6 +1796,154 @@ pub async fn run_interactive(
     let _ = crossterm::execute!(std::io::stdout(), cursor::Show);
     println!("Goodbye!");
     Ok(())
+}
+
+const TERMINAL_EVENT_DRAIN_LIMIT: usize = 512;
+const TERMINAL_EVENT_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const TERMINAL_EVENT_DRAIN_QUIET_WINDOW: Duration = Duration::from_millis(35);
+const TERMINAL_EVENT_DRAIN_TOTAL_BUDGET: Duration = Duration::from_millis(150);
+
+/// 写入 Pi 自己管理的精确鼠标启用序列。
+///
+/// 这里只开启 normal mouse tracking 和 SGR 坐标格式:
+/// - `?1000h`: 按钮、释放与滚轮事件;
+/// - `?1006h`: 使用 SGR 扩展坐标,避免旧坐标编码限制。
+///
+/// 注意不要开启 `?1003h` all-motion。普通鼠标移动不应该持续进入 stdin,
+/// 否则退出边界只要有延迟字节, shell 就可能显示 `35;x;yM` 之类噪音。
+fn write_interactive_terminal_mouse_enable_sequences<W: std::io::Write>(
+    writer: &mut W,
+) -> std::io::Result<()> {
+    writer.write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    writer.flush()
+}
+
+/// Pi 自己启用鼠标模式后的兜底守卫。
+///
+/// 正常退出时 `restore_interactive_terminal_after_program` 会做完整恢复和
+/// quiet-window drain。这个 guard 负责异常路径上的最小关闭动作,避免 panic
+/// 时因为 bubbletea 不知道 Pi 自己写过 mouse enable 序列而漏掉关闭。
+struct InteractiveMouseCaptureGuard {
+    enabled: bool,
+}
+
+impl InteractiveMouseCaptureGuard {
+    fn install(enabled: bool) -> Self {
+        if !enabled {
+            return Self { enabled: false };
+        }
+
+        let mut stdout = std::io::stdout();
+        match write_interactive_terminal_mouse_enable_sequences(&mut stdout) {
+            Ok(()) => Self { enabled: true },
+            Err(err) => {
+                tracing::debug!("failed to enable interactive terminal mouse reporting: {err}");
+                Self { enabled: false }
+            }
+        }
+    }
+}
+
+impl Drop for InteractiveMouseCaptureGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
+        }
+    }
+}
+
+/// 在 Bubble Tea 程序退出后,再次把终端恢复到 shell 可接管的状态。
+///
+/// `charmed-bubbletea` 自身已经会做 cleanup。这里仍然保留一层 Pi 侧兜底,
+/// 因为鼠标报告是终端级别状态。退出瞬间如果 stdin 中已经积压了鼠标事件,
+/// shell 接管后就可能把尾部 `35;x;yM` 当普通文本显示出来。
+fn restore_interactive_terminal_after_program(mouse_capture_enabled: bool) {
+    // 底层 Program 返回时通常已经关闭 raw mode。这里先重新开启 raw mode,
+    // 再写恢复序列和排空输入。这样能尽量缩短 cooked/echo 窗口,避免延迟
+    // mouse report 被 shell 直接回显。
+    let raw_mode_enabled_for_drain = terminal::enable_raw_mode().is_ok();
+    let mut stdout = std::io::stdout();
+    if let Err(err) =
+        write_interactive_terminal_restore_sequences(&mut stdout, mouse_capture_enabled)
+    {
+        tracing::debug!("failed to write interactive terminal restore sequences: {err}");
+    }
+    let drained = if raw_mode_enabled_for_drain {
+        drain_pending_terminal_events(TERMINAL_EVENT_DRAIN_LIMIT)
+    } else {
+        0
+    };
+    if let Err(err) = terminal::disable_raw_mode() {
+        tracing::debug!("failed to disable raw mode after TUI shutdown: {err}");
+    }
+    if drained > 0 {
+        tracing::debug!("drained {drained} pending terminal event(s) after TUI shutdown");
+    }
+}
+
+/// 写入幂等的终端恢复序列。
+///
+/// 这些序列即使底层 TUI 库已经写过一次也应该安全。Pi 默认自己管理鼠标
+/// 启用序列,所以退出时也必须由 Pi 兜底关闭 mouse mode。
+/// 把它拆成可注入 writer 的小函数,是为了让回归测试能验证退出路径确实
+/// 包含 mouse capture 的关闭序列。
+fn write_interactive_terminal_restore_sequences<W: std::io::Write>(
+    writer: &mut W,
+    mouse_capture_enabled: bool,
+) -> std::io::Result<()> {
+    crossterm::execute!(
+        writer,
+        event::DisableBracketedPaste,
+        event::DisableFocusChange
+    )?;
+    if mouse_capture_enabled {
+        crossterm::execute!(writer, event::DisableMouseCapture)?;
+    }
+    crossterm::execute!(writer, cursor::Show, terminal::LeaveAlternateScreen)?;
+    writer.flush()
+}
+
+/// 尽量排空 TUI 退出时已经积压或稍后到达的终端事件。
+///
+/// 退出时 mouse disable 写到终端后,仍可能有少量鼠标报告延迟到达。这里使用
+/// quiet-window 语义: 只要短时间内还有事件,就继续消费;连续一小段时间没有事件
+/// 才把控制权还给 shell。总预算和最大事件数用于防止异常输入流拖住退出。
+fn drain_pending_terminal_events(limit: usize) -> usize {
+    let start = std::time::Instant::now();
+    let mut last_event_or_start = start;
+    let mut drained = 0;
+    for _ in 0..limit {
+        if start.elapsed() >= TERMINAL_EVENT_DRAIN_TOTAL_BUDGET {
+            break;
+        }
+        let remaining_total = TERMINAL_EVENT_DRAIN_TOTAL_BUDGET.saturating_sub(start.elapsed());
+        let remaining_quiet =
+            TERMINAL_EVENT_DRAIN_QUIET_WINDOW.saturating_sub(last_event_or_start.elapsed());
+        if remaining_quiet.is_zero() {
+            break;
+        }
+        let poll_timeout = TERMINAL_EVENT_DRAIN_POLL_INTERVAL
+            .min(remaining_quiet)
+            .min(remaining_total);
+        match event::poll(poll_timeout) {
+            Ok(true) => match event::read() {
+                Ok(_) => {
+                    drained += 1;
+                    last_event_or_start = std::time::Instant::now();
+                }
+                Err(err) => {
+                    tracing::debug!("failed to drain pending terminal event: {err}");
+                    break;
+                }
+            },
+            Ok(false) => {}
+            Err(err) => {
+                tracing::debug!("failed to poll pending terminal events: {err}");
+                break;
+            }
+        }
+    }
+    drained
 }
 
 pub(crate) async fn enqueue_pi_event(event_tx: &mpsc::Sender<PiMsg>, cx: &Cx, msg: PiMsg) -> bool {
