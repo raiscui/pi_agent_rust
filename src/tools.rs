@@ -2078,8 +2078,15 @@ fn enforce_cwd_scope(path: &Path, cwd: &Path, action: &str) -> Result<PathBuf> {
 /// Symlink escapes remain blocked because `safe_canonicalize` resolves
 /// symlinks before the prefix check, so e.g. `~/.pi/agent/skills/foo/SKILL.md`
 /// pointing at `/etc/passwd` resolves to `/etc/passwd` and fails the prefix
-/// test against both cwd and agent dir.
-fn enforce_read_scope_with_roots(path: &Path, cwd: &Path, agent_dir: &Path) -> Result<PathBuf> {
+/// test against both cwd and agent dir. `extra_roots` adds further trusted
+/// canonical roots (e.g. a project's repo dir that the agent's skill
+/// symlinks into `~/.pi/agent/skills/`).
+fn enforce_read_scope_with_roots(
+    path: &Path,
+    cwd: &Path,
+    agent_dir: &Path,
+    extra_roots: &[PathBuf],
+) -> Result<PathBuf> {
     let canonical_path = crate::extensions::safe_canonicalize(path);
     let canonical_cwd = crate::extensions::safe_canonicalize(cwd);
     if canonical_path.starts_with(&canonical_cwd) {
@@ -2091,8 +2098,15 @@ fn enforce_read_scope_with_roots(path: &Path, cwd: &Path, agent_dir: &Path) -> R
         return Ok(canonical_path);
     }
 
+    for extra_root in extra_roots {
+        let canonical_extra = crate::extensions::safe_canonicalize(extra_root);
+        if canonical_path.starts_with(&canonical_extra) {
+            return Ok(canonical_path);
+        }
+    }
+
     Err(Error::validation(format!(
-        "Cannot read outside the working directory or agent dir \
+        "Cannot read outside the working directory, agent dir, or read scope allowlist \
          (resolved: {}, cwd: {}, agent dir: {})",
         canonical_path.display(),
         canonical_cwd.display(),
@@ -2100,10 +2114,43 @@ fn enforce_read_scope_with_roots(path: &Path, cwd: &Path, agent_dir: &Path) -> R
     )))
 }
 
-/// Convenience wrapper that pulls the agent dir from the active config.
+/// Convenience wrapper that pulls the agent dir from the active config
+/// and merges in any user-configured read scope allowlist.
 fn enforce_read_scope(path: &Path, cwd: &Path) -> Result<PathBuf> {
     let agent_dir = crate::config::Config::global_dir();
-    enforce_read_scope_with_roots(path, cwd, &agent_dir)
+    let extra_roots = load_read_scope_allowlist();
+    enforce_read_scope_with_roots(path, cwd, &agent_dir, &extra_roots)
+}
+
+/// Load the user-configured read scope allowlist.
+///
+/// Priority (highest first):
+///  1. `PI_READ_SCOPE_ALLOWLIST` env var (colon-separated paths)
+///  2. `readScopeAllowlist` field in `Config` (loaded from `settings.json`)
+///
+/// Failures (settings.json missing or unreadable, individual entry not a
+/// string) silently degrade to an empty list so the read tool keeps its
+/// baseline cwd+agent_dir behavior.
+fn load_read_scope_allowlist() -> Vec<PathBuf> {
+    if let Ok(raw) = std::env::var("PI_READ_SCOPE_ALLOWLIST") {
+        if !raw.trim().is_empty() {
+            return raw
+                .split(':')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect();
+        }
+    }
+    match crate::config::Config::load() {
+        Ok(config) => config
+            .read_scope_allowlist
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 // ============================================================================
@@ -8893,7 +8940,7 @@ mod tests {
         std::fs::write(&skill_path, "---\nname: test\n---\n# body\n").unwrap();
 
         let resolved =
-            enforce_read_scope_with_roots(&skill_path, cwd.path(), agent_dir.path()).unwrap();
+            enforce_read_scope_with_roots(&skill_path, cwd.path(), agent_dir.path(), &[]).unwrap();
         assert!(
             resolved.starts_with(
                 agent_dir
@@ -8915,7 +8962,7 @@ mod tests {
         let secret_path = unrelated.path().join("secret.txt");
 
         let err =
-            enforce_read_scope_with_roots(&secret_path, cwd.path(), agent_dir.path()).unwrap_err();
+            enforce_read_scope_with_roots(&secret_path, cwd.path(), agent_dir.path(), &[]).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("outside the working directory") && msg.contains("agent dir"),
@@ -8932,7 +8979,7 @@ mod tests {
         std::fs::write(cwd.path().join("a.txt"), "in cwd").unwrap();
 
         let resolved =
-            enforce_read_scope_with_roots(&cwd.path().join("a.txt"), cwd.path(), agent_dir.path())
+            enforce_read_scope_with_roots(&cwd.path().join("a.txt"), cwd.path(), agent_dir.path(), &[])
                 .unwrap();
         assert!(
             resolved.starts_with(
@@ -8940,6 +8987,117 @@ mod tests {
                     .canonicalize()
                     .unwrap_or_else(|_| cwd.path().to_path_buf())
             )
+        );
+    }
+
+    /// Extra roots must allow reads outside both cwd and agent dir.
+    /// This is the primary use case for skill symlinks: `~/.pi/agent/skills/rdog-control/SKILL.md`
+    /// symlinks to a path under `/Users/.../rustdog/.codex/...`; the rustdog
+    /// repo root must be in the allowlist for the read to succeed.
+    #[test]
+    fn test_enforce_read_scope_allows_extra_root() {
+        let cwd = tempfile::tempdir().unwrap();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let extra_root = tempfile::tempdir().unwrap();
+        let nested = extra_root.path().join("nested").join("deep").join("file.md");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "body").unwrap();
+
+        // Path lives under extra_root but is outside both cwd and agent_dir.
+        assert!(
+            !nested.starts_with(cwd.path()),
+            "sanity: nested must not be under cwd"
+        );
+        assert!(
+            !nested.starts_with(agent_dir.path()),
+            "sanity: nested must not be under agent_dir"
+        );
+
+        let resolved =
+            enforce_read_scope_with_roots(&nested, cwd.path(), agent_dir.path(), &[extra_root.path().to_path_buf()])
+                .unwrap();
+        assert!(
+            resolved.starts_with(
+                extra_root
+                    .path()
+                    .canonicalize()
+                    .unwrap_or_else(|_| extra_root.path().to_path_buf())
+            ),
+            "extra-root path must be allowed and returned canonicalised, got: {}",
+            resolved.display()
+        );
+    }
+
+    /// Multiple extra roots: any one matching is sufficient.
+    #[test]
+    fn test_enforce_read_scope_extra_root_among_many() {
+        let cwd = tempfile::tempdir().unwrap();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let extra_a = tempfile::tempdir().unwrap();
+        let extra_b = tempfile::tempdir().unwrap();
+        let nested = extra_b.path().join("file.md");
+        std::fs::write(&nested, "body").unwrap();
+
+        let resolved = enforce_read_scope_with_roots(
+            &nested,
+            cwd.path(),
+            agent_dir.path(),
+            &[extra_a.path().to_path_buf(), extra_b.path().to_path_buf()],
+        )
+        .unwrap();
+        assert!(resolved.starts_with(extra_b.path().canonicalize().unwrap()));
+    }
+
+    /// Symlink under agent_dir that resolves to a path under extra_root must be allowed.
+    /// This is the precise scenario the user reported: skill file at
+    /// `~/.pi/agent/skills/rdog-control/SKILL.md` symlinks to
+    /// `/Users/.../rustdog/.codex/skills/rdog-control/SKILL.md`.
+    #[test]
+    fn test_enforce_read_scope_allows_symlink_via_extra_root() {
+        let cwd = tempfile::tempdir().unwrap();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let extra_root = tempfile::tempdir().unwrap();
+        let target = extra_root.path().join("skills").join("rdog-control").join("SKILL.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "real content").unwrap();
+
+        let link_in_agent = agent_dir.path().join("skills").join("rdog-control").join("SKILL.md");
+        std::fs::create_dir_all(link_in_agent.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link_in_agent).unwrap();
+
+        // Read the symlink itself: it lives under agent_dir so even the existing
+        // agent_dir root accepts it. The interesting case is: canonicalize the
+        // target first, then enforce with a non-empty extra_root.
+        let canonical_target = std::fs::canonicalize(&link_in_agent).unwrap();
+        let resolved = enforce_read_scope_with_roots(
+            &link_in_agent,
+            cwd.path(),
+            agent_dir.path(),
+            &[extra_root.path().to_path_buf()],
+        )
+        .unwrap();
+        assert_eq!(resolved, canonical_target);
+    }
+
+    /// An empty extra_roots list must not change the existing failure mode.
+    #[test]
+    fn test_enforce_read_scope_extra_root_empty_is_noop() {
+        let cwd = tempfile::tempdir().unwrap();
+        let agent_dir = tempfile::tempdir().unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        std::fs::write(unrelated.path().join("secret.txt"), "secret").unwrap();
+        let secret_path = unrelated.path().join("secret.txt");
+
+        let err =
+            enforce_read_scope_with_roots(&secret_path, cwd.path(), agent_dir.path(), &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside the working directory") && msg.contains("agent dir"),
+            "error must still mention cwd/agent_dir, got: {msg}"
+        );
+        assert!(
+            msg.contains("read scope allowlist"),
+            "error must mention the allowlist so the user knows the third tier exists, got: {msg}"
         );
     }
 

@@ -48,6 +48,20 @@ pub struct Config {
     #[serde(alias = "enabledModels")]
     pub enabled_models: Option<Vec<String>>,
 
+    /// Extra roots the read tool is allowed to read in addition to cwd and agent dir.
+    ///
+    /// Symlinks under `~/.pi/agent/skills/` (or other agent-controlled paths) may
+    /// canonicalize to locations outside both cwd and agent dir. Add those
+    /// canonical root paths here so the read tool scope check accepts them.
+    ///
+    /// Example: `"readScopeAllowlist": ["/Users/me/projects/rustdog"]` allows
+    /// `~/.pi/agent/skills/rdog-control/SKILL.md` to be read even though it
+    /// symlinks to `/Users/me/projects/rustdog/.codex/skills/rdog-control/SKILL.md`.
+    ///
+    /// Env override: `PI_READ_SCOPE_ALLOWLIST` (colon-separated paths, overrides config).
+    #[serde(alias = "readScopeAllowlist")]
+    pub read_scope_allowlist: Option<Vec<String>>,
+
     /// HTTP request timeout in seconds for provider API calls.
     ///
     /// Bounds connect + request + first-response-header latency for each
@@ -508,6 +522,7 @@ impl Config {
             default_model: other.default_model.or(base.default_model),
             default_thinking_level: other.default_thinking_level.or(base.default_thinking_level),
             enabled_models: other.enabled_models.or(base.enabled_models),
+            read_scope_allowlist: other.read_scope_allowlist.or(base.read_scope_allowlist),
             request_timeout_secs: other.request_timeout_secs.or(base.request_timeout_secs),
 
             // Message Handling
