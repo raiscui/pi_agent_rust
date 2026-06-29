@@ -20136,7 +20136,6 @@ mod native_runtime_duplicate_scaffold {
     // shims. Several methods complete synchronously in this in-process lane.
     #[allow(
         clippy::unused_async,
-        clippy::unused_async_trait_impl,
         reason = "Native-rust runtime mirrors the async JS runtime handle; this in-process lane completes several operations synchronously."
     )]
     impl NativeRustExtensionRuntimeHandle {

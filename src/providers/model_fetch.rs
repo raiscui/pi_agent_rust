@@ -88,14 +88,14 @@ fn cache_key(provider: &str) -> String {
 
 fn cache_lookup(key: &str) -> Option<Vec<String>> {
     let guard = cache().lock().ok()?;
-    let entry = guard.get(key)?;
-    let models = if entry.inserted.elapsed() < MODEL_CACHE_TTL {
-        Some(entry.models.clone())
-    } else {
-        None
-    };
+    // Extract owned data so the lock guard can be released immediately rather
+    // than held across the return (clippy::significant_drop_tightening).
+    let cached = guard
+        .get(key)
+        .filter(|entry| entry.inserted.elapsed() < MODEL_CACHE_TTL)
+        .map(|entry| entry.models.clone());
     drop(guard);
-    models
+    cached
 }
 
 fn cache_store(key: String, models: Vec<String>) {

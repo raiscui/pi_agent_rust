@@ -935,6 +935,7 @@ pub fn create_provider(
                     .with_base_url(normalize_openai_base(&entry.model.base_url))
                     .with_compat(entry.compat.clone())
                     .with_tool_use_profile(entry.tool_use_profile.clone())
+                    .with_reasoning(entry.model.reasoning)
                     .with_client(client),
             ))
         }

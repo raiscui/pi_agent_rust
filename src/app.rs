@@ -408,16 +408,19 @@ fn load_context_file_from_dir(dir: &Path) -> Option<ContextFile> {
 }
 
 fn format_current_datetime() -> String {
+    // Date only — deliberately no clock time. This string is part of the cached
+    // system-prompt prefix; a per-second timestamp would invalidate the
+    // provider's prompt/KV cache on every request (higher latency + cost). Date
+    // granularity keeps the prefix stable within a day while still giving the
+    // model the current date. (#103)
     let now = Local::now();
-    let date = format!(
+    format!(
         "{}, {} {}, {}",
         now.format("%A"),
         now.format("%B"),
         now.day(),
         now.year()
-    );
-    let time = format!("{} {}", now.format("%I:%M:%S %p"), now.format("%Z"));
-    format!("{date}, {time}")
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -874,14 +877,20 @@ const PROVIDER_DEFAULT_MODELS: &[(&str, &str)] = &[
     ("xai", "grok-4-fast-non-reasoning"),
     ("groq", "openai/gpt-oss-120b"),
     ("cerebras", "zai-glm-4.6"),
+    // glm-5.2 (1M context) is the GLM Coding Plan flagship and is registered
+    // under provider `zai` on the coding endpoint, so it is the coding-plan
+    // default. Bare `zai` stays on glm-4.7 — the newest model on the general
+    // (non-coding) z.ai endpoint (#115).
     ("zai", "glm-4.7"),
-    ("zai-coding-plan", "glm-4.7"),
-    ("zhipuai-coding-plan", "glm-4.7"),
+    ("zai-coding-plan", "glm-5.2"),
+    ("zhipuai-coding-plan", "glm-5.2"),
     ("mistral", "devstral-medium-latest"),
-    ("minimax", "MiniMax-M2.7"),
-    ("minimax-cn", "MiniMax-M2.7"),
-    ("minimax-coding-plan", "MiniMax-M2.7"),
-    ("minimax-cn-coding-plan", "MiniMax-M2.7"),
+    // MiniMax-M3 is the current MiniMax flagship; the prior `MiniMax-M2.7`
+    // default was never a registered catalog entry (latent bug) (#115).
+    ("minimax", "MiniMax-M3"),
+    ("minimax-cn", "MiniMax-M3"),
+    ("minimax-coding-plan", "MiniMax-M3"),
+    ("minimax-cn-coding-plan", "MiniMax-M3"),
     ("huggingface", "moonshotai/Kimi-K2.5"),
     ("opencode", "claude-opus-4-6"),
     // The Kimi for Coding plan exposes a single stable virtual model id
@@ -966,6 +975,12 @@ pub fn build_stream_options(
         max_tokens: Some(selection.model_entry.model.max_tokens),
         headers: selection.model_entry.headers.clone(),
         session_id: Some(session.header.id.clone()),
+        // Seed the per-request output cap from the model registry's `maxTokens`
+        // so the value users configure in `models.json` actually takes effect.
+        // Without this every provider falls back to its hardcoded per-request
+        // default (e.g. 4096), truncating turns that emit large tool-call
+        // arguments (most visibly the `write` tool). Embedders can still
+        // override via `set_max_tokens`.
         ..Default::default()
     };
 
@@ -1609,8 +1624,8 @@ mod tests {
         // provider alone must synthesize an ad-hoc model from the default table
         // instead of failing with "No models available".
         for (provider_arg, expected_model_id) in [
-            ("zai-coding-plan", "glm-4.7"),
-            ("minimax-coding-plan", "MiniMax-M2.7"),
+            ("zai-coding-plan", "glm-5.2"),
+            ("minimax-coding-plan", "MiniMax-M3"),
             ("kimi-for-coding", "kimi-for-coding"),
         ] {
             let cli = cli::Cli::parse_from(["pi", "--provider", provider_arg]);
@@ -1646,14 +1661,14 @@ mod tests {
     fn provider_default_model_id_resolves_coding_plan_and_corrected_defaults() {
         assert_eq!(
             provider_default_model_id("zai-coding-plan"),
-            Some("glm-4.7")
+            Some("glm-5.2")
         );
         assert_eq!(provider_default_model_id("zai"), Some("glm-4.7"));
         assert_eq!(
             provider_default_model_id("minimax-coding-plan"),
-            Some("MiniMax-M2.7")
+            Some("MiniMax-M3")
         );
-        assert_eq!(provider_default_model_id("minimax"), Some("MiniMax-M2.7"));
+        assert_eq!(provider_default_model_id("minimax"), Some("MiniMax-M3"));
         // The Kimi for Coding plan uses a stable virtual model id.
         assert_eq!(
             provider_default_model_id("kimi-for-coding"),

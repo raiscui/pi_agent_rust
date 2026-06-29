@@ -572,7 +572,6 @@ fn main_impl() -> Result<()> {
     let reactor = create_reactor()?;
     let runtime = RuntimeBuilder::multi_thread()
         .blocking_threads(1, 2)
-        .enable_parking(false)
         .with_reactor(reactor)
         .build()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1289,8 +1288,10 @@ async fn run(
         let acp_options = pi::acp::AcpOptions {
             config: config.clone(),
             available_models,
+            model_registry: model_registry.clone(),
             auth: auth.clone(),
             runtime_handle: runtime_handle.clone(),
+            session_dir: cli.session_dir.as_ref().map(PathBuf::from),
         };
         return run_acp_mode(acp_options).await;
     }
@@ -1765,6 +1766,8 @@ async fn run(
                 thinking_level: sm.thinking_level,
             })
             .collect::<Vec<_>>();
+        // Boxed: this future is large (clippy::large_futures); boxing keeps the
+        // enclosing future small.
         Box::pin(run_rpc_mode(
             agent_session,
             resources,

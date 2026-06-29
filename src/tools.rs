@@ -8961,8 +8961,8 @@ mod tests {
         std::fs::write(unrelated.path().join("secret.txt"), "secret").unwrap();
         let secret_path = unrelated.path().join("secret.txt");
 
-        let err =
-            enforce_read_scope_with_roots(&secret_path, cwd.path(), agent_dir.path(), &[]).unwrap_err();
+        let err = enforce_read_scope_with_roots(&secret_path, cwd.path(), agent_dir.path(), &[])
+            .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("outside the working directory") && msg.contains("agent dir"),
@@ -8978,9 +8978,13 @@ mod tests {
         let agent_dir = tempfile::tempdir().unwrap();
         std::fs::write(cwd.path().join("a.txt"), "in cwd").unwrap();
 
-        let resolved =
-            enforce_read_scope_with_roots(&cwd.path().join("a.txt"), cwd.path(), agent_dir.path(), &[])
-                .unwrap();
+        let resolved = enforce_read_scope_with_roots(
+            &cwd.path().join("a.txt"),
+            cwd.path(),
+            agent_dir.path(),
+            &[],
+        )
+        .unwrap();
         assert!(
             resolved.starts_with(
                 cwd.path()
@@ -8999,7 +9003,11 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let agent_dir = tempfile::tempdir().unwrap();
         let extra_root = tempfile::tempdir().unwrap();
-        let nested = extra_root.path().join("nested").join("deep").join("file.md");
+        let nested = extra_root
+            .path()
+            .join("nested")
+            .join("deep")
+            .join("file.md");
         std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
         std::fs::write(&nested, "body").unwrap();
 
@@ -9013,9 +9021,13 @@ mod tests {
             "sanity: nested must not be under agent_dir"
         );
 
-        let resolved =
-            enforce_read_scope_with_roots(&nested, cwd.path(), agent_dir.path(), &[extra_root.path().to_path_buf()])
-                .unwrap();
+        let resolved = enforce_read_scope_with_roots(
+            &nested,
+            cwd.path(),
+            agent_dir.path(),
+            &[extra_root.path().to_path_buf()],
+        )
+        .unwrap();
         assert!(
             resolved.starts_with(
                 extra_root
@@ -9057,11 +9069,19 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let agent_dir = tempfile::tempdir().unwrap();
         let extra_root = tempfile::tempdir().unwrap();
-        let target = extra_root.path().join("skills").join("rdog-control").join("SKILL.md");
+        let target = extra_root
+            .path()
+            .join("skills")
+            .join("rdog-control")
+            .join("SKILL.md");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, "real content").unwrap();
 
-        let link_in_agent = agent_dir.path().join("skills").join("rdog-control").join("SKILL.md");
+        let link_in_agent = agent_dir
+            .path()
+            .join("skills")
+            .join("rdog-control")
+            .join("SKILL.md");
         std::fs::create_dir_all(link_in_agent.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&target, &link_in_agent).unwrap();
 
@@ -9088,8 +9108,8 @@ mod tests {
         std::fs::write(unrelated.path().join("secret.txt"), "secret").unwrap();
         let secret_path = unrelated.path().join("secret.txt");
 
-        let err =
-            enforce_read_scope_with_roots(&secret_path, cwd.path(), agent_dir.path(), &[]).unwrap_err();
+        let err = enforce_read_scope_with_roots(&secret_path, cwd.path(), agent_dir.path(), &[])
+            .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("outside the working directory") && msg.contains("agent dir"),

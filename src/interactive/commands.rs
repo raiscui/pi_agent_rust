@@ -37,6 +37,7 @@ pub enum SlashCommand {
     Reload,
     Template,
     Share,
+    Mcp,
 }
 
 impl SlashCommand {
@@ -75,6 +76,7 @@ impl SlashCommand {
             "/reload" => Self::Reload,
             "/template" => Self::Template,
             "/share" => Self::Share,
+            "/mcp" => Self::Mcp,
             _ => return None,
         };
 
@@ -108,6 +110,7 @@ impl SlashCommand {
   /reload            - Reload skills/prompts from disk
   /template <name> [args] - Expand a prompt template by name
   /share             - Upload session HTML to a secret GitHub gist and show URL
+  /mcp               - Show MCP server status (Model Context Protocol)
   /exit, /quit, /q   - Exit Pi
 
   Tips:
@@ -994,6 +997,10 @@ impl PiApp {
         let stream_options = agent_guard.stream_options_mut();
         stream_options.api_key.clone_from(&resolved_key_opt);
         stream_options.headers.clone_from(&next.headers);
+        // Pick up the new model's configured output cap so an interactive
+        // model switch honors its registry `maxTokens` instead of carrying
+        // over the previous model's limit.
+        stream_options.max_tokens = Some(next.model.max_tokens);
         stream_options.thinking_level = Some(next_thinking);
 
         session_guard.header.provider = Some(next.model.provider.clone());
@@ -1115,6 +1122,10 @@ impl PiApp {
             let stream_options = agent_guard.stream_options_mut();
             stream_options.api_key.clone_from(&resolved_key_opt);
             stream_options.headers.clone_from(&target_entry.headers);
+            // Pick up the new model's configured output cap so an interactive
+            // model switch honors its registry `maxTokens` instead of carrying
+            // over the previous model's limit.
+            stream_options.max_tokens = Some(target_entry.model.max_tokens);
         }
         agent_guard.stream_options_mut().thinking_level = Some(thinking_sync.effective);
         drop(agent_guard);
@@ -2225,6 +2236,7 @@ impl PiApp {
             SlashCommand::Reload => self.handle_slash_reload(),
             SlashCommand::Template => self.handle_slash_template(args),
             SlashCommand::Share => self.handle_slash_share(args),
+            SlashCommand::Mcp => self.handle_slash_mcp(args),
         }
     }
 
@@ -2905,6 +2917,64 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
         });
 
         self.status_message = Some("Reloading resources...".to_string());
+        None
+    }
+
+    /// Show MCP (Model Context Protocol) server status.
+    ///
+    /// Pi connects to MCP servers only when an installed extension registers
+    /// them via `registerMcpServer`. It does *not* read standalone MCP config
+    /// files such as `.agents/mcp.json`, `.pi/mcp.json`, or
+    /// `~/.pi/agent/mcp.json` (those are honored by other agents, not Pi), so
+    /// this command makes the current state explicit instead of leaving
+    /// `/mcp` as an "unknown command" (pi_agent_rust#112).
+    pub(super) fn handle_slash_mcp(&mut self, _args: &str) -> Option<Cmd> {
+        let servers = self
+            .extensions
+            .as_ref()
+            .map(crate::extensions::ExtensionManager::extension_mcp_servers)
+            .unwrap_or_default();
+
+        let mut content = String::from("MCP servers (Model Context Protocol)\n");
+        if servers.is_empty() {
+            content.push_str("\n  No MCP servers are currently registered.\n");
+        } else {
+            let _ = writeln!(content, "\n  {} registered:", servers.len());
+            for server in &servers {
+                let name = server
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unnamed>");
+                let target = server
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        server
+                            .get("command")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "<no url/command>".to_string());
+                let _ = writeln!(content, "    • {name} — {target}");
+            }
+        }
+
+        content.push_str(
+            "\nNote: Pi only loads MCP servers that an installed extension registers via\n\
+             registerMcpServer. It does not read standalone MCP config files\n\
+             (.agents/mcp.json, .pi/mcp.json, ~/.pi/agent/mcp.json) — those are used by\n\
+             other agents, not Pi. To expose an MCP server to Pi, install an extension\n\
+             that registers it.",
+        );
+
+        self.messages.push(ConversationMessage {
+            role: MessageRole::System,
+            content,
+            thinking: None,
+            collapsed: false,
+        });
+        self.scroll_to_last_match("MCP servers");
         None
     }
 
