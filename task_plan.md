@@ -993,3 +993,35 @@
 
 ## [2026-06-19 17:37:16] [Session ID: omx-1781861770599-u90x0g] 索引: 启用 git commit 支线上下文
 - 启用 task_plan__git_commit.md 处理本次提交收尾, 避免默认 task_plan.md 接近 1000 行时继续膨胀。
+
+## [2026-06-29 15:00:00] [Session ID: omx-1782315165890-5z63zw] 任务计划: docs 落盘收口 + rebase origin/main + 推 my/main
+
+### 目标
+- 把当前 worktree 的 4 个未提交改动收口成 2 个 scoped commit。
+- rebase origin/main 拉 24 个 upstream commits, 关闭 `bd-rek8z`。
+- 把本地 6 个独有 commits 推到 my/main, 收尾。
+
+### 阶段
+- [ ] 阶段1: docs 三件套 commit (scope: docs/ 域)
+- [ ] 阶段2: WORKLOG 单独 commit (scope: WORKLOG)
+- [ ] 阶段3: git fetch origin && rebase origin/main (拉 24 commits, 关 bd-rek8z)
+- [ ] 阶段4: 质量门禁 (cargo fmt --check + cargo check --all-targets + 必要的 test)
+- [ ] 阶段5: git push my main (推 6 commits; HTTPS 403 fallback SSH)
+- [ ] 阶段6: WORKLOG 收尾 + 推 master (按 AGENTS.md "Git Branch: ONLY Use main, NEVER master")
+
+### 关键问题
+1. rebase 期间会不会冲突: A5 改 system prompt 时间注入路径, 与我刚写的 docs/system-prompt-injection.md §11 不冲突 (文档 vs 代码) ; 28d99af vs 9fc870d2 都动 src/interactive.rs 可能冲突。
+2. 24 commits 里有没有需要本地手工 cherry-pick 的: 没有, 都是 upstream 应该直接拉。
+3. 推 my/main 时 SSH/HTTPS 选哪个: 先试 `git push my main`, 403 fallback SSH。
+
+### 做出的决定
+- docs 三件套 (新建 1 + 追加 2) 合一个 commit, 因为它们是同一任务产物。
+- WORKLOG 单独 commit, 不与 docs 混, 避免 doc-only commit 携带 WORKLOG diff。
+- rebase 用 `git rebase origin/main` 而非 merge, 保持主线线性。
+- 任何 `--force` / `git reset --hard` 都需要 user 明确授权 (AGENTS.md "Irreversible Git & Filesystem Actions")。
+
+### 遇到错误
+- (无)
+
+### 状态
+**目前在阶段1** - 准备 docs 三件套 commit。

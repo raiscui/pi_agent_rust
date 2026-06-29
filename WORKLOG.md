@@ -419,3 +419,19 @@
 - macOS 系统 bash 3.2 会让 UBS 与 ledger 脚本误失败, 提交前门禁应显式使用 。
 -  的 whole-file baseline findings 不能直接等同于本 patch 问题, 需要 changed-line gate 给出当前改动行证据。
 - 本地环境变量会影响模型 registry 测试, 验证时需要隔离真实 API key。
+
+## [2026-06-25 11:00:00] [Session ID: omx-1782315165890-5z63zw] 任务名称: docs/system-prompt-injection.md 落盘
+
+### 任务内容
+- 新建 `docs/system-prompt-injection.md` (197 行) 记录 Pi 启动时 system prompt 的装配顺序、各段来源、各入口行为、修改定位、验证手段、边界与陷阱。
+- 在 `docs/skills.md` 末尾追加 See Also 段, 指向新文档 §5 (skills 段在 system prompt 里的位置)。
+- 在 `docs/models.md` 末尾追加 See Also 段, 指向新文档 §3 / §7 / §10 (`appendSystemPrompt` 在装配链中的位置)。
+
+### 完成过程
+- 摸清 docs/ 已有内容: `prompt-templates.md` 讲 /prompt 模板、`capability-prompts.md` 讲 extension 权限弹窗、`context-intelligence.md` 讲 advisory bundle, 都没有覆盖"启动期 system prompt 装配", 因此新建独立文档而不是追加到现有文档。
+- 复用 `build_system_prompt` (`src/app.rs:151-194`) + `append_tool_use_profile_system_prompt` (`src/app.rs:201-244`) + `Agent::build_context` (`src/agent.rs:1666-1700`) 三处作为文档的真相源, 不重复 docs/skills.md / docs/models.md 已有的字段说明, 只指 cross-reference。
+- 用 `cat <<'EOF'` 写文件, 避免反引号触发 shell 命令替换; mermaid 流程图保留原代码格式, 便于在 md 渲染器里直接显示。
+
+### 总结感悟
+- 这次落盘动作只动 docs/ 三处, 不动 src/、不动 EXPERIENCE.md、不动 AGENTS.md (AGENTS.md 没有 docs 索引段, 不需要新加)。后续如要加 docs/ 索引, 应在 AGENTS.md 新增一段 "文档索引" 而不是塞到 Toolchain/Compiler Checks 这种工具链段里。
+- 文档采用 "入口 → 装配顺序 → 各段速查表 → 默认 prompt 结构 → 验证手段 → 边界与陷阱" 的拓扑, 比按文件罗列更贴近"想改 prompt 的人"的阅读路径。改 prompt 时按 §10 顺序碰位置, 能避免覆盖式修复和单层修复的常见反模式。
