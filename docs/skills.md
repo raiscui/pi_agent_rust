@@ -55,3 +55,7 @@ This effectively wraps your prompt with the skill's instructions.
 ## Configuration
 
 To disable the `/skill:` slash commands, set `enable_skill_commands` to `false` in `settings.json`.
+
+## See Also
+
+- system prompt 装配顺序 / skills 段在 system prompt 里的位置: [`docs/system-prompt-injection.md`](system-prompt-injection.md) §5。

@@ -338,3 +338,7 @@ a model that pi does not yet have a built-in route for, also configure the
 provider in `models.json` (sections above) — pi already routes any
 `anthropic/<id>` value through the Anthropic API regardless of whether the ID
 is in the snapshot.
+
+## See Also
+
+- `appendSystemPrompt` 在 system prompt 装配链中的位置: [`docs/system-prompt-injection.md`](system-prompt-injection.md) §3、§7、§10。
