@@ -1021,7 +1021,16 @@ impl<'a> SemanticContextBundlePlanner<'a> {
                 };
                 let exclusion = candidate.to_exclusion(exclusion_reason);
                 if suppression_reason == "suppressed_stale_or_unsafe_evidence" {
-                    stale_evidence_suppressions.push(exclusion.clone());
+                    // 同一证据文件可能同时命中 EvidenceArtifact 节点与引用它的
+                    // FileRegion 节点, 抑制列表按 source_path 去重, 避免重复报告
+                    if !stale_evidence_suppressions
+                        .iter()
+                        .any(|item: &ContextBundleExclusion| {
+                            item.source_path == exclusion.source_path
+                        })
+                    {
+                        stale_evidence_suppressions.push(exclusion.clone());
+                    }
                 }
                 excluded_items.push(exclusion);
                 continue;

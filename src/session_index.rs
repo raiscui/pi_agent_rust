@@ -355,7 +355,10 @@ impl SessionIndex {
         // `self.lock_path` is `<sessions>/session-index.lock` — the same path
         // upstream TS pi locks with `proper-lockfile`. Use the directory-based
         // protocol (see `crate::file_lock`) so the two interoperate.
-        let _lock = crate::file_lock::DirLock::acquire(&self.lock_path, Duration::from_secs(5))
+        // 锁超时必须大于 DirLock 的 stale 阈值 (10s): 崩溃后残留的 fresh
+        // 锁目录要等 mtime 过期才能 reclaim, 5s 超时永远等不到 stale 锁,
+        // 导致崩溃恢复场景 (SIGINT/SIGHUP/kill) 无法重建索引
+        let _lock = crate::file_lock::DirLock::acquire(&self.lock_path, Duration::from_secs(15))
             .map_err(|e| Error::session(format!("session index lock: {e}")))?;
 
         let config = SqliteConfig::file(self.db_path.to_string_lossy())
