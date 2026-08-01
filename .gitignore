@@ -33,6 +33,13 @@ rustc-ice-*.txt
 # generated test artifacts
 tests/ext_conformance/artifacts/entry-point-scan.json
 tests/ext_conformance/reports/*
+# 测试运行生成的产物 (每次全量测试都会重写, 不再提交; 需要时由测试/脚本再生成)
+tests/artifacts/perf/
+tests/evidence_bundle/
+tests/certification/
+tests/security_compat/
+tests/full_suite_gate/
+tests/perf/reports/
 # committed baselines
 !tests/ext_conformance/reports/CONFORMANCE_REPORT.md
 !tests/ext_conformance/reports/conformance_baseline.json

@@ -786,6 +786,18 @@ fn generate_conformance_report_impl() {
         negative_pass + negative_fail
     );
 
+    // 本地全量测试不产生 smoke/parity/scenario 输入数据: 此时重新生成会把
+    // committed 的 conformance_summary.json 覆盖成全 N/A (pass rate 0%),
+    // 导致 release_evidence_gate 误报失败。与 CI 的跳过逻辑一致:
+    // 没有任何输入数据时, 只打印提示, 不覆盖 repo 内的已提交报告。
+    if statuses.is_empty() && negative_pass == 0 && negative_fail == 0 {
+        eprintln!(
+            "[conformance_report] 没有可用输入报告 (smoke/parity/scenario 均缺), \
+             跳过写入以保护 committed 报告; 需要生成报告请先运行 conformance 套件"
+        );
+        return;
+    }
+
     // 3. Write JSONL events
     let events_path = reports.join("conformance_events.jsonl");
     let mut jsonl_lines: Vec<String> = Vec::new();
