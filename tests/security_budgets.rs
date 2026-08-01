@@ -181,8 +181,9 @@ fn interrupt_budget_preserves_state_after_trip() {
 fn memory_limit_prevents_large_allocation() {
     futures::executor::block_on(async {
         let config = config_with_limits(PiJsRuntimeLimits {
-            // 1MB memory limit
-            memory_limit_bytes: Some(1024 * 1024),
+            // 64MB memory limit: 1MB 太小, QuickJS 运行时 bootstrap 本身
+            // 就超过, 导致运行时创建直接失败 (测试本意是阻止大分配)
+            memory_limit_bytes: Some(64 * 1024 * 1024),
             ..Default::default()
         });
 

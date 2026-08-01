@@ -29,6 +29,10 @@ fn run_admission_with_env(
         "--admit-only",
         "--min-free-mb",
         "1",
+        // 本机磁盘 inode 可能 < 5% (测试机器的 /System/Volumes/Data 常见),
+        // 这里只测 rch 缺失决策逻辑, 不测 inode 阈值
+        "--min-inode-free-pct",
+        "1",
         "--target-dir",
         target_dir
             .to_str()

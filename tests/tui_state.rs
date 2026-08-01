@@ -3396,7 +3396,8 @@ fn tui_state_slash_share_reports_error_when_gh_not_authenticated() {
     let step = press_enter(&harness, &mut app);
     assert_after_contains(&harness, &step, "Sharing session...");
 
-    let events = wait_for_pi_msgs(&mut event_rx, Duration::from_secs(1), |msgs| {
+    // 5s: 并行运行时 gh 子进程启动可能超过 1s (全量测试时序抖动)
+    let events = wait_for_pi_msgs(&mut event_rx, Duration::from_secs(5), |msgs| {
         msgs.iter().any(|msg| matches!(msg, PiMsg::AgentError(_)))
     });
     let error = events
@@ -3439,7 +3440,8 @@ fn tui_state_slash_share_reports_parse_error_and_cleans_temp_file() {
     let step = press_enter(&harness, &mut app);
     assert_after_contains(&harness, &step, "Sharing session...");
 
-    let events = wait_for_pi_msgs(&mut event_rx, Duration::from_secs(1), |msgs| {
+    // 5s: 并行运行时 gh 子进程启动可能超过 1s (全量测试时序抖动)
+    let events = wait_for_pi_msgs(&mut event_rx, Duration::from_secs(5), |msgs| {
         msgs.iter().any(|msg| matches!(msg, PiMsg::AgentError(_)))
     });
     let error = events
@@ -3566,7 +3568,8 @@ fn tui_state_slash_share_is_cancellable_and_cleans_temp_file() {
     assert_after_contains(&harness, &step, "Sharing session...");
 
     let start = Instant::now();
-    while !record_path.exists() && start.elapsed() < Duration::from_millis(500) {
+    // 2s: 并行运行时 gh 子进程启动可能明显变慢 (全量测试时序抖动)
+    while !record_path.exists() && start.elapsed() < Duration::from_secs(2) {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(record_path.exists(), "expected fake gh to record temp path");
@@ -3574,7 +3577,8 @@ fn tui_state_slash_share_is_cancellable_and_cleans_temp_file() {
     let step = press_esc(&harness, &mut app);
     assert_after_contains(&harness, &step, "Aborting request...");
 
-    let events = wait_for_pi_msgs(&mut event_rx, Duration::from_secs(1), |msgs| {
+    // 5s: 并行运行时 gh 子进程启动可能超过 1s (全量测试时序抖动)
+    let events = wait_for_pi_msgs(&mut event_rx, Duration::from_secs(5), |msgs| {
         msgs.iter()
             .any(|msg| matches!(msg, PiMsg::System(message) if message.contains("Share cancelled")))
     });

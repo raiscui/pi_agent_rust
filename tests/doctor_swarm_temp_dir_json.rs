@@ -295,7 +295,14 @@ fn create_expected_root_test_dir(name: &str) -> TestResult<(PathBuf, bool)> {
         .join(format!("{}-{name}", std::process::id()));
     match fs::create_dir_all(&dir) {
         Ok(()) => Ok((dir, true)),
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => Ok((dir, false)),
+        // macOS 上 /data 是只读合成卷 (ReadOnlyFilesystem), Linux CI 上可能
+        // 是 PermissionDenied: 两者都表示"期望 root 不可写", 走 warn 分支
+        Err(err)
+            if err.kind() == ErrorKind::PermissionDenied
+                || err.kind() == ErrorKind::ReadOnlyFilesystem =>
+        {
+            Ok((dir, false))
+        }
         Err(err) => Err(err.into()),
     }
 }
