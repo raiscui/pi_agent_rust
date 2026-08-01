@@ -948,19 +948,50 @@ impl ModelRegistry {
     }
 
     pub fn load(auth: &AuthStorage, models_path: Option<PathBuf>) -> Self {
-        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::Full)
+        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::Full, |auth, provider| {
+            auth.resolve_api_key(provider, None)
+        })
     }
 
     pub fn load_for_listing(auth: &AuthStorage, models_path: Option<PathBuf>) -> Self {
-        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::ListingLite)
+        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::ListingLite, |auth, provider| {
+            auth.resolve_api_key(provider, None)
+        })
+    }
+
+    /// 测试专用: 与 [`Self::load`] 同语义, 但 key 解析隔离外部环境变量。
+    #[cfg(test)]
+    pub(crate) fn load_isolated(auth: &AuthStorage, models_path: Option<PathBuf>) -> Self {
+        Self::load_with_mode(
+            auth,
+            models_path,
+            ModelRegistryLoadMode::Full,
+            |auth, provider| auth.resolve_api_key_isolated(provider, None),
+        )
+    }
+
+    /// 以自定义 key 解析函数加载注册表。
+    ///
+    /// 主要供集成测试隔离开发者本机环境变量 (如 `OPENAI_API_KEY`);
+    /// 生产代码应使用 [`Self::load`]。
+    pub fn load_with_key_resolver<F>(
+        auth: &AuthStorage,
+        models_path: Option<PathBuf>,
+        resolve_key: F,
+    ) -> Self
+    where
+        F: Fn(&AuthStorage, &str) -> Option<String>,
+    {
+        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::Full, resolve_key)
     }
 
     fn load_with_mode(
         auth: &AuthStorage,
         models_path: Option<PathBuf>,
         mode: ModelRegistryLoadMode,
+        resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
     ) -> Self {
-        let mut models = built_in_models(auth, mode);
+        let mut models = built_in_models_with_key_resolver(auth, mode, &resolve_key);
         let mut error = None;
 
         if let Some(path) = models_path {
@@ -972,7 +1003,13 @@ impl ModelRegistry {
                         validate_tool_use_profile_references(&config).map(|()| config)
                     }) {
                     Ok(config) => {
-                        apply_custom_models(auth, &mut models, &config, path.parent());
+                        apply_custom_models_with_key_resolver(
+                            auth,
+                            &mut models,
+                            &config,
+                            path.parent(),
+                            &resolve_key,
+                        );
                     }
                     Err(e) => {
                         error = Some(format!("{e}\n\nFile: {}", path.display()));
@@ -1315,10 +1352,30 @@ fn resolve_provider_api_key_cached(
     canonical_cache: &mut HashMap<String, Option<String>>,
     provider_cache: &mut HashMap<String, Option<String>>,
 ) -> Option<String> {
+    resolve_provider_api_key_cached_with(
+        auth,
+        canonical_provider,
+        provider,
+        canonical_cache,
+        provider_cache,
+        |auth, provider| auth.resolve_api_key(provider, None),
+    )
+}
+
+/// 与 [`resolve_provider_api_key_cached`] 同语义, 但 key 解析函数可注入
+/// (测试用 `resolve_api_key_isolated` 屏蔽开发者本机环境变量)。
+fn resolve_provider_api_key_cached_with(
+    auth: &AuthStorage,
+    canonical_provider: &str,
+    provider: &str,
+    canonical_cache: &mut HashMap<String, Option<String>>,
+    provider_cache: &mut HashMap<String, Option<String>>,
+    resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
+) -> Option<String> {
     let canonical_key = canonical_provider.to_ascii_lowercase();
     let canonical_result = canonical_cache
         .entry(canonical_key)
-        .or_insert_with(|| auth.resolve_api_key(canonical_provider, None))
+        .or_insert_with(|| resolve_key(auth, canonical_provider))
         .clone();
 
     if canonical_result.is_some() || canonical_provider.eq_ignore_ascii_case(provider) {
@@ -1327,7 +1384,7 @@ fn resolve_provider_api_key_cached(
 
     provider_cache
         .entry(provider.to_ascii_lowercase())
-        .or_insert_with(|| auth.resolve_api_key(provider, None))
+        .or_insert_with(|| resolve_key(auth, provider))
         .clone()
 }
 
@@ -1445,6 +1502,24 @@ fn append_upstream_nonlegacy_models(
 
 #[allow(clippy::too_many_lines)]
 fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<ModelEntry> {
+    built_in_models_with_key_resolver(auth, mode, |auth, provider| {
+        auth.resolve_api_key(provider, None)
+    })
+}
+
+/// 测试专用: 与 [`built_in_models`] 同语义, 但隔离外部环境变量。
+#[cfg(test)]
+fn built_in_models_isolated(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<ModelEntry> {
+    built_in_models_with_key_resolver(auth, mode, |auth, provider| {
+        auth.resolve_api_key_isolated(provider, None)
+    })
+}
+
+fn built_in_models_with_key_resolver(
+    auth: &AuthStorage,
+    mode: ModelRegistryLoadMode,
+    resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
+) -> Vec<ModelEntry> {
     let mut models = Vec::with_capacity(legacy_generated_models().len() + 8);
     let mut seen = HashSet::new();
     let mut canonical_api_key_cache: HashMap<String, Option<String>> = HashMap::new();
@@ -1512,12 +1587,13 @@ fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<Model
         };
 
         let canonical_provider = canonical_provider_id(provider).unwrap_or(provider);
-        let api_key = resolve_provider_api_key_cached(
+        let api_key = resolve_provider_api_key_cached_with(
             auth,
             canonical_provider,
             provider,
             &mut canonical_api_key_cache,
             &mut provider_api_key_cache,
+            &resolve_key,
         );
 
         let default_cost = ModelCost {
@@ -2085,6 +2161,19 @@ fn apply_custom_models(
     config: &ModelsConfig,
     base_dir: Option<&Path>,
 ) {
+    apply_custom_models_with_key_resolver(auth, models, config, base_dir, |auth, provider| {
+        auth.resolve_api_key(provider, None)
+    })
+}
+
+/// 与 [`apply_custom_models`] 同语义, 但 key 解析函数可注入 (测试隔离环境变量)。
+fn apply_custom_models_with_key_resolver(
+    auth: &AuthStorage,
+    models: &mut Vec<ModelEntry>,
+    config: &ModelsConfig,
+    base_dir: Option<&Path>,
+    resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
+) {
     for (provider_id, provider_cfg) in &config.providers {
         let provider_id_str = provider_id.as_str();
         let provider_defaults = custom_provider_defaults(provider_id);
@@ -2127,7 +2216,7 @@ fn apply_custom_models(
             .api_key
             .as_deref()
             .and_then(|value| resolve_value_with_base(value, base_dir))
-            .or_else(|| auth.resolve_api_key(canonical_provider, None));
+            .or_else(|| resolve_key(auth, canonical_provider));
 
         let auth_header = provider_cfg
             .auth_header
@@ -2896,7 +2985,8 @@ mod tests {
     #[test]
     fn built_in_models_include_core_provider_entries() {
         let (_dir, auth) = test_auth_storage();
-        let models = built_in_models(&auth, ModelRegistryLoadMode::Full);
+        // 用隔离版: 避免开发者本机 OPENAI_API_KEY 等环境变量覆盖 storage 里的测试 key
+        let models = built_in_models_isolated(&auth, ModelRegistryLoadMode::Full);
 
         assert!(
             models.iter().any(
@@ -4346,7 +4436,9 @@ mod tests {
             .as_deref()
             .expect("append_system_prompt must be set");
         assert!(prompt.contains("bash"));
-        assert!(prompt.contains("rdog control TARGET"));
+        // 与 ~/.pi/agent/models.json 现状对齐: prompt 描述 bash/read 工具用法
+        // (旧版文案 "rdog control TARGET" 已被用户更新为通用工具说明)
+        assert!(prompt.contains("read"));
     }
 
     #[test]

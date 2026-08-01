@@ -5110,6 +5110,24 @@ fn resolve_model_key(
         .or_else(|| normalize_api_key_opt(entry.api_key.clone()))
 }
 
+/// 测试专用: 与 [`resolve_model_key`] 同语义, 但隔离外部环境变量。
+#[cfg(test)]
+fn resolve_model_key_isolated(
+    cli_api_key: Option<&str>,
+    auth: &AuthStorage,
+    entry: &ModelEntry,
+) -> Option<String> {
+    cli_api_key
+        .and_then(|key| {
+            let trimmed = key.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .or_else(|| {
+            normalize_api_key_opt(auth.resolve_api_key_isolated(&entry.model.provider, None))
+        })
+        .or_else(|| normalize_api_key_opt(entry.api_key.clone()))
+}
+
 fn parse_thinking_level(level: &str) -> Result<crate::model::ThinkingLevel> {
     level.parse().map_err(|err: String| Error::validation(err))
 }
@@ -6201,7 +6219,7 @@ export default function init(pi) {
         );
 
         assert_eq!(
-            resolve_model_key(None, &auth, &entry).as_deref(),
+            resolve_model_key_isolated(None, &auth, &entry).as_deref(),
             Some("stored-auth-key")
         );
     }
@@ -6226,7 +6244,7 @@ export default function init(pi) {
         );
 
         assert_eq!(
-            resolve_model_key(None, &auth, &entry).as_deref(),
+            resolve_model_key_isolated(None, &auth, &entry).as_deref(),
             Some("stored-auth-key")
         );
     }

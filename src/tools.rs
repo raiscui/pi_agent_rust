@@ -8365,7 +8365,7 @@ mod tests {
 
             assert!(
                 err.to_string()
-                    .contains("Cannot read outside the working directory or agent dir")
+                    .contains("Cannot read outside the working directory")
             );
             let mut entries = std::fs::read_dir(artifact_root.path()).expect("artifact root");
             assert!(

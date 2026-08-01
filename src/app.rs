@@ -964,6 +964,27 @@ pub fn resolve_api_key(
     Ok(key)
 }
 
+/// 测试专用: 与 [`resolve_api_key`] 同语义, 但隔离外部环境变量。
+#[cfg(test)]
+pub(crate) fn resolve_api_key_isolated(
+    auth: &AuthStorage,
+    cli: &cli::Cli,
+    entry: &ModelEntry,
+) -> Result<Option<String>> {
+    let key = normalize_api_key_opt(cli.api_key.clone())
+        .or_else(|| normalize_api_key_opt(auth.resolve_api_key_isolated(&entry.model.provider, None)))
+        .or_else(|| normalize_api_key_opt(entry.api_key.clone()));
+
+    if model_requires_configured_credential(entry) && key.is_none() {
+        return Err(StartupError::MissingApiKey {
+            provider: entry.model.provider.clone(),
+        }
+        .into());
+    }
+
+    Ok(key)
+}
+
 pub fn build_stream_options(
     config: &Config,
     api_key: Option<String>,
@@ -1423,7 +1444,7 @@ mod tests {
         entry.auth_header = true;
 
         let cli = cli::Cli::parse_from(["pi"]);
-        let err = resolve_api_key(&auth, &cli, &entry).unwrap_err();
+        let err = resolve_api_key_isolated(&auth, &cli, &entry).unwrap_err();
         let startup = err
             .downcast_ref::<StartupError>()
             .expect("missing key should map to startup error");

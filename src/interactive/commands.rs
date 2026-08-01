@@ -547,6 +547,16 @@ pub(super) fn resolve_model_key_with_auth(
         .or_else(|| normalize_api_key_opt(entry.api_key.clone()))
 }
 
+/// 测试专用: 与 [`resolve_model_key_with_auth`] 同语义, 但隔离外部环境变量。
+#[cfg(test)]
+pub(super) fn resolve_model_key_with_auth_isolated(
+    auth: &crate::auth::AuthStorage,
+    entry: &ModelEntry,
+) -> Option<String> {
+    normalize_api_key_opt(auth.resolve_api_key_isolated(&entry.model.provider, None))
+        .or_else(|| normalize_api_key_opt(entry.api_key.clone()))
+}
+
 pub(super) fn resolve_model_key_from_default_auth(entry: &ModelEntry) -> Option<String> {
     let auth_path = crate::config::Config::auth_path();
     crate::auth::AuthStorage::load(auth_path)
@@ -3425,7 +3435,7 @@ mod tests {
         entry.api_key = Some("inline-model-sample".to_string());
 
         assert_eq!(
-            super::resolve_model_key_with_auth(&auth, &entry).as_deref(),
+            super::resolve_model_key_with_auth_isolated(&auth, &entry).as_deref(),
             Some("stored-auth-sample")
         );
     }
@@ -3437,7 +3447,7 @@ mod tests {
         entry.api_key = Some("inline-model-sample".to_string());
 
         assert_eq!(
-            super::resolve_model_key_with_auth(&auth, &entry).as_deref(),
+            super::resolve_model_key_with_auth_isolated(&auth, &entry).as_deref(),
             Some("inline-model-sample")
         );
     }

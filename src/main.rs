@@ -7357,7 +7357,10 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let auth_path = temp.path().join("auth.json");
         let auth = AuthStorage::load(auth_path).expect("auth load");
-        let registry = ModelRegistry::load(&auth, None);
+        // 隔离环境变量: 否则本机 OPENAI_API_KEY 会让 openai 模型误判为"已配置"
+        let registry = ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
+            auth.resolve_api_key_with_env(provider, None, |_| None)
+        });
 
         let without_cli_key = rpc_available_models(&registry, None);
         assert!(
@@ -7381,7 +7384,9 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let auth_path = temp.path().join("auth.json");
         let auth = AuthStorage::load(auth_path).expect("auth load");
-        let registry = ModelRegistry::load(&auth, None);
+        let registry = ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
+            auth.resolve_api_key_with_env(provider, None, |_| None)
+        });
 
         let available_models = rpc_available_models(&registry, Some("   "));
         assert!(

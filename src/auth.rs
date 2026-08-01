@@ -593,6 +593,38 @@ impl AuthStorage {
         self.resolve_api_key_with_env_lookup(provider, override_key, |var| std::env::var(var).ok())
     }
 
+    /// 解析 API key, 环境变量查找函数可注入。
+    ///
+    /// 主要供集成测试隔离开发者本机残留的 API key (如 `OPENAI_API_KEY`);
+    /// 注入 `|_| None` 等价于"只看 auth storage"。生产代码仍应使用
+    /// [`Self::resolve_api_key`]。
+    pub fn resolve_api_key_with_env<F>(
+        &self,
+        provider: &str,
+        override_key: Option<&str>,
+        env_lookup: F,
+    ) -> Option<String>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        self.resolve_api_key_with_env_lookup(provider, override_key, env_lookup)
+    }
+
+    /// 测试专用: 完全隔离外部环境变量, 只信任 auth storage 内容。
+    ///
+    /// Rust 2024 把 `std::env::remove_var` 标记为 `unsafe` (多线程数据竞争),
+    /// 本 crate 又 `forbid(unsafe_code)`, 所以测试无法在运行时清理 shell
+    /// 里残留的真实 API key (如 `OPENAI_API_KEY`)。凡断言"storage 优先"
+    /// 的测试都必须走这个隔离入口, 否则会被开发者本机环境变量污染。
+    #[cfg(test)]
+    pub(crate) fn resolve_api_key_isolated(
+        &self,
+        provider: &str,
+        override_key: Option<&str>,
+    ) -> Option<String> {
+        self.resolve_api_key_with_env_lookup(provider, override_key, |_| None)
+    }
+
     fn resolve_api_key_with_env_lookup<F>(
         &self,
         provider: &str,

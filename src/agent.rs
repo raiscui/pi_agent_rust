@@ -3735,6 +3735,9 @@ pub struct AgentSession {
     model_registry: Option<ModelRegistry>,
     auth_storage: Option<AuthStorage>,
     api_key_override: Option<String>,
+    /// 测试专用: 置位后 key 解析跳过外部环境变量 (见 resolve_api_key_isolated)。
+    #[cfg(test)]
+    env_isolated: bool,
     semantic_context_bundle: Option<SemanticContextBundleInjection>,
 }
 
@@ -8454,8 +8457,16 @@ impl AgentSession {
             model_registry: None,
             auth_storage: None,
             api_key_override: None,
+            #[cfg(test)]
+            env_isolated: false,
             semantic_context_bundle: None,
         }
+    }
+
+    /// 测试专用: 开启环境变量隔离, 让 key 解析只信任 auth storage。
+    #[cfg(test)]
+    pub(crate) fn set_env_isolated(&mut self) {
+        self.env_isolated = true;
     }
 
     pub const fn set_input_source(&mut self, source: InputSource) {
@@ -8687,7 +8698,18 @@ impl AgentSession {
             .or_else(|| {
                 self.auth_storage
                     .as_ref()
-                    .and_then(|auth| normalize(auth.resolve_api_key(&entry.model.provider, None)))
+                    .and_then(|auth| {
+                        #[cfg(test)]
+                        {
+                            if self.env_isolated {
+                                return normalize(auth.resolve_api_key_isolated(
+                                    &entry.model.provider,
+                                    None,
+                                ));
+                            }
+                        }
+                        normalize(auth.resolve_api_key(&entry.model.provider, None))
+                    })
             })
             .or_else(|| normalize(entry.api_key.clone()))
     }
@@ -12375,7 +12397,8 @@ mod tests {
     }
 
     fn build_switch_test_session(auth: &AuthStorage) -> AgentSession {
-        let registry = ModelRegistry::load(auth, None);
+        // 用隔离版加载: 避免开发者本机环境变量提前写进 entry.api_key
+        let registry = ModelRegistry::load_isolated(auth, None);
         let current_entry = registry
             .find("anthropic", "claude-sonnet-4-5")
             .expect("anthropic model in registry");
@@ -12415,6 +12438,7 @@ mod tests {
         );
         agent_session.set_model_registry(registry);
         agent_session.set_auth_storage(auth.clone());
+        agent_session.set_env_isolated();
         agent_session
     }
 
