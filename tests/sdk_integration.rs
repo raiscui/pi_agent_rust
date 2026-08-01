@@ -640,6 +640,11 @@ fn sdk_thinking_level() {
     let harness = TestHarness::new("sdk_thinking_level");
     let options = SessionOptions {
         api_key: Some(TEST_API_KEY.to_string()),
+        // 显式指定 anthropic 版 claude-sonnet-4-5 (reasoning=true, 支持 High):
+        // 不指定 provider 时可能选中 antigravity 等 reasoning=false 的
+        // 同名条目, 把 High clamp 成 Off
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-sonnet-4-5".to_string()),
         thinking: Some(pi::model::ThinkingLevel::High),
         working_directory: Some(harness.temp_dir().to_path_buf()),
         no_session: true,

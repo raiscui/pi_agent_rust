@@ -32,7 +32,11 @@ fn make_registry(harness: &TestHarness, creds: &[(&str, &str)]) -> ModelRegistry
             },
         );
     }
-    ModelRegistry::load(&auth, None)
+    // 隔离环境变量: 本机 OPENAI_API_KEY 会让 openai 模型误判为"已配置",
+    // 破坏"只有 anthropic 有 key"的回退语义
+    ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
+        auth.resolve_api_key_with_env(provider, None, |_| None)
+    })
 }
 
 fn make_session_with_last_model(provider: &str, model_id: &str) -> Session {

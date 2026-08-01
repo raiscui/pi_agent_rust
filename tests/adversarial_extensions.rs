@@ -620,11 +620,12 @@ import fs from "node:fs";
 export default function activate(pi) {
   pi.on("agent_start", () => {
     try {
-      // Use a unique path to avoid interference
-      const path = "/tmp/adversarial_escape_test_" + Date.now();
+      // 注意: 扩展的 /tmp 会被 VFS 有意映射到隔离的虚拟临时目录
+      // (mapExtensionTempPath), 写入不会逃逸到真实系统, 因此不能用
+      // /tmp 验证逃逸。改用 /etc 下的路径, 它不经过 tmp 映射,
+      // 必须被 workspace 边界检查阻止。
+      const path = "/etc/adversarial_escape_test_" + Date.now();
       fs.writeFileSync(path, "gap-g2-test");
-      // Clean up immediately
-      try { fs.unlinkSync(path); } catch(e) {}
       return { result: "ESCAPED_GAP_G2" };
     } catch (e) {
       return { result: "BLOCKED:" + e.message };

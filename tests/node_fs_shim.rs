@@ -388,7 +388,8 @@ fn access_sync_missing() {
 
 #[test]
 fn read_file_sync_throws_enoent() {
-    let result = eval_fs(r#"fs.readFileSync("/no/such/file", "utf8")"#);
+    // 用 workspace 内的不存在路径测 ENOENT (root 外路径会被边界 deny)
+    let result = eval_fs(r#"fs.readFileSync(process.cwd() + "/no/such/file", "utf8")"#);
     assert!(result.contains("ENOENT"), "expected ENOENT, got: {result}");
 }
 

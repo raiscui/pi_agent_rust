@@ -953,22 +953,24 @@ fn fs_enoent_errors() {
                 r#"
                 import('node:fs').then((fs) => {
                     globalThis.errors = {};
-                    try { fs.readFileSync('/nope'); }
+                    // 用 workspace 内 (/test) 的不存在路径测 ENOENT;
+                    // root 外路径会被边界检查 deny, 不产生 ENOENT
+                    try { fs.readFileSync('/test/nope'); }
                     catch (e) { globalThis.errors.read = e.message; }
 
-                    try { fs.statSync('/nope'); }
+                    try { fs.statSync('/test/nope'); }
                     catch (e) { globalThis.errors.stat = e.message; }
 
-                    try { fs.unlinkSync('/nope'); }
+                    try { fs.unlinkSync('/test/nope'); }
                     catch (e) { globalThis.errors.unlink = e.message; }
 
-                    try { fs.rmdirSync('/nope'); }
+                    try { fs.rmdirSync('/test/nope'); }
                     catch (e) { globalThis.errors.rmdir = e.message; }
 
-                    try { fs.readdirSync('/nope'); }
+                    try { fs.readdirSync('/test/nope'); }
                     catch (e) { globalThis.errors.readdir = e.message; }
 
-                    try { fs.renameSync('/nope', '/x'); }
+                    try { fs.renameSync('/test/nope', '/test/x'); }
                     catch (e) { globalThis.errors.rename = e.message; }
                 });
                 "#,

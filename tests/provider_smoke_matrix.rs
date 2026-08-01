@@ -1148,6 +1148,7 @@ fn smoke_all_api_families_are_known() {
         "google-generative-ai",
         "google-vertex",
         "bedrock-converse-stream",
+        "cursor-agent",
     ];
 
     for meta in PROVIDER_METADATA {
