@@ -435,3 +435,23 @@
 ### 总结感悟
 - 这次落盘动作只动 docs/ 三处, 不动 src/、不动 EXPERIENCE.md、不动 AGENTS.md (AGENTS.md 没有 docs 索引段, 不需要新加)。后续如要加 docs/ 索引, 应在 AGENTS.md 新增一段 "文档索引" 而不是塞到 Toolchain/Compiler Checks 这种工具链段里。
 - 文档采用 "入口 → 装配顺序 → 各段速查表 → 默认 prompt 结构 → 验证手段 → 边界与陷阱" 的拓扑, 比按文件罗列更贴近"想改 prompt 的人"的阅读路径。改 prompt 时按 §10 顺序碰位置, 能避免覆盖式修复和单层修复的常见反模式。
+
+## [2026-08-01 18:20:00] [Session ID: root-merge-590d618] 任务: 合并远程 590d6189 到本地 main
+
+### 任务内容
+- 将 origin/main tip (590d6189, release 0.1.23) 合并进本地 main, 生成 merge commit 6e4ac36e
+- 涉及 88 个远程变更文件与本地 34 个领先 commit 的融合
+
+### 完成过程
+- 确认 590d6189 = origin/main tip, 与本地 main 分叉于 ce89fbf3
+- 检测到 6 个脏文件与远程变更重叠, 采用 git merge --autostash 保证脏改动无损
+- 解决 2 个冲突:
+  - Cargo.lock: 5 处 windows-sys 版本差异, 取远程 0.61.2 (cargo check 验证自洽, 本地 fancy-regex 0.14 与远程 0.17 共存)
+  - src/interactive.rs: 保留本地 InteractiveMouseCaptureGuard 实现 (本地已覆盖远程 disable_mouse_capture 配置语义 + PI_NO_MOUSE_CAPTURE env, 且有单测), 丢弃远程 with_mouse_all_motion 简化实现
+- autostash 自动恢复 11 个脏文件, 无冲突
+- cargo check 两次通过 (merge 后 + 脏改动恢复后)
+
+### 总结感悟
+- merge 前先检查工作树脏文件与 merge 变更集交集, --autostash 是安全选择
+- 功能重叠冲突的解决原则: 保留实现更完善且有测试的一方, 验证配置语义等价
+- Cargo.lock 冲突取发布侧版本后, 用 cargo check 兜底验证 lock 自洽性

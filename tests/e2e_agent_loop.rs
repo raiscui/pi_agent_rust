@@ -1458,6 +1458,7 @@ fn rpc_partial_tool_call_arguments_grow_during_stream() {
             },
             block_images: false,
             fail_closed_hooks: false,
+            tool_use_profile: None,
             tool_approval: None,
         };
         let agent = Agent::new(provider, tools, config);

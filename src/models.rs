@@ -3300,6 +3300,7 @@ mod tests {
         // included deliberately to exercise path-join robustness.
         let mut models = Vec::new();
         let config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "my-local".to_string(),
                 ProviderConfig {
@@ -3333,6 +3334,7 @@ mod tests {
         // openai-completions default endpoint (unchanged default behavior).
         let mut defaulted = Vec::new();
         let default_config = ModelsConfig {
+            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "my-proxy".to_string(),
                 ProviderConfig {
@@ -6048,6 +6050,7 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
+                tool_use_profile: None,
                 oauth_config: None,
             }
         }

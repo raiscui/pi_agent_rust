@@ -1025,3 +1025,37 @@
 
 ### 状态
 **目前在阶段1** - 准备 docs 三件套 commit。
+
+## [2026-08-01 18:10:00] [Session ID: root-merge-590d618] 任务: 合并远程 590d6189 到本地 main
+
+### 目标
+- 将 origin/main tip (590d6189, release 0.1.23) 合并进本地 main
+
+### 现状
+- 本地 main = 5f877467,与 origin/main 分叉于 ce89fbf3
+- origin/main 侧 88 个文件变更(远程新功能/修复)
+- 本地侧 34 个领先 my/main 的 commit(含本地功能与文档)
+- 工作树有未提交脏改动(其他 agent/用户): 11 个文件约 551 行,其中 6 个文件与远程变更重叠
+
+### 计划
+- [ ] 用 git merge --autostash origin/main 合并(不丢脏改动)
+- [ ] 解决 merge 冲突(如有)
+- [ ] stash pop 恢复脏改动,解决恢复冲突(如有)
+- [ ] cargo check 验证编译
+- [ ] 汇报结果
+
+## [2026-08-01 18:20:00] [Session ID: root-merge-590d618] 完成: 合并成功
+
+### 结果
+- [x] merge origin/main (tip=590d6189) 完成, 生成 merge commit 6e4ac36e
+- [x] 2 个冲突已解决: Cargo.lock (windows-sys 取远程 0.61.2), src/interactive.rs (保留本地 mouse capture 实现)
+- [x] 11 个脏文件经 autostash 无损恢复, 无冲突标记
+- [x] cargo check 通过
+- main 现 ahead of my/main by 72 commits (未推送, 用户未要求)
+
+## [2026-08-01 18:25:00] [Session ID: root-merge-590d618] 验证: 完整测试套件回归检查
+
+### 计划
+- [ ] cargo test 全量运行
+- [ ] 分析失败项 (区分 merge 回归 vs 既有失败)
+- [ ] 汇报结果
