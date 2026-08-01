@@ -19,6 +19,10 @@ rustc-ice-*.txt
 # local Pi agent config (may contain API keys)
 .pi/
 
+# Repository-local secrets loaded by direnv. Only the empty template is tracked.
+.envrc
+.direnv/
+
 # Local legacy pi-mono dependency provisioning symlink (machine-specific).
 /legacy_pi_mono_code/pi-mono/node_modules
 
@@ -275,3 +279,7 @@ storage.sqlite3-wal.corrupt-*
 /ubs_findings.txt
 .codegraph
 .cursor
+docs/discuss/phase0.5-gui-baseline-20260630.md
+docs/discuss/rdog-rpc-bench.py
+test-runs/rdog-gui-baseline-20260630
+test-runs/rdog-rpc-bench-parser-smoke

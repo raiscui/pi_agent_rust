@@ -1747,6 +1747,7 @@ mod tests {
             post_tool_guard: None,
             tools: None,
             skills: None,
+            extensions: None,
         }
     }
 
@@ -1862,6 +1863,7 @@ mod tests {
             post_tool_guard: None,
             tools: None,
             skills: None,
+            extensions: None,
         };
 
         let converted = convert_tool_to_openai_with_profile(&tool, Some(&profile));
@@ -1975,6 +1977,7 @@ mod tests {
             post_tool_guard: None,
             tools: Some(vec!["bash".to_string()]),
             skills: None,
+            extensions: None,
         };
         let tools = vec![
             ToolDef {
@@ -2015,6 +2018,7 @@ mod tests {
             post_tool_guard: None,
             tools: Some(vec![]),
             skills: None,
+            extensions: None,
         };
         let tools = vec![ToolDef {
             name: "bash".to_string(),
@@ -2068,6 +2072,7 @@ mod tests {
             post_tool_guard: None,
             tools: Some(vec!["bash".to_string(), "rdog-line-control".to_string()]),
             skills: None,
+            extensions: None,
         };
         let tools = vec![ToolDef {
             name: "bash".to_string(),

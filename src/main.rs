@@ -144,6 +144,42 @@ fn reload_model_registry_with_extra_entries(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn build_session_system_prompt(
+    cli: &cli::Cli,
+    cwd: &Path,
+    enabled_tools: &[&str],
+    resources: &ResourceLoader,
+    model_entry: &ModelEntry,
+    global_dir: &Path,
+    package_dir: &Path,
+    test_mode: bool,
+) -> Result<String> {
+    // 普通 skills 只有在 read 可用时才展示 metadata。profile/model 显式绑定
+    // 的正文由 ResourceLoader 直接内联,不再要求弱模型先自主选择 read。
+    let skills_prompt =
+        resources.format_skills_for_model_prompt(model_entry, enabled_tools.contains(&"read"));
+    let system_prompt = pi::app::build_system_prompt(
+        cli,
+        cwd,
+        enabled_tools,
+        if skills_prompt.is_empty() {
+            None
+        } else {
+            Some(skills_prompt.as_str())
+        },
+        global_dir,
+        package_dir,
+        test_mode,
+        !cli.hide_cwd_in_prompt,
+    )?;
+    Ok(pi::app::append_tool_use_profile_system_prompt(
+        system_prompt,
+        model_entry,
+        enabled_tools,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn resolve_selection_with_auth(
     cli: &mut cli::Cli,
     config: &Config,
@@ -1346,13 +1382,13 @@ async fn run(
             has_cli_api_key_override(cli.api_key.as_deref()),
         )
     };
-    let has_extensions = !resources.extensions().is_empty();
+    let initial_has_extensions = !resources.extensions().is_empty();
 
     if has_cli_api_key_override(cli.api_key.as_deref())
         && cli.provider.is_none()
         && cli.model.is_none()
     {
-        let allow_unresolved_scope = has_extensions && !scoped_patterns.is_empty();
+        let allow_unresolved_scope = initial_has_extensions && !scoped_patterns.is_empty();
         if scoped_models.is_empty() && !allow_unresolved_scope {
             bail!("--api-key requires a model to be specified via --provider/--model or --models");
         }
@@ -1378,7 +1414,7 @@ async fn run(
         Ok(Some(result)) => result,
         Ok(None) => return Ok(()),
         Err(err) => {
-            if should_retry_selection_after_extensions(&cli, &err, has_extensions) {
+            if should_retry_selection_after_extensions(&cli, &err, initial_has_extensions) {
                 (
                     build_extension_bootstrap_selection(&config, &model_registry, &models_path)?,
                     None,
@@ -1388,6 +1424,19 @@ async fn run(
             }
         }
     };
+
+    // Model profiles may opt into a dedicated extension. Resolve it only after
+    // model selection, so unrelated models never load model-specific behavior.
+    if !cli.no_extensions {
+        if let Err(err) = resources.extend_with_model_extensions(&cwd, &selection.model_entry) {
+            tracing::warn!(
+                event = "pi.resources.model_extensions_failed",
+                error = %err,
+                "Failed to load model-specific extensions"
+            );
+        }
+    }
+    let has_extensions = !resources.extensions().is_empty();
 
     let enabled_tools = cli.enabled_tools();
     // 硬限制: 如果当前 model entry 的 toolUseProfile 声明了 `tools` allowlist,
@@ -1406,31 +1455,17 @@ async fn run(
             .collect(),
         None => enabled_tools,
     };
-    let skills_prompt = if enabled_tools.contains(&"read") {
-        resources.format_skills_for_prompt()
-    } else {
-        String::new()
-    };
     let test_mode = std::env::var_os("PI_TEST_MODE").is_some();
-    let system_prompt = pi::app::build_system_prompt(
+    let system_prompt = build_session_system_prompt(
         &cli,
         &cwd,
         &enabled_tools,
-        if skills_prompt.is_empty() {
-            None
-        } else {
-            Some(skills_prompt.as_str())
-        },
+        &resources,
+        &selection.model_entry,
         &global_dir,
         &package_dir,
         test_mode,
-        !cli.hide_cwd_in_prompt,
     )?;
-    let system_prompt = pi::app::append_tool_use_profile_system_prompt(
-        system_prompt,
-        &selection.model_entry,
-        &enabled_tools,
-    );
     let provider =
         providers::create_provider(&selection.model_entry, None).map_err(anyhow::Error::new)?;
     let stream_options =
@@ -1588,30 +1623,16 @@ async fn run(
                         "Failed to apply extension-discovered resource paths"
                     );
                 } else {
-                    let skills_prompt = if enabled_tools.contains(&"read") {
-                        resources.format_skills_for_prompt()
-                    } else {
-                        String::new()
-                    };
-                    let system_prompt = pi::app::build_system_prompt(
+                    let system_prompt = build_session_system_prompt(
                         &cli,
                         &cwd,
                         &enabled_tools,
-                        if skills_prompt.is_empty() {
-                            None
-                        } else {
-                            Some(skills_prompt.as_str())
-                        },
+                        &resources,
+                        &selection.model_entry,
                         &global_dir,
                         &package_dir,
                         test_mode,
-                        !cli.hide_cwd_in_prompt,
                     )?;
-                    let system_prompt = pi::app::append_tool_use_profile_system_prompt(
-                        system_prompt,
-                        &selection.model_entry,
-                        &enabled_tools,
-                    );
                     agent_session.agent.set_system_prompt(Some(system_prompt));
                 }
             }
@@ -1637,30 +1658,16 @@ async fn run(
                 "Failed to load model-specific skills"
             );
         } else {
-            let skills_prompt = if enabled_tools.contains(&"read") {
-                resources.format_skills_for_prompt()
-            } else {
-                String::new()
-            };
-            let system_prompt = pi::app::build_system_prompt(
+            let system_prompt = build_session_system_prompt(
                 &cli,
                 &cwd,
                 &enabled_tools,
-                if skills_prompt.is_empty() {
-                    None
-                } else {
-                    Some(skills_prompt.as_str())
-                },
+                &resources,
+                &selection.model_entry,
                 &global_dir,
                 &package_dir,
                 test_mode,
-                !cli.hide_cwd_in_prompt,
             )?;
-            let system_prompt = pi::app::append_tool_use_profile_system_prompt(
-                system_prompt,
-                &selection.model_entry,
-                &enabled_tools,
-            );
             agent_session.agent.set_system_prompt(Some(system_prompt));
         }
     }

@@ -3338,39 +3338,40 @@ impl Agent {
     ) -> (ToolOutput, bool) {
         let extensions = self.extensions.clone();
 
-        let approval_denied_output = self
-            .request_tool_approval(&tool_call, Arc::clone(&on_event))
-            .await;
-
-        let (mut output, is_error) = if let Some(output) = approval_denied_output {
-            (output, true)
-        } else if let Some(extensions) = &extensions {
+        // Hook只负责给当前执行轮生成一个副本。原始tool_call已经写入assistant
+        // history,因此这里不能回写它,否则下一轮模型会丢失自己的调用语义。
+        let hook_outcome = if let Some(extensions) = &extensions {
             let hook_started_at = Instant::now();
-            let hook_outcome = Self::dispatch_tool_call_hook(
+            let outcome = Self::dispatch_tool_call_hook(
                 extensions,
                 &tool_call,
                 self.config.fail_closed_hooks,
             )
             .await;
             record_extension_hostcall_latency(&latency, hook_started_at.elapsed());
-
-            if let Some(blocked_output) = hook_outcome {
-                (blocked_output, true)
-            } else {
-                let tool_started_at = Instant::now();
-                let outcome = self
-                    .execute_tool_without_hooks(&tool_call, Arc::clone(&on_event))
-                    .await;
-                record_local_tool_latency(&latency, tool_started_at.elapsed());
-                outcome
-            }
-        } else {
-            let tool_started_at = Instant::now();
-            let outcome = self
-                .execute_tool_without_hooks(&tool_call, Arc::clone(&on_event))
-                .await;
-            record_local_tool_latency(&latency, tool_started_at.elapsed());
             outcome
+        } else {
+            ToolCallHookOutcome::Execute(tool_call.clone())
+        };
+
+        let (mut output, is_error) = match hook_outcome {
+            ToolCallHookOutcome::Block(output) => (output, true),
+            ToolCallHookOutcome::Execute(execution_tool_call) => {
+                let approval_denied_output = self
+                    .request_tool_approval(&execution_tool_call, Arc::clone(&on_event))
+                    .await;
+
+                if let Some(output) = approval_denied_output {
+                    (output, true)
+                } else {
+                    let tool_started_at = Instant::now();
+                    let outcome = self
+                        .execute_tool_without_hooks(&execution_tool_call, Arc::clone(&on_event))
+                        .await;
+                    record_local_tool_latency(&latency, tool_started_at.elapsed());
+                    outcome
+                }
+            }
         };
 
         if let Some(extensions) = &extensions {
@@ -3513,27 +3514,43 @@ impl Agent {
         extensions: &ExtensionManager,
         tool_call: &ToolCall,
         fail_closed_hooks: bool,
-    ) -> Option<ToolOutput> {
+    ) -> ToolCallHookOutcome {
         match extensions
             .dispatch_tool_call(tool_call, EXTENSION_EVENT_TIMEOUT_MS)
             .await
         {
             Ok(Some(result)) if result.block => {
-                Some(Self::tool_call_blocked_output(result.reason.as_deref()))
+                ToolCallHookOutcome::Block(Self::tool_call_blocked_output(result.reason.as_deref()))
             }
-            Ok(_) => None,
+            Ok(Some(result)) => {
+                let mut execution_tool_call = tool_call.clone();
+                if let Some(tool_name) = result.tool_name {
+                    let tool_name = tool_name.trim();
+                    if tool_name.is_empty() {
+                        return ToolCallHookOutcome::Block(Self::tool_call_blocked_output(Some(
+                            "extension returned an empty replacement tool name",
+                        )));
+                    }
+                    execution_tool_call.name = tool_name.to_string();
+                }
+                if let Some(input) = result.input {
+                    execution_tool_call.arguments = input;
+                }
+                ToolCallHookOutcome::Execute(execution_tool_call)
+            }
+            Ok(None) => ToolCallHookOutcome::Execute(tool_call.clone()),
             Err(err) => {
                 if fail_closed_hooks {
                     tracing::warn!(
                         error = ?err,
                         "tool_call extension hook failed (fail-closed)"
                     );
-                    Some(Self::tool_call_blocked_output(Some(
+                    ToolCallHookOutcome::Block(Self::tool_call_blocked_output(Some(
                         "extension hook failed",
                     )))
                 } else {
                     tracing::warn!("tool_call extension hook failed (fail-open): {err}");
-                    None
+                    ToolCallHookOutcome::Execute(tool_call.clone())
                 }
             }
         }
@@ -3646,6 +3663,15 @@ impl Agent {
 
         tool_result
     }
+}
+
+/// Result of the pre-execution tool hook.
+///
+/// `Execute` carries an execution-only copy. The source call is kept in the
+/// transcript so provider history and tool-result IDs remain stable.
+enum ToolCallHookOutcome {
+    Execute(ToolCall),
+    Block(ToolOutput),
 }
 
 // ============================================================================
@@ -6182,6 +6208,68 @@ mod extensions_integration_tests {
             if let [ContentBlock::Text(text)] = output.content.as_slice() {
                 assert_eq!(text.text, "Tool execution blocked: blocked in test");
             }
+        });
+    }
+
+    #[test]
+    fn tool_call_hook_can_replace_execution_tool_without_rewriting_history() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let entry_path = temp_dir.path().join("ext.mjs");
+            std::fs::write(
+                &entry_path,
+                r#"
+                export default function init(pi) {
+                  pi.on("tool_call", async (event) => {
+                    if (event && event.toolName === "source_tool") {
+                      return { toolName: "count_tool", input: {} };
+                    }
+                    return {};
+                  });
+                }
+                "#,
+            )
+            .expect("write extension entry");
+
+            let provider = Arc::new(NoopProvider);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let tools = ToolRegistry::from_tools(vec![Box::new(CountingTool {
+                calls: Arc::clone(&calls),
+            })]);
+            let agent = Agent::new(provider, tools, AgentConfig::default());
+            let session = Arc::new(Mutex::new(Session::in_memory()));
+            let mut agent_session =
+                AgentSession::new(agent, session, false, ResolvedCompactionSettings::default());
+
+            agent_session
+                .enable_extensions(&[], temp_dir.path(), None, &[entry_path])
+                .await
+                .expect("enable extensions");
+
+            let source_call = ToolCall {
+                id: "call-source".to_string(),
+                name: "source_tool".to_string(),
+                arguments: json!({ "source": true }),
+                thought_signature: None,
+            };
+            let on_event: Arc<dyn Fn(AgentEvent) + Send + Sync> = Arc::new(|_| {});
+            let (output, is_error) = agent_session
+                .agent
+                .execute_tool(source_call.clone(), on_event, test_turn_latency())
+                .await;
+
+            assert!(!is_error);
+            assert!(!output.is_error);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+            // The source call is the value used by the caller for history and
+            // result correlation; only the local execution copy was replaced.
+            assert_eq!(source_call.name, "source_tool");
+            assert_eq!(source_call.arguments, json!({ "source": true }));
         });
     }
 
@@ -10937,6 +11025,7 @@ mod tests {
             }),
             tools: None,
             skills: None,
+            extensions: None,
         }
     }
 

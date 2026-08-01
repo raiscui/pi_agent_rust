@@ -1308,6 +1308,7 @@ mod tests {
             post_tool_guard: None,
             tools: None,
             skills: None,
+            extensions: None,
         });
         entry
     }

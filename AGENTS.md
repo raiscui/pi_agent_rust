@@ -120,6 +120,14 @@ We do not care about backwards compatibility—we're in early development with n
 
 ---
 
+## Secret Hygiene
+
+- Never print or persist an unfiltered `env`, `printenv`, shell export, or process-environment snapshot. Those outputs can contain every credential available to the agent.
+- Secret diagnostics may record only the variable name, `set` / `unset` state, value length, or a short irreversible hash prefix. Never record the value itself in plans, worklogs, test output, or agent logs.
+- Repository-local secrets belong in the Git-ignored `.envrc` with mode `0600`. Track only `.envrc.example`, and keep every example value empty or obviously non-functional.
+
+---
+
 ## Drop-In Claim Messaging Guardrail
 
 When editing docs, release notes, or user-facing copy:

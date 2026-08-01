@@ -128,6 +128,18 @@ pub struct ToolCallEventResult {
 
     /// Reason for blocking (shown to user).
     pub reason: Option<String>,
+
+    /// Optional replacement tool name for the execution phase.
+    ///
+    /// The original assistant message remains unchanged. This field only
+    /// selects the tool that the agent will look up and execute locally.
+    pub tool_name: Option<String>,
+
+    /// Optional replacement input for the execution phase.
+    ///
+    /// The hook may replace the input independently of `tool_name`; omitted
+    /// fields keep the original call value.
+    pub input: Option<Value>,
 }
 
 /// Result from a tool_result event handler.
@@ -701,7 +713,9 @@ mod tests {
             result,
             ToolCallEventResult {
                 block: false,
-                reason: Some("nope".to_string())
+                reason: Some("nope".to_string()),
+                tool_name: None,
+                input: None,
             }
         );
     }
@@ -712,6 +726,8 @@ mod tests {
             serde_json::from_value(json!({ "block": true })).expect("deserialize tool_call");
         assert!(tool_call.block);
         assert_eq!(tool_call.reason, None);
+        assert_eq!(tool_call.tool_name, None);
+        assert_eq!(tool_call.input, None);
 
         let tool_result: ToolResultEventResult = serde_json::from_value(json!({
             "content": [{ "type": "text", "text": "hello" }],
@@ -900,6 +916,21 @@ mod tests {
         let result = ToolCallEventResult::default();
         assert!(!result.block);
         assert!(result.reason.is_none());
+        assert!(result.tool_name.is_none());
+        assert!(result.input.is_none());
+    }
+
+    #[test]
+    fn tool_call_event_result_deserializes_execution_replacement() {
+        let result: ToolCallEventResult = serde_json::from_value(json!({
+            "toolName": "count_tool",
+            "input": {"value": 2}
+        }))
+        .expect("deserialize replacement");
+
+        assert!(!result.block);
+        assert_eq!(result.tool_name.as_deref(), Some("count_tool"));
+        assert_eq!(result.input, Some(json!({"value": 2})));
     }
 
     // ── InputEventResult equality ──────────────────────────────────────

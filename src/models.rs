@@ -301,6 +301,8 @@ pub struct ToolUseProfile {
     /// `~/.pi/agent/skills/<skill_name>/SKILL.md` 注入 system prompt。
     /// 与 `tools` 字段类似, 这一类 profile-level 行为扩展不增加 ModelEntry 并行真相源。
     pub skills: Option<Vec<String>>,
+    /// profile 绑定的 extension 名称, 解析为全局 agent 目录下的入口文件。
+    pub extensions: Option<Vec<String>>,
 }
 
 impl ToolUseProfile {
@@ -313,6 +315,7 @@ impl ToolUseProfile {
             post_tool_guard: config.post_tool_guard.clone(),
             tools: config.tools.clone(),
             skills: config.skills.clone(),
+            extensions: config.extensions.clone(),
         }
     }
 }
@@ -330,6 +333,8 @@ pub struct ToolUseProfileConfig {
     ///
     /// JSON 字段名 `skills`, 因为 `#[serde(rename_all = "camelCase")]` 不影响单词字段。
     pub skills: Option<Vec<String>>,
+    /// profile 绑定的 extension 名称, 从 `~/.pi/agent/extensions/` 解析入口。
+    pub extensions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]

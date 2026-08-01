@@ -30809,6 +30809,7 @@ impl ExtensionManager {
 
         let roots = self.extension_roots();
         ExtensionResourcePaths {
+            extension_paths: Vec::new(),
             skill_paths: Self::resolve_resource_paths(cwd, &roots, skill_paths),
             prompt_paths: Self::resolve_resource_paths(cwd, &roots, prompt_paths),
             theme_paths: Self::resolve_resource_paths(cwd, &roots, theme_paths),
