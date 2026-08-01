@@ -276,47 +276,6 @@
       }
     },
     {
-      "id": "claude-rules",
-      "name": "claude-rules.ts",
-      "source_tier": "official_examples",
-      "source": {
-        "type": "git",
-        "repo": "https://github.com/badlogic/pi-mono",
-        "path": "packages/coding-agent/examples/extensions/claude-rules.ts"
-      },
-      "runtime_tier": "legacy-js",
-      "interaction_tags": [
-        "ui_integration"
-      ],
-      "capabilities": [
-        "ui"
-      ],
-      "io_pattern": [
-        "ui-centric"
-      ],
-      "complexity": "medium",
-      "file_count": 1,
-      "total_bytes": 2486,
-      "checksum": {
-        "sha256": "59b1c0aad64a423e7cd3d6e084b45b3c84cf8080b9485524a877886fd9870c97"
-      },
-      "compatibility_notes": {
-        "conformance_status": "pass",
-        "conformance_tier": 2
-      },
-      "perf_budgets": {
-        "cold_load_ms": 71
-      },
-      "quality_signals": {
-        "conformance_grade": "A",
-        "compatibility_score": "green",
-        "maintenance_status": "active",
-        "category_tags": [
-          "security"
-        ]
-      }
-    },
-    {
       "id": "community/ferologics-notify",
       "name": "index.ts",
       "source_tier": "community",

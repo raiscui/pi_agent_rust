@@ -455,3 +455,23 @@
 - merge 前先检查工作树脏文件与 merge 变更集交集, --autostash 是安全选择
 - 功能重叠冲突的解决原则: 保留实现更完善且有测试的一方, 验证配置语义等价
 - Cargo.lock 冲突取发布侧版本后, 用 cargo check 兜底验证 lock 自洽性
+
+## [2026-08-01 19:40:00] [Session ID: root-merge-590d618] 验证: 合并后测试套件回归检查
+
+### 任务内容
+- 对 merge 590d6189 后的 main 跑全量 cargo test (--no-fail-fast), 提取 31 个 FAILED target 的失败清单
+- 修复 merge 引入的测试编译回归 (4 处 E0063), 提交 5f5a67e0
+
+### 完成过程
+- lib 测试: 6746 passed / 11 failed
+- 集成测试 target: 31 个 FAILED (e2e_cli / tui_snapshot / golden_corpus / conformance / perf / full_suite_gate 等)
+- 用 worktree (5f877467) 复跑代表性失败测试验证基线: e2e_cli_json_mode_stdin_emits_header_and_events / tui_snapshot_initial_state / golden_corpus_print_text / user_models_json_loads_rdog_control_bash_profile 全部同样失败
+- 静态对比确认: TS 内置表 maxTokens=64000 两侧一致但测试期望 8192; read allowlist 错误消息两侧一致但测试断言旧
+- 结论: 所有失败均为 merge 前既有问题 (环境 key / 测试未同步), merge 无新增回归
+- 测试运行产生的 tests/artifacts、full_suite_gate 等产物变更已还原, 避免污染提交
+- 修复提交后 cargo check --tests 通过, cargo fmt --check 通过
+
+### 总结感悟
+- merge 回归判断必须用 merge-base 两侧的 worktree 复跑对比, 不能只看失败数量
+- 测试运行会改写仓库内产物文件, 提交前必须检查并还原非意图变更
+- 本仓库测试套件基线本身不绿 (存在环境依赖与未同步测试), 跑全量前先建立基线认知

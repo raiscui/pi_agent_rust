@@ -857,19 +857,6 @@
       "validation_reason": "Pi API import found; export default present; registration calls detected"
     },
     {
-      "id": "claude-rules",
-      "name": "claude-rules",
-      "source_tier": "official-pi-mono",
-      "capabilities": [],
-      "sources": [
-        "candidate_pool:official-pi-mono"
-      ],
-      "repository_url": "https://github.com/badlogic/pi-mono",
-      "npm_package": null,
-      "aliases": [],
-      "validation_reason": "no Pi extension signals detected; vendored artifact (pre-validated)"
-    },
-    {
       "id": "coctostan/pi-superteam",
       "name": "pi-superteam",
       "source_tier": "third-party-github",

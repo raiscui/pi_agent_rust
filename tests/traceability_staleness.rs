@@ -227,7 +227,9 @@ fn on_disk_native_provider_modules(root: &Path) -> BTreeSet<String> {
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_else(|| panic!("provider file has invalid UTF-8 path: {}", path.display())); // ubs:ignore test harness assertion, not production runtime.
-        if stem != "mod" {
+        // mod.rs 是模块聚合, model_fetch.rs 是动态模型发现工具
+        // (实现 github issue #92), 两者都不是 provider 实现模块
+        if stem != "mod" && stem != "model_fetch" {
             modules.insert(stem.to_string());
         }
     }
@@ -350,7 +352,7 @@ fn native_provider_module_inventory_matches_provider_docs() {
     );
     assert_eq!(
         on_disk.len(),
-        10,
+        11,
         "native provider module count changed; update docs/providers.md and this expectation"
     );
 }

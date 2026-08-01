@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const EXPECTED_MANIFEST_HASH: &str =
-    "5b8c84da9c35575cd6c71ad84b45f40f7ed97492ec41674e0745ff907b04dd22";
+    "7e20f1f9176cd5aeda26461a5f9d0f27601b1ce1dd6015c679712fedbee46675";
 const MANIFEST_REPORT_DIR: &str = "tests/ext_conformance/reports/inclusion_manifest";
 
 // ── Input types ────────────────────────────────────────────────────────

@@ -303,3 +303,26 @@
 ### 后续讨论入口
 - 如果用户需要更严格的 sandbox (禁止 bash echo redirect, 限制 bash 只能跑 rdog 子集), 这是独立任务, 需要 shell sandbox 设计.
 - 之前 LATER_PLANS 提到的"weak model 不会 stdin-frame" 等问题, 旧 binary 数据无效, 需要用新 binary 重新评估.
+
+## [2026-08-01 19:40:00] [Session ID: root-merge-590d618] 主题: 本仓库测试基线不绿 + 测试产物污染仓库
+
+### 发现来源
+- merge 590d6189 后跑全量 cargo test 的回归检查
+
+### 核心问题
+- merge 前本地 main (5f877467) 测试套件本身就大量失败 (100+): key/auth 类依赖本机真实 API key, e2e/golden/snapshot 类因内置模型 TS 表 maxTokens=64000 与测试期望 8192 不同步等
+- 跑全量测试会改写仓库内 tests/artifacts、tests/full_suite_gate、tests/evidence_bundle 等产物文件, 造成大量非意图 dirty
+
+### 为什么重要
+- 后续任何 agent 跑全量测试都可能把"既有失败"误判为"本次改动引入的回归"
+- 测试产物污染容易混进提交, 造成噪音 commit
+
+### 未来风险
+- 误判回归导致无效返工; 误提交产物导致 diff 膨胀
+
+### 当前结论
+- 验证 merge 回归必须用 merge 前 commit 的 worktree 复跑同批测试对比 (本次确认无新增失败)
+- 提交前必须 git restore 测试产物类变更
+
+### 后续讨论入口
+- 建议: 将测试产物目录加入 .gitignore 或明确产物提交策略; 修复测试基线 (TS 表/断言同步, key 类测试隔离)

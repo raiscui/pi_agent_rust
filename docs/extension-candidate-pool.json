@@ -219,44 +219,6 @@
       "notes": null
     },
     {
-      "id": "claude-rules",
-      "name": "claude-rules",
-      "source_tier": "official-pi-mono",
-      "status": "vendored",
-      "license": "MIT",
-      "retrieved": "2026-02-05",
-      "artifact_path": "tests/ext_conformance/artifacts/claude-rules",
-      "checksum": {
-        "sha256": "59b1c0aad64a423e7cd3d6e084b45b3c84cf8080b9485524a877886fd9870c97"
-      },
-      "source": {
-        "type": "git",
-        "repo": "https://github.com/badlogic/pi-mono",
-        "path": "packages/coding-agent/examples/extensions/claude-rules.ts"
-      },
-      "repository_url": "https://github.com/badlogic/pi-mono",
-      "popularity": {
-        "snapshot_at": "2026-02-14T02:43:43Z",
-        "github_repo": "badlogic/pi-mono",
-        "github_stars": 11669,
-        "github_forks": 1160,
-        "github_watchers": 49,
-        "github_open_issues": 8,
-        "github_last_commit": "2026-02-14T00:45:11Z",
-        "npm_downloads_weekly": null,
-        "npm_downloads_monthly": null,
-        "npm_last_publish": null,
-        "npm_dependents": null,
-        "marketplace_rank": null,
-        "marketplace_installs_monthly": null,
-        "marketplace_featured": null,
-        "mentions_count": null,
-        "mentions_sources": null
-      },
-      "aliases": [],
-      "notes": null
-    },
-    {
       "id": "community/ferologics-notify",
       "name": "ferologics-notify",
       "source_tier": "community",
@@ -6233,7 +6195,7 @@
       "retrieved": "2026-02-05",
       "artifact_path": "tests/ext_conformance/artifacts/npm/vaayne-agent-kit",
       "checksum": {
-        "sha256": "a5a45c18ab6b231f8f1f98e584a253353e57c2cd2ff2a3f23a2dca9a6b68a15a"
+        "sha256": "70c002e831bd43a0c22540b2b8ce0885d3aaff780140abc0217a4f6a79648824"
       },
       "source": {
         "type": "npm",

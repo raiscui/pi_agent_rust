@@ -708,7 +708,19 @@ fn run_pi_mono_rpc_sequence(
         .map_err(|err| anyhow::anyhow!("create {}: {err}", agent_dir.display()))?;
     write_fixture_models_json(&agent_dir)?;
 
-    let mut child = Command::new("/usr/bin/node")
+    // node 可执行文件: 优先 $NODE 环境变量, 否则 PATH 查找 (macOS 上
+    // 常见安装路径如 ~/n/bin 或 Homebrew, 不一定在 /usr/bin)
+    let node_bin = std::env::var("NODE").ok().unwrap_or_else(|| {
+        std::env::var_os("PATH")
+            .and_then(|paths| {
+                std::env::split_paths(&paths).find_map(|dir| {
+                    let candidate = dir.join("node");
+                    candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+                })
+            })
+            .unwrap_or_else(|| "/usr/bin/node".to_string())
+    });
+    let mut child = Command::new(&node_bin)
         .arg(&paths.pi_mono_tsx)
         .args(["--tsconfig", "tsconfig.json"])
         .arg(&paths.pi_mono_cli)

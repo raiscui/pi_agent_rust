@@ -1059,3 +1059,34 @@
 - [ ] cargo test 全量运行
 - [ ] 分析失败项 (区分 merge 回归 vs 既有失败)
 - [ ] 汇报结果
+
+## [2026-08-01 19:40:00] [Session ID: root-merge-590d618] 最终结论: 测试回归检查完成
+
+### 结果
+- [x] cargo test 全量运行(6746 passed / 11 failed lib + 集成 target 若干失败)
+- [x] 编译回归(merge 引入的 E0063)已修复并提交 (5f5a67e0)
+- [x] 对比验证: 在 5f877467 worktree 重跑代表性失败(e2e_cli_json_mode_stdin / tui_snapshot_initial_state / golden_corpus_print_text / rdog_control_bash_profile / read_tool_denied_path / key 类), 全部同样失败
+- [x] 结论: merge 未引入新的测试失败, 全部失败为既有问题
+
+### 失败分类(既有)
+1. key/auth 类(8个): 本机 auth storage 有真实 API key, 测试期望 fake key
+2. e2e/golden/snapshot 类: 内置模型 TS 表 maxTokens=64000 与测试 cassette 期望 8192 不同步(两侧一致)
+3. read_tool_denied_path: 本地 read-scope-allowlist 改了错误消息, 测试断言未同步
+4. rdog_control_bash_profile: 依赖用户 ~/.pi/agent/models.json 配置与代码演进不一致
+
+## [2026-08-01 20:10:00] [Session ID: root-merge-590d618] 子任务: 测试基线修复 (115 个既有失败)
+
+### 分类
+- A. key/env 污染类 (~15): 本机 shell 有 OPENAI_API_KEY 等真实 key, 测试进程继承, resolve 时 env 优先于 storage ApiKey (设计如此)
+- B. e2e/golden/VCR 请求体不同步 (~25): 内置 TS 表 maxTokens=64000 vs 测试期望 8192
+- C. tui_snapshot (~31): insta snapshot 与当前渲染不一致
+- D. 杂项 (~40): read 消息断言 / rdog profile / conformance 证据 / swarm / perf 等
+
+### A 类修复方案 (项目既有注入 pattern)
+- [ ] auth.rs: 加 cfg(test) resolve_api_key_isolated
+- [ ] rpc.rs: resolve_model_key 加 cfg(test) isolated 变体, 2 测试改调
+- [ ] interactive/commands.rs: resolve_model_key_with_auth 加 cfg(test) 变体, 2 测试改调
+- [ ] app.rs: resolve_api_key 加 cfg(test) 变体, 1 测试改调
+- [ ] models.rs: built_in_models 抽 resolver 注入, 1 测试改调
+- [ ] agent.rs: resolve_stream_api_key_for_model 注入, 3 测试改调
+- [ ] 编译 + 跑 A 类测试验证

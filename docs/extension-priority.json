@@ -4158,53 +4158,6 @@
       ]
     },
     {
-      "id": "claude-rules",
-      "name": "claude-rules",
-      "sourceTier": "official-pi-mono",
-      "score": {
-        "popularity": 20,
-        "adoption": 2,
-        "coverage": 2,
-        "activity": 15,
-        "compatibility": 15,
-        "riskPenalty": 0,
-        "baseTotal": 54,
-        "finalTotal": 54,
-        "components": {
-          "popularity": {
-            "officialVisibility": 10,
-            "githubStars": 10,
-            "marketplaceVisibility": 0,
-            "references": 0
-          },
-          "adoption": {
-            "npmDownloads": 0,
-            "marketplaceInstalls": 0,
-            "forks": 2
-          },
-          "coverage": {
-            "runtimeTier": 2,
-            "interaction": 0,
-            "hostcalls": 0
-          }
-        }
-      },
-      "tier": "tier-0",
-      "rank": 56,
-      "gates": {
-        "provenancePinned": true,
-        "licenseOk": true,
-        "deterministic": true,
-        "unmodified": true,
-        "passes": true
-      },
-      "missingSignals": [
-        "signals.marketplace.installs_month",
-        "signals.marketplace.rank",
-        "signals.npm_downloads_month"
-      ]
-    },
-    {
       "id": "bookmark",
       "name": "bookmark",
       "sourceTier": "official-pi-mono",

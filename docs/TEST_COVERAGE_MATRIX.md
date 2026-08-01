@@ -40,6 +40,7 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 | `src/agent_cx.rs` | Agent context | Unit; covered through agent/RPC suites. |
 | `src/app.rs` | App orchestration | Unit; `tests/e2e_cli.rs`, `tests/e2e_rpc.rs`, `tests/main_cli_selection.rs`. |
 | `src/auth.rs` | Auth and OAuth | Unit; `tests/auth_oauth_refresh_vcr.rs`, `tests/extensions_provider_oauth.rs`. |
+| `src/file_lock.rs` | Directory-based lock (proper-lockfile compatible) | Unit; session index / auth lock suites. |
 | `src/autocomplete.rs` | Prompt autocomplete | Unit; interactive coverage via `tests/tui_state.rs`. |
 | `src/bin/pi_legacy_capture.rs` | Legacy capture utility | Unit; opt-in capture utility, not a default user path. |
 | `src/buffer_shim.rs` | Node buffer shim | `tests/node_buffer_shim.rs`; branch export baseline marks this as branch-SIGSEGV fallback. |
@@ -119,9 +120,11 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 | `src/providers/bedrock.rs` | Bedrock provider | Unit; provider native/contract suites. |
 | `src/providers/cohere.rs` | Cohere provider | Unit; `tests/provider_streaming/cohere.rs`, provider error/path suites. |
 | `src/providers/copilot.rs` | Copilot provider | Unit; provider native/contract suites. |
+| `src/providers/cursor.rs` | Cursor provider | Unit; provider native/contract suites. |
 | `src/providers/gemini.rs` | Gemini provider | Unit; `tests/provider_streaming/gemini.rs`, provider error/path suites. |
 | `src/providers/gitlab.rs` | GitLab Duo provider | Unit; provider native/contract suites. |
 | `src/providers/mod.rs` | Provider factory | Unit; `tests/provider_factory.rs`, `tests/provider_native_verify.rs`; branch export baseline marks this family partly branch-SIGSEGV fallback. |
+| `src/providers/model_fetch.rs` | Dynamic model discovery (issue #92) | Unit; model registry suites. |
 | `src/providers/openai.rs` | OpenAI chat provider | Unit; `tests/provider_streaming/openai.rs`, provider error/path suites. |
 | `src/providers/openai_responses.rs` | OpenAI Responses provider | Unit; `tests/provider_streaming/openai_responses.rs`, provider error/path suites. |
 | `src/providers/vertex.rs` | Vertex provider | Unit; provider native/contract suites. |
@@ -130,12 +133,17 @@ This document is the current source-file coverage inventory for `src/**/*.rs`. I
 | `src/rpc.rs` | RPC/stdin mode | Unit; `tests/rpc_mode.rs`, `tests/rpc_protocol.rs`, `tests/rpc_edge_cases.rs`, `tests/e2e_rpc.rs`. |
 | `src/scheduler.rs` | Scheduler/admission | Unit; `tests/scheduler_repro.rs`, `tests/cargo_headroom_admission.rs`; traceability lane `resource_scheduler_admission`. |
 | `src/sdk.rs` | SDK API | Unit; `tests/sdk_api.rs`, `tests/sdk_integration.rs`, `tests/sdk_unit.rs`. |
+| `src/semantic_workspace_graph.rs` | Semantic workspace graph / context planning | Unit; `tests/semantic_workspace_graph_builder.rs`. |
 | `src/session.rs` | Session JSONL/tree | Unit; `tests/session_conformance.rs`, `tests/e2e_session_persistence.rs`; branch export baseline marks this as branch-SIGSEGV fallback. |
 | `src/session_index.rs` | Session index | Unit; `tests/session_index_tests.rs`, `tests/reproduce_index_gap.rs`. |
+| `src/model_routing.rs` | Model routing helpers | Unit; model selection suites. |
 | `src/session_metrics.rs` | Session metrics | Unit; `tests/provider_session_coverage.rs` and session evidence suites. |
 | `src/session_picker.rs` | Session picker UI | Unit; `tests/session_picker.rs`. |
 | `src/session_sqlite.rs` | SQLite session backend | Unit; `tests/session_sqlite.rs`, `tests/fault_injection_persistence.rs`; branch export baseline marks this as branch-SIGSEGV fallback. |
 | `src/session_store_v2.rs` | Session store v2 | Unit; `tests/session_store_v2.rs`, `tests/session_store_v2_contract.rs`. |
+| `src/swarm_progress_slo.rs` | Swarm progress SLO | Unit; swarm suites. |
+| `src/swarm_replay.rs` | Swarm replay | Unit; `tests/swarm_replay_ingestor.rs`. |
+| `src/validation_broker.rs` | Validation broker | Unit; `tests/validation_broker_e2e.rs`. |
 | `src/session_test.rs` | Session test helpers | Waived test-support module; compiled by session tests. |
 | `src/sse.rs` | SSE parser | Unit; `tests/sse_strict_compliance.rs`, `tests/repro_sse_flush.rs`, `tests/repro_sse_newline.rs`. |
 | `src/swarm_activity_ledger.rs` | Swarm activity ledger | Unit; evidence docs in `docs/swarm-activity-ledger.md`, CI evidence bundle tests. |
