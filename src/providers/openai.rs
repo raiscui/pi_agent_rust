@@ -284,13 +284,17 @@ impl OpenAIProvider {
         // Forward the reasoning level for providers with a request-side reasoning
         // dialect. Only DeepSeek today; all other transports get `(None, None)`,
         // so their serialized body is unchanged. DeepSeek collapses `low`/`medium`
-        // into `high` and `xhigh` into `max` itself, so we only emit the values it
-        // documents and let `off` request the explicit non-thinking path.
+        // into `high` itself, so we only emit the values it documents and let
+        // `off` request the explicit non-thinking path. Both `xhigh` and `max`
+        // map to DeepSeek's top `"max"` tier (xhigh kept its historical mapping
+        // when the first-class `max` level was added; gh #139).
         let (thinking, reasoning_effort) = match self.reasoning_style() {
             Some(ReasoningStyle::DeepSeek) => match options.thinking_level.unwrap_or_default() {
                 ThinkingLevel::Off => (Some(OpenAIThinking { kind: "disabled" }), None),
                 ThinkingLevel::High => (Some(OpenAIThinking { kind: "enabled" }), Some("high")),
-                ThinkingLevel::XHigh => (Some(OpenAIThinking { kind: "enabled" }), Some("max")),
+                ThinkingLevel::XHigh | ThinkingLevel::Max => {
+                    (Some(OpenAIThinking { kind: "enabled" }), Some("max"))
+                }
                 ThinkingLevel::Minimal | ThinkingLevel::Low | ThinkingLevel::Medium => {
                     (Some(OpenAIThinking { kind: "enabled" }), None)
                 }
@@ -580,7 +584,7 @@ impl Provider for OpenAIProvider {
                                 );
                             }
                             state.done = true;
-                            let err = Error::api(format!("SSE error: {e}"));
+                            let err = Error::sse(&e);
                             return Some((Err(err), state));
                         }
                         // Stream ended without [DONE] sentinel (e.g.
@@ -628,6 +632,158 @@ struct ToolCallState {
     arguments: String,
 }
 
+/// Best-effort completion of a partial JSON document into the most-complete
+/// valid `Value` it can represent (#124).
+///
+/// Streaming tool-call `arguments` arrive as a growing prefix of a JSON object
+/// (e.g. `{"path": "src/li`). Snapshot-based clients render the partial
+/// message's `arguments`, so leaving it `Null` until the terminal event makes a
+/// large tool call pop in all at once instead of streaming like text. This
+/// closes an open string and any open objects/arrays, dropping a dangling
+/// trailing comma or `"key":` (a key with no value yet) so the prefix parses.
+///
+/// Safety: it only ever CLOSES structure that is already open — it never
+/// fabricates content — and returns `None` when the prefix still can't be
+/// parsed, so the caller keeps the last good value. The result is therefore
+/// always either a valid `Value` that is a faithful completion of the prefix,
+/// or `None`; it can never surface wrong data.
+///
+/// Shared with the agent loop (#126): the agent rebuilds the partial message
+/// that RPC/ACP clients actually receive from `StreamEvent`s, so the same
+/// completion must be applied there (for every provider), not only inside this
+/// provider's internal partial.
+pub(crate) fn complete_partial_json(input: &str) -> Option<serde_json::Value> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Fast path: the accumulated prefix is already valid JSON.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
+        return Some(value);
+    }
+
+    // Structural scan to learn what is still open.
+    let mut closers: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in s.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => closers.push('}'),
+            b'[' => closers.push(']'),
+            b'}' | b']' => {
+                closers.pop();
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = String::from(s);
+    if in_string {
+        if escaped {
+            // Dangling escape backslash (`..."ab\`) — drop it before closing.
+            out.pop();
+        }
+        out.push('"');
+    }
+
+    // Close each open container, trimming a dangling tail before its closer so
+    // the result parses.
+    while let Some(closer) = closers.pop() {
+        trim_dangling_json_tail(&mut out, closer == '}');
+        out.push(closer);
+    }
+
+    serde_json::from_str::<serde_json::Value>(&out).ok()
+}
+
+/// Before appending a container's closer, drop a trailing comma, and (for an
+/// object) a dangling `"key":` or bare `"key"` (a key with no value yet), so the
+/// closed container is valid JSON. A complete `"key": "value"` member is left
+/// intact — a trailing string preceded by `:` is a value, not a dangling key.
+fn trim_dangling_json_tail(out: &mut String, is_object: bool) {
+    loop {
+        let before = out.len();
+        while out.ends_with(char::is_whitespace) {
+            out.pop();
+        }
+        if out.ends_with(',') {
+            out.pop();
+            continue;
+        }
+        if is_object {
+            // `"key":` with no value yet → drop the colon and the key string.
+            if out.ends_with(':') {
+                out.pop();
+                while out.ends_with(char::is_whitespace) {
+                    out.pop();
+                }
+                remove_trailing_json_string(out);
+                continue;
+            }
+            // A trailing string: a value (preceded by `:`) means the member is
+            // complete — stop and close. Otherwise (preceded by `,`/`{`) it's a
+            // dangling key with no colon yet → drop it.
+            if let Some(start) = trailing_json_string_start(out) {
+                let preceded_by_colon = out[..start].trim_end().ends_with(':');
+                if preceded_by_colon {
+                    break;
+                }
+                out.truncate(start);
+                continue;
+            }
+        }
+        if out.len() == before {
+            break;
+        }
+    }
+}
+
+/// Byte index of the opening quote of the JSON string literal that `out` ends
+/// with (honoring backslash escapes), or `None` if `out` does not end with a
+/// closing quote.
+fn trailing_json_string_start(out: &str) -> Option<usize> {
+    let bytes = out.as_bytes();
+    if bytes.last() != Some(&b'"') {
+        return None;
+    }
+    let mut i = bytes.len() - 1; // the closing quote
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'"' {
+            // Count preceding backslashes to tell an escaped quote from the open.
+            let mut backslashes = 0usize;
+            let mut j = i;
+            while j > 0 && bytes[j - 1] == b'\\' {
+                backslashes += 1;
+                j -= 1;
+            }
+            if backslashes % 2 == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Remove a complete trailing JSON string literal (`"..."`, honoring escapes)
+/// from `out`. No-op if `out` does not end with a closing quote.
+fn remove_trailing_json_string(out: &mut String) {
+    if let Some(start) = trailing_json_string_start(out) {
+        out.truncate(start);
+    }
+}
+
 impl<S> StreamState<S>
 where
     S: Stream<Item = std::result::Result<Vec<u8>, std::io::Error>> + Unpin,
@@ -668,12 +824,24 @@ where
 
         // Handle usage in final chunk
         if let Some(usage) = chunk.usage {
-            self.partial.usage.input = usage.prompt_tokens;
+            let cached = usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens)
+                .unwrap_or(0);
+            self.partial.usage.cache_read = cached;
+            // Anthropic convention (used across all transports): `usage.input`
+            // EXCLUDES cache reads so that `input + cache_read` reconstructs the
+            // full prompt. OpenAI-style APIs report `prompt_tokens` INCLUDING
+            // cached tokens, so subtract the cached count (saturating to avoid
+            // underflow if a provider ever reports cached > prompt). DeepSeek
+            // exposes the miss count directly via `prompt_cache_miss_tokens`;
+            // prefer it when present as a more robust source.
+            self.partial.usage.input = usage
+                .prompt_cache_miss_tokens
+                .unwrap_or_else(|| usage.prompt_tokens.saturating_sub(cached));
             self.partial.usage.output = usage.completion_tokens.unwrap_or(0);
             self.partial.usage.total_tokens = usage.total_tokens;
-            if let Some(details) = usage.prompt_tokens_details {
-                self.partial.usage.cache_read = details.cached_tokens.unwrap_or(0);
-            }
         }
 
         if let Some(error) = chunk.error {
@@ -849,8 +1017,20 @@ where
                         thought_signature: None,
                     }));
 
-                    self.pending_events
-                        .push_back(StreamEvent::ToolCallStart { content_index });
+                    // #129: the opening chunk carries the tool-call id and
+                    // (usually) the function name — surface them on the start
+                    // event so agent-side partials are correlatable from the
+                    // first delta. The accumulation below remains the source
+                    // of truth for the provider-side partial.
+                    self.pending_events.push_back(StreamEvent::ToolCallStart {
+                        content_index,
+                        id: tc_delta.id.clone().unwrap_or_default(),
+                        name: tc_delta
+                            .function
+                            .as_ref()
+                            .and_then(|f| f.name.clone())
+                            .unwrap_or_default(),
+                    });
 
                     self.tool_calls.len() - 1
                 };
@@ -887,14 +1067,23 @@ where
                     if let Some(args) = function.arguments {
                         tc.arguments.push_str(&args);
 
-                        // Update arguments in partial (best effort parse, or just raw string if we supported it)
+                        // #124: keep the partial block's `arguments` growing as
+                        // deltas arrive, so snapshot-based clients (RPC/ACP IDE
+                        // frontends) render a large tool call as it streams
+                        // instead of a pause then a pop-in. `complete_partial_json`
+                        // best-effort closes the accumulated prefix into valid
+                        // JSON; on an un-completable fragment it returns None and
+                        // we keep the last good value (never wrong data). The
+                        // terminal event still sets the fully-parsed arguments.
+                        if let Some(partial_args) = complete_partial_json(&tc.arguments) {
+                            if let Some(ContentBlock::ToolCall(block)) =
+                                self.partial.content.get_mut(content_index)
+                            {
+                                block.arguments = partial_args;
+                            }
+                        }
 
-                        // Note: We don't update partial.arguments here because it requires valid JSON.
-
-                        // We only update it at the end or if we switched to storing raw string args.
-
-                        // But we MUST emit the delta.
-
+                        // The delta is still emitted for streaming consumers.
                         self.pending_events.push_back(StreamEvent::ToolCallDelta {
                             content_index,
 
@@ -1138,6 +1327,10 @@ struct OpenAIUsage {
     total_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<OpenAIPromptTokensDetails>,
+    /// DeepSeek reports the cache-miss (uncached) prompt token count directly.
+    /// When present it is the authoritative source for `usage.input`.
+    #[serde(default)]
+    prompt_cache_miss_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1416,6 +1609,75 @@ mod tests {
     use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::io::{Read, Write};
+
+    /// #124: the partial-JSON completer gives snapshot clients live tool-call
+    /// arguments. Each accumulated prefix must complete to a valid `Value` that
+    /// faithfully reflects the content so far (closing open structure only),
+    /// and an un-completable fragment yields `None` (caller keeps last value).
+    #[test]
+    fn complete_partial_json_streams_tool_call_arguments() {
+        // Growing prefixes of `{"path": "src/lib.rs", "content": "hello"}`.
+        assert_eq!(complete_partial_json(""), None);
+        assert_eq!(complete_partial_json("{"), Some(json!({})));
+        assert_eq!(
+            complete_partial_json(r#"{"path": "src/li"#),
+            Some(json!({"path": "src/li"}))
+        );
+        assert_eq!(
+            complete_partial_json(r#"{"path": "src/lib.rs""#),
+            Some(json!({"path": "src/lib.rs"}))
+        );
+        // Complete member — must be kept, not stripped.
+        assert_eq!(
+            complete_partial_json(r#"{"path": "src/lib.rs""#),
+            Some(json!({"path": "src/lib.rs"}))
+        );
+        // Trailing comma dropped.
+        assert_eq!(
+            complete_partial_json(r#"{"path": "src/lib.rs", "#),
+            Some(json!({"path": "src/lib.rs"}))
+        );
+        // Dangling `"key":` (no value yet) dropped; complete member kept.
+        assert_eq!(
+            complete_partial_json(r#"{"path": "src/lib.rs", "content":"#),
+            Some(json!({"path": "src/lib.rs"}))
+        );
+        // Dangling bare key (no colon yet) dropped.
+        assert_eq!(
+            complete_partial_json(r#"{"path": "src/lib.rs", "content"#),
+            Some(json!({"path": "src/lib.rs"}))
+        );
+        // Complete document round-trips.
+        assert_eq!(
+            complete_partial_json(r#"{"path": "src/lib.rs", "content": "hello"}"#),
+            Some(json!({"path": "src/lib.rs", "content": "hello"}))
+        );
+    }
+
+    #[test]
+    fn complete_partial_json_handles_arrays_escapes_and_unparseable() {
+        // Open array + trailing comma.
+        assert_eq!(
+            complete_partial_json(r#"{"items": [1, 2, "#),
+            Some(json!({"items": [1, 2]}))
+        );
+        assert_eq!(
+            complete_partial_json(r#"{"items": [1, 2"#),
+            Some(json!({"items": [1, 2]}))
+        );
+        // Escaped quote inside an open string is preserved.
+        assert_eq!(
+            complete_partial_json(r#"{"a": "b\"c"#),
+            Some(json!({"a": "b\"c"}))
+        );
+        // Dangling escape backslash is dropped before closing.
+        assert_eq!(
+            complete_partial_json(r#"{"a": "bc\"#),
+            Some(json!({"a": "bc"}))
+        );
+        // A partially-typed bare literal can't be closed safely → None.
+        assert_eq!(complete_partial_json(r#"{"a": tr"#), None);
+    }
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -3122,6 +3384,65 @@ mod tests {
             let empty = stream::empty::<std::result::Result<Vec<u8>, std::io::Error>>();
             let sse = crate::sse::SseStream::new(Box::pin(empty));
             StreamState::new(sse, "gpt-test".into(), "openai".into(), "openai".into())
+        }
+
+        /// Regression for #121: cached prompt tokens must not be double-counted.
+        /// `prompt_tokens` includes cached tokens, so `usage.input` must exclude
+        /// them (`prompt_tokens - cached_tokens`) while `cache_read` keeps the
+        /// cached count, matching the Anthropic convention where
+        /// `input + cache_read` reconstructs the full prompt.
+        #[test]
+        fn cache_heavy_usage_excludes_cache_reads_from_input() {
+            let mut state = make_state();
+            let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":172405,"completion_tokens":40,"total_tokens":172445,"prompt_tokens_details":{"cached_tokens":172288}}}"#;
+            state.process_event(chunk).expect("process usage chunk");
+
+            assert_eq!(state.partial.usage.input, 117);
+            assert_eq!(state.partial.usage.cache_read, 172_288);
+            assert_eq!(state.partial.usage.output, 40);
+            assert_eq!(state.partial.usage.total_tokens, 172_445);
+            // input + cache_read reconstructs the full prompt token count.
+            assert_eq!(
+                state.partial.usage.input + state.partial.usage.cache_read,
+                172_405
+            );
+        }
+
+        /// DeepSeek reports the cache-miss count directly; prefer it over
+        /// subtraction as the authoritative source for `usage.input`.
+        #[test]
+        fn deepseek_prompt_cache_miss_tokens_is_authoritative_for_input() {
+            let mut state = make_state();
+            let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":20,"total_tokens":1020,"prompt_cache_miss_tokens":128,"prompt_tokens_details":{"cached_tokens":872}}}"#;
+            state.process_event(chunk).expect("process usage chunk");
+
+            assert_eq!(state.partial.usage.input, 128);
+            assert_eq!(state.partial.usage.cache_read, 872);
+        }
+
+        /// Guard against underflow: if a provider ever reports more cached
+        /// tokens than prompt tokens, `input` saturates to 0 rather than
+        /// wrapping around.
+        #[test]
+        fn cached_greater_than_prompt_saturates_input_to_zero() {
+            let mut state = make_state();
+            let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":250}}}"#;
+            state.process_event(chunk).expect("process usage chunk");
+
+            assert_eq!(state.partial.usage.input, 0);
+            assert_eq!(state.partial.usage.cache_read, 250);
+        }
+
+        /// No cache details: `input` equals `prompt_tokens` and `cache_read`
+        /// stays zero (no regression for the common uncached case).
+        #[test]
+        fn usage_without_cache_details_maps_input_directly() {
+            let mut state = make_state();
+            let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":500,"completion_tokens":10,"total_tokens":510}}"#;
+            state.process_event(chunk).expect("process usage chunk");
+
+            assert_eq!(state.partial.usage.input, 500);
+            assert_eq!(state.partial.usage.cache_read, 0);
         }
 
         fn small_string() -> impl Strategy<Value = String> {

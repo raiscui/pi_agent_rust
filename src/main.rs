@@ -19,7 +19,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use anyhow::{Result, bail};
 use asupersync::runtime::reactor::create_reactor;
 use asupersync::runtime::{RuntimeBuilder, RuntimeHandle};
-use asupersync::sync::Mutex;
+use asupersync::sync::{Mutex, OwnedMutexGuard};
 use bubbletea::{Cmd, KeyMsg, KeyType, Message as BubbleMessage, Program, quit};
 use clap::error::ErrorKind;
 use pi::agent::{
@@ -469,15 +469,12 @@ fn main_impl() -> Result<()> {
     // we must boot the normal startup path so the compat ledger can be emitted deterministically.
     if cli.command.is_none() {
         if let Some(pattern) = &cli.list_models {
-            let compat_scan_enabled =
-                std::env::var("PI_EXT_COMPAT_SCAN")
-                    .ok()
-                    .is_some_and(|value| {
-                        matches!(
-                            value.trim().to_ascii_lowercase().as_str(),
-                            "1" | "true" | "yes" | "on"
-                        )
-                    });
+            let compat_scan_enabled = std::env::var("PI_EXT_COMPAT_SCAN").is_ok_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
             let has_cli_extensions = !cli.extension.is_empty();
 
             if !compat_scan_enabled && !has_cli_extensions {
@@ -1823,10 +1820,12 @@ async fn run(
         result
     };
 
-    // Best-effort autosave flush on shutdown.
+    // Best-effort autosave flush on shutdown. OwnedMutexGuard: the guard is
+    // held across the flush await, and the borrowed MutexGuard is !Send
+    // (clippy::future_not_send).
     if !cli.no_session {
         let cx = pi::agent_cx::AgentCx::for_request();
-        if let Ok(mut guard) = session_handle.lock(cx.cx()).await {
+        if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx).await {
             if let Err(e) = guard.flush_autosave_on_shutdown().await {
                 eprintln!("Warning: Failed to flush session autosave: {e}");
             }
@@ -6970,30 +6969,17 @@ where
 
                 sleep_with_current_timer(Duration::from_millis(u64::from(delay_ms))).await;
 
-                // Revert the failed user message before retrying to prevent context duplication.
-                let _ = session.revert_last_user_message().await;
-
-                // Re-send the same prompt (matches RPC retry behaviour).
-                current_result = match &input {
-                    PromptInput::Text(text) => {
-                        session
-                            .run_text_with_abort(
-                                text.clone(),
-                                Some(abort_signal.clone()),
-                                make_event_handler(),
-                            )
-                            .await
-                    }
-                    PromptInput::Content(content) => {
-                        session
-                            .run_with_content_with_abort(
-                                content.clone(),
-                                Some(abort_signal.clone()),
-                                make_event_handler(),
-                            )
-                            .await
-                    }
-                };
+                // Resume the turn instead of replaying it: strip only the failed
+                // request's incomplete output (a transient drop leaves a partial
+                // or error assistant), preserving the user prompt and every
+                // completed tool cycle, then continue the loop. This re-issues
+                // only the failed provider request — already-executed tool calls
+                // are not re-run and prior work is not re-billed
+                // (pi_agent_rust#125). Matches RPC retry behaviour.
+                let _ = session.revert_incomplete_response().await;
+                current_result = session
+                    .run_continue_with_abort(Some(abort_signal.clone()), make_event_handler())
+                    .await;
             }
             Ok(msg) => {
                 // Success or non-retryable error or max retries reached.
@@ -7013,8 +6999,11 @@ where
             }
             Err(err) => {
                 let err_str = err.to_string();
+                // Classify from the TYPED error first (transient io::ErrorKind
+                // via the source chain), then fall back to message-text matching
+                // for prose-only errors (pi_agent_rust#118).
                 if retry_count < max_retries
-                    && pi::error::is_retryable_error(&err_str, None, None)
+                    && (err.is_transient() || pi::error::is_retryable_error(&err_str, None, None))
                     && snapshot_print_text_stream_state(text_stream_state).can_retry(is_json)
                 {
                     retry_count += 1;
@@ -7030,31 +7019,17 @@ where
 
                     sleep_with_current_timer(Duration::from_millis(u64::from(delay_ms))).await;
 
-                    // Revert the failed user message before retrying to prevent context
-                    // duplication when the provider fails before emitting an assistant
-                    // message.
-                    let _ = session.revert_last_user_message().await;
-
-                    current_result = match &input {
-                        PromptInput::Text(text) => {
-                            session
-                                .run_text_with_abort(
-                                    text.clone(),
-                                    Some(abort_signal.clone()),
-                                    make_event_handler(),
-                                )
-                                .await
-                        }
-                        PromptInput::Content(content) => {
-                            session
-                                .run_with_content_with_abort(
-                                    content.clone(),
-                                    Some(abort_signal.clone()),
-                                    make_event_handler(),
-                                )
-                                .await
-                        }
-                    };
+                    // Resume the turn instead of replaying it (pi_agent_rust#125):
+                    // strip only the failed request's incomplete output and
+                    // continue from the last completed state. When the provider
+                    // fails before emitting any assistant message there is nothing
+                    // to strip and the resume simply re-issues the request — but
+                    // any already-completed tool cycles from earlier in the turn
+                    // are preserved rather than re-executed.
+                    let _ = session.revert_incomplete_response().await;
+                    current_result = session
+                        .run_continue_with_abort(Some(abort_signal.clone()), make_event_handler())
+                        .await;
                 } else {
                     if retry_count > 0 && is_json {
                         emit_json_event(&AgentEvent::AutoRetryEnd {
@@ -8205,6 +8180,63 @@ mod tests {
             ..retryable
         };
         assert!(!is_retryable_prompt_result(&success));
+    }
+
+    /// End-to-end (`pi_agent_rust#118`): a transient connection drop must be
+    /// re-driven through the REAL retry-decision path. A provider surfaces a
+    /// typed `io::Error` mid-stream; it is wrapped at the source by
+    /// `Error::sse` (the last place the `io::ErrorKind` is known), then
+    /// flattened to `AssistantMessage::error_message` exactly as
+    /// `Agent::build_error_message` does, producing a `StopReason::Error`
+    /// message. `is_retryable_prompt_result` — the function `main.rs`'s retry
+    /// loop actually consults — must classify it retryable, even though the
+    /// typed kind is gone by the time the message string is in hand.
+    #[test]
+    fn transient_connection_drop_retried_end_to_end() {
+        use pi::model::{AssistantMessage, Usage};
+
+        let build_error_turn = |flattened: String| AssistantMessage {
+            content: vec![],
+            api: "test".to_string(),
+            provider: "test".to_string(),
+            model: "test".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Error,
+            error_message: Some(flattened),
+            timestamp: 0,
+        };
+
+        // Every transient io kind a dropped connection can surface, routed
+        // through the real source wrapper + flatten, must be retried.
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let io_err = std::io::Error::new(kind, "opaque transport failure");
+            let flattened = pi::error::Error::sse(&io_err).to_string();
+            let turn = build_error_turn(flattened.clone());
+            assert!(
+                is_retryable_prompt_result(&turn),
+                "{kind:?} drop should be retried, flattened: {flattened}"
+            );
+        }
+
+        // The exact rustls close_notify string from the issue (prose fallback).
+        let close_notify = build_error_turn(
+            "API error: SSE error: tls connection closed without \
+                 close_notify"
+                .to_string(),
+        );
+        assert!(is_retryable_prompt_result(&close_notify));
+
+        // A genuinely fatal stream error is NOT retried (no false positives).
+        let fatal_io = std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8");
+        let fatal = build_error_turn(pi::error::Error::sse(&fatal_io).to_string());
+        assert!(!is_retryable_prompt_result(&fatal));
     }
 
     #[test]

@@ -432,6 +432,25 @@ struct RpcSharedState {
 
 const MAX_RPC_PENDING_MESSAGES: usize = 128;
 
+/// In-band shutdown marker for the stdout writer thread. Never a valid JSON
+/// event line (leading NUL), so it cannot collide with real output. Sent by
+/// `run_stdio` after `run` returns so the writer exits deterministically even
+/// if a background task still holds an `out_tx` clone (gh #137).
+const RPC_WRITER_SHUTDOWN_SENTINEL: &str = "\u{0}__pi_rpc_writer_shutdown__";
+
+/// Clears an activity flag when dropped. Held by the turn/command/compaction
+/// tasks so a panic (isolated by the runtime) or task cancellation cannot
+/// leak `is_streaming`/`is_compacting` as stuck-true and pin the stdin-EOF
+/// drain loop forever (gh #137). Normal completion paths still clear the
+/// flags explicitly at their intended points; this is a safety net.
+struct ClearFlagOnDrop(Arc<AtomicBool>);
+
+impl Drop for ClearFlagOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 impl RpcSharedState {
     fn new(config: &Config) -> Self {
         Self {
@@ -518,10 +537,13 @@ pub async fn run_stdio(mut session: AgentSession, options: RpcOptions) -> Result
         }
     });
 
-    std::thread::spawn(move || {
+    let writer_handle = std::thread::spawn(move || {
         let stdout = io::stdout();
         let mut writer = io::BufWriter::new(stdout.lock());
         for line in out_rx {
+            if line == RPC_WRITER_SHUTDOWN_SENTINEL {
+                break;
+            }
             if writer.write_all(line.as_bytes()).is_err() {
                 break;
             }
@@ -534,7 +556,26 @@ pub async fn run_stdio(mut session: AgentSession, options: RpcOptions) -> Result
         }
     });
 
-    run(session, options, in_rx, out_tx).await
+    let out_tx_shutdown = out_tx.clone();
+    let result = run(session, options, in_rx, out_tx).await;
+
+    // `run` has drained any in-flight turn, so everything queued ahead of the
+    // sentinel is the complete event stream. The sentinel (rather than a bare
+    // join) makes writer shutdown deterministic even if a background task
+    // still holds an `out_tx` clone (gh #137). try_send, not send: if the
+    // channel is full the client has stopped reading stdout, and a blocking
+    // send here would stall the runtime thread (blocking even Ctrl+C
+    // handling); in that case skip the join and let process exit tear the
+    // writer down.
+    if out_tx_shutdown
+        .try_send(RPC_WRITER_SHUTDOWN_SENTINEL.to_string())
+        .is_ok()
+    {
+        drop(out_tx_shutdown);
+        let _ = writer_handle.join();
+    }
+
+    result
 }
 
 #[allow(clippy::too_many_lines)]
@@ -564,8 +605,7 @@ pub async fn run(
         let follow_state = Arc::clone(&shared_state);
         let steering_cx = cx.clone();
         let follow_cx = cx.clone();
-        let mut guard = session
-            .lock(&cx)
+        let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
             .await
             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
         guard.set_queue_modes(
@@ -603,8 +643,7 @@ pub async fn run(
     // JSON notifications so the RPC client can respond programmatically.
     let rpc_extension_manager = {
         let cx_ui = cx.clone();
-        let guard = session
-            .lock(&cx_ui)
+        let guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx_ui)
             .await
             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
         guard
@@ -755,8 +794,7 @@ pub async fn run(
 
                     let expanded = options.resources.expand_input(&message);
                     let queued_result = {
-                        let mut state = shared_state
-                            .lock(&cx)
+                        let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                             .await
                             .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                         match streaming_behavior {
@@ -863,8 +901,7 @@ pub async fn run(
 
                 let expanded = options.resources.expand_input(&message);
                 if is_streaming.load(Ordering::SeqCst) {
-                    let result = shared_state
-                        .lock(&cx)
+                    let result = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?
                         .push_steering(build_user_message(&expanded, &[]));
@@ -936,8 +973,7 @@ pub async fn run(
 
                 let expanded = options.resources.expand_input(&message);
                 if is_streaming.load(Ordering::SeqCst) {
-                    let result = shared_state
-                        .lock(&cx)
+                    let result = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?
                         .push_follow_up(build_user_message(&expanded, &[]));
@@ -1000,16 +1036,17 @@ pub async fn run(
 
             "get_state" => {
                 let snapshot = {
-                    let state = shared_state
-                        .lock(&cx)
+                    let state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                     RpcStateSnapshot::from(&*state)
                 };
                 let data = {
-                    let inner_session = session_handle.lock(&cx).await.map_err(|err| {
-                        Error::session(format!("inner session lock failed: {err}"))
-                    })?;
+                    let inner_session = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx)
+                        .await
+                        .map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
                     session_state(
                         &inner_session,
                         &options,
@@ -1023,9 +1060,11 @@ pub async fn run(
 
             "get_session_stats" => {
                 let data = {
-                    let inner_session = session_handle.lock(&cx).await.map_err(|err| {
-                        Error::session(format!("inner session lock failed: {err}"))
-                    })?;
+                    let inner_session = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx)
+                        .await
+                        .map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
                     session_stats(&inner_session)
                 };
                 let _ = out_tx.send(response_ok(id, "get_session_stats", Some(data)));
@@ -1033,9 +1072,11 @@ pub async fn run(
 
             "get_messages" => {
                 let messages = {
-                    let inner_session = session_handle.lock(&cx).await.map_err(|err| {
-                        Error::session(format!("inner session lock failed: {err}"))
-                    })?;
+                    let inner_session = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx)
+                        .await
+                        .map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
                     inner_session
                         .entries_for_current_path()
                         .iter()
@@ -1123,8 +1164,7 @@ pub async fn run(
 
                 let result: Result<()> = async {
                     let clamped_level = {
-                        let mut guard = session
-                            .lock(&cx)
+                        let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                             .await
                             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                         let provider_impl = providers::create_provider(
@@ -1178,8 +1218,7 @@ pub async fn run(
             "cycle_model" => {
                 let result = async {
                     let cycle_result = {
-                        let mut guard = session
-                            .lock(&cx)
+                        let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                             .await
                             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                         cycle_model_for_rpc(&mut guard, &options).await?
@@ -1238,8 +1277,7 @@ pub async fn run(
 
                 // Get the properly clamped level first
                 let clamped_level = {
-                    let guard = session
-                        .lock(&cx)
+                    let guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let runtime_provider = guard.agent.provider().name().to_string();
@@ -1276,8 +1314,7 @@ pub async fn run(
             "cycle_thinking_level" => {
                 // Calculate next thinking level without holding lock across apply_thinking_level await
                 let next = {
-                    let guard = session
-                        .lock(&cx)
+                    let guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let runtime_provider = guard.agent.provider().name().to_string();
@@ -1352,15 +1389,13 @@ pub async fn run(
                     continue;
                 };
                 let follow_up_mode = {
-                    let mut state = shared_state
-                        .lock(&cx)
+                    let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                     state.steering_mode = mode;
                     state.follow_up_mode
                 };
-                let mut guard = session
-                    .lock(&cx)
+                let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                     .await
                     .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                 guard.set_queue_modes(mode, follow_up_mode);
@@ -1386,15 +1421,13 @@ pub async fn run(
                     continue;
                 };
                 let steering_mode = {
-                    let mut state = shared_state
-                        .lock(&cx)
+                    let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                     state.follow_up_mode = mode;
                     state.steering_mode
                 };
-                let mut guard = session
-                    .lock(&cx)
+                let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                     .await
                     .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                 guard.set_queue_modes(steering_mode, mode);
@@ -1411,8 +1444,7 @@ pub async fn run(
                     ));
                     continue;
                 };
-                let mut state = shared_state
-                    .lock(&cx)
+                let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                     .await
                     .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                 state.auto_compaction_enabled = enabled;
@@ -1429,8 +1461,7 @@ pub async fn run(
                     ));
                     continue;
                 };
-                let mut state = shared_state
-                    .lock(&cx)
+                let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                     .await
                     .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                 state.auto_retry_enabled = enabled;
@@ -1455,8 +1486,7 @@ pub async fn run(
                 let result: Result<()> = async {
                     // Apply session info changes without holding lock across persist_session await
                     {
-                        let guard = session
-                            .lock(&cx)
+                        let guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                             .await
                             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                         let mut inner_session = guard.session.lock(&cx).await.map_err(|err| {
@@ -1466,8 +1496,7 @@ pub async fn run(
                     } // Drop guard here
 
                     // Re-acquire guard just for persist_session
-                    let mut guard = session
-                        .lock(&cx)
+                    let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     guard.persist_session().await?;
@@ -1488,9 +1517,11 @@ pub async fn run(
 
             "get_last_assistant_text" => {
                 let text = {
-                    let inner_session = session_handle.lock(&cx).await.map_err(|err| {
-                        Error::session(format!("inner session lock failed: {err}"))
-                    })?;
+                    let inner_session = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx)
+                        .await
+                        .map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
                     last_assistant_text(&inner_session)
                 };
                 let _ = out_tx.send(response_ok(
@@ -1510,8 +1541,7 @@ pub async fn run(
                 // and allows the HTML rendering + file I/O to proceed without holding
                 // any session lock.
                 let snapshot = {
-                    let guard = session
-                        .lock(&cx)
+                    let guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let inner = guard.session.lock(&cx).await.map_err(|err| {
@@ -1539,8 +1569,7 @@ pub async fn run(
                     continue;
                 };
 
-                let mut running = bash_state
-                    .lock(&cx)
+                let mut running = OwnedMutexGuard::lock(Arc::clone(&bash_state), &cx)
                     .await
                     .map_err(|err| Error::session(format!("bash state lock failed: {err}")))?;
                 if running.is_some() {
@@ -1573,8 +1602,18 @@ pub async fn run(
 
                     let response = match result {
                         Ok(result) => {
-                            // Append bash execution message without holding lock across persist_session await
-                            let should_persist = if let Ok(guard) = session.lock(&bash_cx).await {
+                            // Append bash execution message without holding lock across persist_session await.
+                            //
+                            // The outer `AgentSession` guard must be owned: it is
+                            // held across the inner `guard.session.lock(..).await`,
+                            // and `MutexGuard` is `!Send` (asupersync 0.3.9) while
+                            // this future is handed to `RuntimeHandle::spawn`.
+                            // Acquisition order is unchanged (outer `AgentSession`
+                            // then inner `Session`), and the inner guard is still
+                            // released before the persist step below.
+                            let should_persist = if let Ok(guard) =
+                                OwnedMutexGuard::lock(Arc::clone(&session), &bash_cx).await
+                            {
                                 if let Ok(mut inner_session) = guard.session.lock(&bash_cx).await {
                                     inner_session.append_message(SessionMessage::BashExecution {
                                         command: command.clone(),
@@ -1596,7 +1635,9 @@ pub async fn run(
 
                             // Persist session outside the guard scope
                             if should_persist {
-                                if let Ok(mut guard) = session.lock(&bash_cx).await {
+                                if let Ok(mut guard) =
+                                    OwnedMutexGuard::lock(Arc::clone(&session), &bash_cx).await
+                                {
                                     let _ = guard.persist_session().await;
                                 }
                             }
@@ -1626,8 +1667,7 @@ pub async fn run(
             }
 
             "abort_bash" => {
-                let mut running = bash_state
-                    .lock(&cx)
+                let mut running = OwnedMutexGuard::lock(Arc::clone(&bash_state), &cx)
                     .await
                     .map_err(|err| Error::session(format!("bash state lock failed: {err}")))?;
                 if let Some(running_bash) = running.take() {
@@ -1661,8 +1701,7 @@ pub async fn run(
                     };
 
                 let result: Result<Value> = async {
-                    let mut guard = session
-                        .lock(&cx)
+                    let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let path_entries = {
@@ -1761,8 +1800,7 @@ pub async fn run(
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let (session_id, previous_session_file) = {
-                    let mut guard = session
-                        .lock(&cx)
+                    let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let (session_dir, provider, model_id, thinking_level, previous_session_file) = {
@@ -1804,8 +1842,7 @@ pub async fn run(
                     (session_id, previous_session_file)
                 };
                 {
-                    let mut state = shared_state
-                        .lock(&cx)
+                    let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                         .await
                         .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                     state.steering.clear();
@@ -1885,8 +1922,7 @@ pub async fn run(
                         let messages = new_session.to_messages_for_current_path();
                         let session_id = new_session.header.id.clone();
                         let previous_session_file;
-                        let mut guard = session
-                            .lock(&cx)
+                        let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                             .await
                             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                         {
@@ -1900,8 +1936,7 @@ pub async fn run(
                         }
                         guard.agent.replace_messages(messages);
                         guard.agent.stream_options_mut().session_id = Some(session_id.clone());
-                        let mut state = shared_state
-                            .lock(&cx)
+                        let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
                             .await
                             .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
                         state.steering.clear();
@@ -1938,75 +1973,74 @@ pub async fn run(
                     continue;
                 };
 
-                let result: Result<String> =
-                    async {
-                        // Phase 1: Snapshot — brief lock to compute ForkPlan + extract metadata.
-                        let (fork_plan, parent_path, session_dir, save_enabled, header_snapshot) = {
-                            let guard = session.lock(&cx).await.map_err(|err| {
-                                Error::session(format!("session lock failed: {err}"))
-                            })?;
-                            let inner = guard.session.lock(&cx).await.map_err(|err| {
-                                Error::session(format!("inner session lock failed: {err}"))
-                            })?;
-                            let plan = inner.plan_fork_from_user_message(entry_id)?;
-                            let parent_path = inner.path.as_ref().map(|p| p.display().to_string());
-                            let session_dir = inner.session_dir.clone();
-                            let header = inner.header.clone();
-                            (plan, parent_path, session_dir, guard.save_enabled(), header)
-                            // Both locks released here.
-                        };
+                let result: Result<String> = async {
+                    // Phase 1: Snapshot — brief lock to compute ForkPlan + extract metadata.
+                    let (fork_plan, parent_path, session_dir, save_enabled, header_snapshot) = {
+                        let guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
+                            .await
+                            .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+                        let inner = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        let plan = inner.plan_fork_from_user_message(entry_id)?;
+                        let parent_path = inner.path.as_ref().map(|p| p.display().to_string());
+                        let session_dir = inner.session_dir.clone();
+                        let header = inner.header.clone();
+                        (plan, parent_path, session_dir, guard.save_enabled(), header)
+                        // Both locks released here.
+                    };
 
-                        // Phase 2: Build new session without holding any lock.
-                        let selected_text = fork_plan.selected_text.clone();
+                    // Phase 2: Build new session without holding any lock.
+                    let selected_text = fork_plan.selected_text.clone();
 
-                        let mut new_session = if save_enabled {
-                            crate::session::Session::create_with_dir(session_dir)
-                        } else {
-                            crate::session::Session::in_memory()
-                        };
-                        new_session.header.parent_session = parent_path;
-                        new_session
-                            .header
-                            .provider
-                            .clone_from(&header_snapshot.provider);
-                        new_session
-                            .header
-                            .model_id
-                            .clone_from(&header_snapshot.model_id);
-                        new_session
-                            .header
-                            .thinking_level
-                            .clone_from(&header_snapshot.thinking_level);
-                        new_session.init_from_fork_plan(fork_plan);
+                    let mut new_session = if save_enabled {
+                        crate::session::Session::create_with_dir(session_dir)
+                    } else {
+                        crate::session::Session::in_memory()
+                    };
+                    new_session.header.parent_session = parent_path;
+                    new_session
+                        .header
+                        .provider
+                        .clone_from(&header_snapshot.provider);
+                    new_session
+                        .header
+                        .model_id
+                        .clone_from(&header_snapshot.model_id);
+                    new_session
+                        .header
+                        .thinking_level
+                        .clone_from(&header_snapshot.thinking_level);
+                    new_session.init_from_fork_plan(fork_plan);
 
-                        let messages = new_session.to_messages_for_current_path();
-                        let session_id = new_session.header.id.clone();
+                    let messages = new_session.to_messages_for_current_path();
+                    let session_id = new_session.header.id.clone();
 
-                        // Phase 3: Swap — brief lock to install the new session.
-                        {
-                            let mut guard = session.lock(&cx).await.map_err(|err| {
-                                Error::session(format!("session lock failed: {err}"))
-                            })?;
-                            let mut inner = guard.session.lock(&cx).await.map_err(|err| {
-                                Error::session(format!("inner session lock failed: {err}"))
-                            })?;
-                            *inner = new_session;
-                            drop(inner);
-                            guard.agent.replace_messages(messages);
-                            guard.agent.stream_options_mut().session_id = Some(session_id);
-                        }
-
-                        {
-                            let mut state = shared_state.lock(&cx).await.map_err(|err| {
-                                Error::session(format!("state lock failed: {err}"))
-                            })?;
-                            state.steering.clear();
-                            state.follow_up.clear();
-                        }
-
-                        Ok(selected_text)
+                    // Phase 3: Swap — brief lock to install the new session.
+                    {
+                        let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
+                            .await
+                            .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
+                        let mut inner = guard.session.lock(&cx).await.map_err(|err| {
+                            Error::session(format!("inner session lock failed: {err}"))
+                        })?;
+                        *inner = new_session;
+                        drop(inner);
+                        guard.agent.replace_messages(messages);
+                        guard.agent.stream_options_mut().session_id = Some(session_id);
                     }
-                    .await;
+
+                    {
+                        let mut state = OwnedMutexGuard::lock(Arc::clone(&shared_state), &cx)
+                            .await
+                            .map_err(|err| Error::session(format!("state lock failed: {err}")))?;
+                        state.steering.clear();
+                        state.follow_up.clear();
+                    }
+
+                    Ok(selected_text)
+                }
+                .await;
 
                 match result {
                     Ok(selected_text) => {
@@ -2025,8 +2059,7 @@ pub async fn run(
             "get_fork_messages" => {
                 // Snapshot entries under brief lock, compute messages outside.
                 let path_entries = {
-                    let guard = session
-                        .lock(&cx)
+                    let guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
                         .await
                         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
                     let inner_session = guard.session.lock(&cx).await.map_err(|err| {
@@ -2150,11 +2183,58 @@ pub async fn run(
         }
     }
 
+    // stdin has closed. Drain any in-flight work (streaming turn, extension
+    // command, auto-compaction, background bash) before tearing down so a
+    // client that pipes a single command and closes stdin
+    // (`printf '{"type":"prompt",...}' | pi --mode rpc`) still receives the
+    // full event stream through `agent_end` (gh #137). Without this the
+    // process shuts down while the spawned task is still starting or
+    // streaming, and the work is silently dropped. The Ctrl+C abort path in
+    // `run_rpc_mode` still provides an escape hatch if a provider never
+    // completes; a client that stops reading stdout while work is in flight
+    // gets backpressure-blocked here by design.
+    loop {
+        let bash_running = OwnedMutexGuard::lock(Arc::clone(&bash_state), &cx)
+            .await
+            .is_ok_and(|running| running.is_some());
+        if !is_streaming.load(Ordering::SeqCst)
+            && !is_compacting.load(Ordering::SeqCst)
+            && !bash_running
+        {
+            break;
+        }
+        // Extension UI requests can never be answered once stdin is closed;
+        // cancel them (including any that arrive mid-drain) so an extension
+        // command blocked on UI input finishes instead of pinning the drain.
+        if let (Some(ui_state), Some(manager)) = (&rpc_ui_state, &rpc_extension_manager) {
+            let pending = ui_state.lock(&cx).await.map_or_else(
+                |_| Vec::new(),
+                |mut guard| {
+                    let mut pending: Vec<ExtensionUiRequest> =
+                        guard.active.take().into_iter().collect();
+                    pending.extend(std::mem::take(&mut guard.queue));
+                    pending
+                },
+            );
+            for request in pending {
+                let _ = manager.respond_ui(ExtensionUiResponse {
+                    id: request.id,
+                    value: None,
+                    cancelled: true,
+                });
+            }
+        }
+        let now = cx
+            .cx()
+            .timer_driver()
+            .map_or_else(wall_now, |timer| timer.now());
+        sleep(now, Duration::from_millis(25)).await;
+    }
+
     // Explicitly shut down extension runtimes before the session drops.
     // Move the region out under lock, then await shutdown after releasing
     // the lock so we don't hold the session mutex across an async wait.
-    let extension_region = session
-        .lock(&cx)
+    let extension_region = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
         .await
         .ok()
         .and_then(|mut guard| guard.extensions.take());
@@ -2185,6 +2265,7 @@ async fn run_prompt_with_retry(
 ) {
     retry_abort.store(false, Ordering::SeqCst);
     is_streaming.store(true, Ordering::SeqCst);
+    let _streaming_guard = ClearFlagOnDrop(Arc::clone(&is_streaming));
 
     let max_retries = options.config.retry_max_retries();
     let mut retry_count: u32 = 0;
@@ -2222,14 +2303,27 @@ async fn run_prompt_with_retry(
             let event_handler =
                 rpc_agent_event_handler(out_tx.clone(), runtime_for_events, extensions);
 
-            if images.is_empty() {
-                guard
-                    .run_text_with_abort(message.clone(), Some(abort_signal), event_handler)
-                    .await
+            if retry_count == 0 {
+                // First attempt: add the user message and run the turn.
+                if images.is_empty() {
+                    guard
+                        .run_text_with_abort(message.clone(), Some(abort_signal), event_handler)
+                        .await
+                } else {
+                    let blocks = build_prompt_content_blocks(&message, &images);
+                    guard
+                        .run_with_content_with_abort(blocks, Some(abort_signal), event_handler)
+                        .await
+                }
             } else {
-                let blocks = build_prompt_content_blocks(&message, &images);
+                // Retry: resume the turn from the last completed state instead of
+                // replaying it from the user message. The incomplete output of the
+                // failed request was stripped via `revert_incomplete_response`
+                // below; every completed tool cycle stays on the path, so the
+                // retry re-issues only the failed provider request — no tool
+                // re-execution, no re-billing of prior work (pi_agent_rust#125).
                 guard
-                    .run_with_content_with_abort(blocks, Some(abort_signal), event_handler)
+                    .run_continue_with_abort(Some(abort_signal), event_handler)
                     .await
             }
         };
@@ -2284,9 +2378,13 @@ async fn run_prompt_with_retry(
             }
             Err(err) => {
                 let err_str = err.to_string();
-                // No usage/context_window from an Err (no response received),
-                // so pass None for both — text matching alone handles it.
-                if !crate::error::is_retryable_error(&err_str, None, None) {
+                // Classify from the TYPED error first — `is_transient` walks the
+                // source chain for a transient `io::ErrorKind` (connection
+                // reset/abort/EOF/broken pipe/timeout) without depending on the
+                // flattened message text. Fall back to message-text matching for
+                // prose-only errors (pi_agent_rust#118). No usage/context_window
+                // from an `Err` (no response received), so pass None for both.
+                if !err.is_transient() && !crate::error::is_retryable_error(&err_str, None, None) {
                     final_error = Some(err_str);
                     final_error_hints = Some(error_hints_value(&err));
                     break;
@@ -2339,9 +2437,12 @@ async fn run_prompt_with_retry(
             break;
         }
 
-        // Revert the failed user message before retrying to prevent context duplication.
+        // Strip only the failed request's incomplete output before the resume;
+        // the user prompt and every completed tool cycle stay on the session
+        // path so the retry re-issues only the failed provider request rather
+        // than replaying the whole turn (pi_agent_rust#125).
         if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&session), &cx).await {
-            let _ = guard.revert_last_user_message().await;
+            let _ = guard.revert_incomplete_response().await;
         }
     }
 
@@ -2353,9 +2454,10 @@ async fn run_prompt_with_retry(
         }));
     }
 
-    is_streaming.store(false, Ordering::SeqCst);
-
     if !success {
+        // Emit the terminal event BEFORE clearing is_streaming: the stdin-EOF
+        // drain only guarantees flush-before-shutdown for events queued while
+        // a flag is still set (gh #137).
         if let Some(err) = final_error {
             let mut payload = json!({
                 "type": "agent_end",
@@ -2367,6 +2469,7 @@ async fn run_prompt_with_retry(
             }
             let _ = out_tx.send(event(&payload));
         }
+        is_streaming.store(false, Ordering::SeqCst);
         return;
     }
 
@@ -2374,7 +2477,17 @@ async fn run_prompt_with_retry(
         .await
         .is_ok_and(|state| state.auto_compaction_enabled);
     if auto_compaction_enabled {
-        maybe_auto_compact(session, options, is_compacting, out_tx).await;
+        // Pre-claim the compaction flag before releasing is_streaming so the
+        // stdin-EOF drain never samples both flags false during the handoff
+        // (maybe_auto_compact only claims it after several awaits).
+        is_compacting.store(true, Ordering::SeqCst);
+    }
+    is_streaming.store(false, Ordering::SeqCst);
+    if auto_compaction_enabled {
+        maybe_auto_compact(session, options, Arc::clone(&is_compacting), out_tx).await;
+        // maybe_auto_compact clears the flag on the paths where it claims it
+        // itself; this covers its early returns before that claim.
+        is_compacting.store(false, Ordering::SeqCst);
     }
 }
 
@@ -2389,6 +2502,7 @@ async fn run_extension_command(
     cx: AgentCx,
 ) {
     is_streaming.store(true, Ordering::SeqCst);
+    let _streaming_guard = ClearFlagOnDrop(Arc::clone(&is_streaming));
 
     let (abort_handle, abort_signal) = AbortHandle::new();
     if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&abort_handle_slot), &cx).await {
@@ -2433,8 +2547,9 @@ async fn run_extension_command(
     if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&abort_handle_slot), &cx).await {
         *guard = None;
     }
-    is_streaming.store(false, Ordering::SeqCst);
 
+    // Emit the terminal event BEFORE clearing is_streaming so the stdin-EOF
+    // drain flushes it before shutdown (gh #137).
     if let Err(err) = result {
         let mut payload = json!({
             "type": "agent_end",
@@ -2444,6 +2559,7 @@ async fn run_extension_command(
         payload["errorHints"] = error_hints_value(&err);
         let _ = out_tx.send(event(&payload));
     }
+    is_streaming.store(false, Ordering::SeqCst);
 }
 
 // =============================================================================
@@ -3951,9 +4067,14 @@ async fn maybe_auto_compact(
     is_compacting: Arc<AtomicBool>,
     out_tx: std::sync::mpsc::SyncSender<String>,
 ) {
+    // Safety net for panics/cancellation: never leak is_compacting stuck-true
+    // (it would pin the stdin-EOF drain; gh #137). The caller may have
+    // pre-claimed the flag before handing off, so clearing on drop is the
+    // correct terminal state on every exit.
+    let _compacting_guard = ClearFlagOnDrop(Arc::clone(&is_compacting));
     let cx = AgentCx::for_current_or_request();
     let (path_entries, context_window, reserve_tokens, settings) = {
-        let Ok(guard) = session.lock(cx.cx()).await else {
+        let Ok(guard) = OwnedMutexGuard::lock(Arc::clone(&session), cx.cx()).await else {
             return;
         };
         let (path_entries, context_window) = {
@@ -4002,13 +4123,15 @@ async fn maybe_auto_compact(
     }));
     is_compacting.store(true, Ordering::SeqCst);
 
+    // No interior `is_compacting.store(false)` on the exit paths below: the
+    // ClearFlagOnDrop guard clears the flag at function exit, strictly AFTER
+    // every event send, so the stdin-EOF drain cannot shut the writer down
+    // between a clear and a trailing AutoCompactionEnd emission (gh #137).
     let (provider, key) = {
         let Ok(guard) = session.lock(cx.cx()).await else {
-            is_compacting.store(false, Ordering::SeqCst);
             return;
         };
         let Some(key) = guard.agent.stream_options().api_key.clone() else {
-            is_compacting.store(false, Ordering::SeqCst);
             let _ = out_tx.send(agent_event(AgentEvent::AutoCompactionEnd {
                 result: None,
                 aborted: false,
@@ -4021,7 +4144,6 @@ async fn maybe_auto_compact(
     };
 
     let result = compact(prep, provider, &key, None).await;
-    is_compacting.store(false, Ordering::SeqCst);
 
     match result {
         Ok(result) => {
@@ -4038,7 +4160,7 @@ async fn maybe_auto_compact(
                 }
             };
 
-            let Ok(mut guard) = session.lock(cx.cx()).await else {
+            let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&session), cx.cx()).await else {
                 return;
             };
             let messages = {
@@ -4573,7 +4695,10 @@ async fn ingest_bash_rpc_chunk(
                     #[cfg(unix)]
                     if let Some(expected) = expected_inode {
                         use std::os::unix::fs::MetadataExt;
-                        match file.metadata().await {
+                        // asupersync 0.3.6's fs::Metadata no longer exposes the
+                        // inode; re-stat the path with std symlink_metadata
+                        // (does not follow symlinks) for the TOCTOU guard.
+                        match std::fs::symlink_metadata(&path) {
                             Ok(meta) => {
                                 if meta.ino() != expected {
                                     tracing::warn!(
@@ -5043,8 +5168,7 @@ async fn apply_thinking_level(
 
     // Apply thinking level changes without holding lock across persist_session await
     {
-        let mut guard = session
-            .lock(&cx)
+        let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
             .await
             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
 
@@ -5064,8 +5188,7 @@ async fn apply_thinking_level(
     } // Drop guard here
 
     // Re-acquire guard just for persist_session
-    let mut guard = session
-        .lock(&cx)
+    let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), &cx)
         .await
         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
     guard.persist_session().await
@@ -5078,8 +5201,7 @@ async fn apply_thinking_level_for_session(
 ) -> Result<()> {
     // Apply thinking level changes without holding lock across persist_session await
     {
-        let mut guard = session
-            .lock(cx)
+        let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), cx)
             .await
             .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
 
@@ -5100,8 +5222,7 @@ async fn apply_thinking_level_for_session(
     } // Drop guard here
 
     // Re-acquire guard just for persist_session to avoid holding lock across await
-    let mut guard = session
-        .lock(cx)
+    let mut guard = OwnedMutexGuard::lock(Arc::clone(&session), cx)
         .await
         .map_err(|err| Error::session(format!("session lock failed: {err}")))?;
     guard.persist_session().await
@@ -5174,6 +5295,9 @@ fn available_thinking_levels(entry: &ModelEntry) -> Vec<crate::model::ThinkingLe
         ];
         if entry.supports_xhigh() {
             levels.push(ThinkingLevel::XHigh);
+        }
+        if entry.supports_max() {
+            levels.push(ThinkingLevel::Max);
         }
         levels
     } else {
@@ -5956,6 +6080,34 @@ export default function init(pi) {
 }
 "#;
 
+    /// Like `wait-confirm`, but reports the UI outcome through a custom
+    /// message event so tests can observe completion on the output stream
+    /// even after stdin has closed (gh #137).
+    const RPC_EOF_DRAIN_EXTENSION_EXT: &str = r#"
+export default function init(pi) {
+    pi.registerCommand("wait-confirm-report", {
+        description: "Block until UI resolves, then report the outcome",
+        handler: async () => {
+            const confirmed = await pi.ui("confirm", {
+                title: "Wait",
+                message: "Hold the command open"
+            });
+            await pi.events("sendMessage", {
+                message: {
+                    customType: "eof-drain-outcome",
+                    content: confirmed ? "confirmed" : "cancelled",
+                    display: false
+                },
+                options: {
+                    triggerTurn: false
+                }
+            });
+            return "reported";
+        }
+    });
+}
+"#;
+
     const RPC_QUEUE_STATE_EXTENSION_EXT: &str = r#"
 export default function init(pi) {
     pi.registerCommand("report-queue-state", {
@@ -6425,6 +6577,90 @@ export default function init(pi) {
             drop(in_tx);
             let result = server.await;
             assert!(result.is_ok(), "rpc server error: {result:?}");
+        });
+    }
+
+    /// Closing stdin while a turn is in flight must drain the turn instead of
+    /// tearing down and silently dropping it (gh #137: `printf '...' | pi
+    /// --mode rpc` lost the entire event stream after the prompt ack). An
+    /// extension command blocked on a UI request is the hardest variant: the
+    /// UI answer can never arrive once stdin is closed, so the drain has to
+    /// cancel the pending request for the command to complete at all.
+    #[test]
+    fn rpc_stdin_eof_drains_in_flight_turn_and_cancels_pending_ui() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build test runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async move {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let cwd = temp.path().to_path_buf();
+            let ext_entry_path = cwd.join("eof-drain-ext.mjs");
+            std::fs::write(&ext_entry_path, RPC_EOF_DRAIN_EXTENSION_EXT)
+                .expect("write extension source");
+
+            let mut agent_session = build_test_agent_session(Session::in_memory());
+            agent_session
+                .enable_extensions(&[], &cwd, None, &[ext_entry_path])
+                .await
+                .expect("enable extensions");
+            let session_handle = Arc::clone(&agent_session.session);
+
+            let options = build_test_rpc_options(&handle, cwd.join("auth.json"));
+            let (in_tx, in_rx) = asupersync::channel::mpsc::channel::<String>(16);
+            let (out_tx, out_rx) = std::sync::mpsc::sync_channel::<String>(1024);
+            let out_rx = Arc::new(Mutex::new(out_rx));
+
+            let server =
+                handle.spawn(async move { run(agent_session, options, in_rx, out_tx).await });
+
+            let ack = send_recv(
+                &in_tx,
+                &out_rx,
+                r#"{"id":"1","type":"prompt","message":"/wait-confirm-report"}"#,
+                "prompt(wait-confirm-report:eof)",
+            )
+            .await;
+            assert_ok(&ack, "prompt");
+
+            // The command is now mid-flight, blocked on the UI confirm.
+            let ui_event = recv_ui_request(&out_rx, "wait-confirm-report ui before eof").await;
+            assert_eq!(ui_event["method"], "confirm");
+
+            // Simulate `printf ... | pi --mode rpc`: stdin closes immediately.
+            drop(in_tx);
+
+            // The server must drain the in-flight command (cancelling the
+            // unanswerable UI request) rather than dropping the turn.
+            let result = server.await;
+            assert!(result.is_ok(), "rpc server error: {result:?}");
+
+            // The handler resumed after the UI cancel and committed its
+            // outcome report via `sendMessage` before returning, so the drain
+            // guarantees the message is in the session by the time `run`
+            // returns. Before the fix the command was dropped mid-flight and
+            // no such message exists.
+            let cx = AgentCx::for_request();
+            let inner = OwnedMutexGuard::lock(session_handle, &cx)
+                .await
+                .expect("session lock");
+            let saw_completion = inner.entries_for_current_path().iter().any(|entry| {
+                matches!(
+                    entry,
+                    crate::session::SessionEntry::Message(msg)
+                        if matches!(
+                            &msg.message,
+                            SessionMessage::Custom { custom_type, content, .. }
+                                if custom_type.as_str() == "eof-drain-outcome"
+                                    && content.as_str() == "cancelled"
+                        )
+                )
+            });
+            assert!(
+                saw_completion,
+                "extension command completion report should be committed before shutdown"
+            );
         });
     }
 
@@ -7685,6 +7921,8 @@ export default function init(pi) {
         assert_eq!(parse_thinking_level("3").unwrap(), ThinkingLevel::High);
         assert_eq!(parse_thinking_level("xhigh").unwrap(), ThinkingLevel::XHigh);
         assert_eq!(parse_thinking_level("4").unwrap(), ThinkingLevel::XHigh);
+        assert_eq!(parse_thinking_level("max").unwrap(), ThinkingLevel::Max);
+        assert_eq!(parse_thinking_level("5").unwrap(), ThinkingLevel::Max);
     }
 
     #[test]
@@ -7701,7 +7939,7 @@ export default function init(pi) {
     fn parse_thinking_level_invalid() {
         assert!(parse_thinking_level("invalid").is_err());
         assert!(parse_thinking_level("").is_err());
-        assert!(parse_thinking_level("5").is_err());
+        assert!(parse_thinking_level("6").is_err());
     }
 
     // -----------------------------------------------------------------------

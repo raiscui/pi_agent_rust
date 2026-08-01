@@ -2,14 +2,13 @@
 
 use crate::agent::QueueMode;
 use crate::error::{Error, Result};
-use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 /// Main configuration structure.
@@ -337,6 +336,7 @@ pub struct ThinkingBudgets {
     pub medium: Option<u32>,
     pub high: Option<u32>,
     pub xhigh: Option<u32>,
+    pub max: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -699,6 +699,7 @@ impl Config {
             "medium" => budgets.and_then(|b| b.medium).unwrap_or(8192),
             "high" => budgets.and_then(|b| b.high).unwrap_or(16384),
             "xhigh" => budgets.and_then(|b| b.xhigh).unwrap_or(32768),
+            "max" => budgets.and_then(|b| b.max).unwrap_or(65536),
             _ => 0,
         }
     }
@@ -1225,6 +1226,7 @@ fn merge_thinking_budgets(
             medium: other.medium.or(base.medium),
             high: other.high.or(base.high),
             xhigh: other.xhigh.or(base.xhigh),
+            max: other.max.or(base.max),
         }),
         (None, Some(other)) => Some(other),
         (Some(base), None) => Some(base),
@@ -1367,8 +1369,11 @@ fn patch_settings_file(path: &Path, patch: Value) -> Result<Value> {
     let _process_guard = settings_persist_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let lock_handle = open_settings_lock_file(path)?;
-    let _file_guard = lock_settings_file(lock_handle, Duration::from_secs(30))?;
+    // Directory-based lock compatible with upstream TS pi's `proper-lockfile`
+    // (see `crate::file_lock`); the in-process `settings_persist_lock` above still
+    // serializes threads within this process.
+    let _file_guard = crate::file_lock::DirLock::acquire_for(path, Duration::from_secs(30))
+        .map_err(|e| Error::config(format!("settings lock: {e}")))?;
     let mut settings = load_settings_json_object(path)?;
     deep_merge_settings_value(&mut settings, patch)?;
     write_settings_json_atomic(path, &settings)?;
@@ -1378,73 +1383,6 @@ fn patch_settings_file(path: &Path, patch: Value) -> Result<Value> {
 fn settings_persist_lock() -> &'static Mutex<()> {
     static PERSIST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     PERSIST_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn settings_lock_path(path: &Path) -> PathBuf {
-    let mut lock_path = path.to_path_buf();
-    let mut file_name = path.file_name().map_or_else(
-        || std::ffi::OsString::from("settings"),
-        std::ffi::OsString::from,
-    );
-    file_name.push(".lock");
-    lock_path.set_file_name(file_name);
-    lock_path
-}
-
-fn open_settings_lock_file(path: &Path) -> Result<File> {
-    let lock_path = settings_lock_path(path);
-    if let Some(parent) = lock_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut options = File::options();
-    options.read(true).write(true).create(true).truncate(false);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-
-    options.open(&lock_path).map_err(|err| {
-        Error::config(format!(
-            "Failed to open settings lock file {}: {err}",
-            lock_path.display()
-        ))
-    })
-}
-
-fn lock_settings_file(file: File, timeout: Duration) -> Result<SettingsLockGuard> {
-    let start = Instant::now();
-    loop {
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(true) => return Ok(SettingsLockGuard { file }),
-            Ok(false) => {}
-            Err(err) => {
-                return Err(Error::config(format!(
-                    "Failed to lock settings file: {err}"
-                )));
-            }
-        }
-
-        if start.elapsed() >= timeout {
-            return Err(Error::config("Timed out waiting for settings lock"));
-        }
-
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-struct SettingsLockGuard {
-    file: File,
-}
-
-impl Drop for SettingsLockGuard {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
-    }
 }
 
 #[cfg(unix)]
@@ -1917,6 +1855,7 @@ mod tests {
         assert_eq!(config.thinking_budget("medium"), 8192);
         assert_eq!(config.thinking_budget("high"), 16384);
         assert_eq!(config.thinking_budget("xhigh"), 32768);
+        assert_eq!(config.thinking_budget("max"), 65536);
         assert_eq!(config.thinking_budget("unknown-level"), 0);
     }
 
@@ -1929,6 +1868,7 @@ mod tests {
                 medium: Some(300),
                 high: Some(400),
                 xhigh: Some(500),
+                max: Some(600),
             }),
             ..Config::default()
         };
@@ -1937,6 +1877,7 @@ mod tests {
         assert_eq!(config.thinking_budget("medium"), 300);
         assert_eq!(config.thinking_budget("high"), 400);
         assert_eq!(config.thinking_budget("xhigh"), 500);
+        assert_eq!(config.thinking_budget("max"), 600);
     }
 
     // ── enable_skill_commands ──────────────────────────────────────────
@@ -3325,8 +3266,8 @@ mod tests {
                 o_med in prop::option::of(1u32..65536),
                 o_high in prop::option::of(1u32..65536),
             ) {
-                let base = ThinkingBudgets { minimal: b_min, low: b_low, medium: None, high: None, xhigh: None };
-                let other = ThinkingBudgets { minimal: None, low: None, medium: o_med, high: o_high, xhigh: None };
+                let base = ThinkingBudgets { minimal: b_min, low: b_low, medium: None, high: None, xhigh: None, max: None };
+                let other = ThinkingBudgets { minimal: None, low: None, medium: o_med, high: o_high, xhigh: None, max: None };
                 let result = merge_thinking_budgets(Some(base), Some(other)).unwrap();
                 assert_eq!(result.minimal, b_min); // only in base
                 assert_eq!(result.low, b_low); // only in base

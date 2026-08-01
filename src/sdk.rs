@@ -1553,9 +1553,22 @@ fn stream_event_from_assistant_message_event(
             content_index: *content_index,
             content: content.clone(),
         }),
-        AME::ToolCallStart { content_index, .. } => Some(StreamEvent::ToolCallStart {
-            content_index: *content_index,
-        }),
+        AME::ToolCallStart {
+            content_index,
+            partial,
+        } => {
+            // #129: recover the tool-call id/name from the partial so the
+            // reconstructed stream stays correlatable from the start.
+            let (id, name) = match partial.content.get(*content_index) {
+                Some(ContentBlock::ToolCall(tc)) => (tc.id.clone(), tc.name.clone()),
+                _ => (String::new(), String::new()),
+            };
+            Some(StreamEvent::ToolCallStart {
+                content_index: *content_index,
+                id,
+                name,
+            })
+        }
         AME::ToolCallDelta {
             content_index,
             delta,
@@ -1618,6 +1631,7 @@ fn build_stream_options_with_optional_key(
             medium: budgets.medium.unwrap_or(defaults.medium),
             high: budgets.high.unwrap_or(defaults.high),
             xhigh: budgets.xhigh.unwrap_or(defaults.xhigh),
+            max: budgets.max.unwrap_or(defaults.max),
         });
     }
 

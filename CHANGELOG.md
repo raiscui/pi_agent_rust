@@ -14,7 +14,26 @@ Repository: <https://github.com/Dicklesworthstone/pi_agent_rust>
 
 ## [Unreleased]
 
+## [v0.1.23] — 2026-07-28 — Release
+
 ### Features
+
+- **First-class `max` thinking level above `xhigh`** — `--thinking max`,
+  `/thinking max`, ACP `session/set_config_option`, and RPC
+  `available_thinking_levels` all accept the new 7th level. Anthropic
+  adaptive-thinking models send `output_config.effort: "max"` (Opus 4.6 /
+  Sonnet 4.6 accept `max` without `xhigh`, per the documented effort matrix);
+  DeepSeek reasoning models send `reasoning_effort: "max"` (with `xhigh`
+  keeping its historical `"max"` mapping so existing configs are unchanged);
+  models without a `max` wire value clamp to `xhigh`/`high`. Legacy
+  budget-based thinking gains a `thinking_budgets.max` slot (default `65536`).
+  Fixes [#139](https://github.com/Dicklesworthstone/pi_agent_rust/issues/139).
+- **Atlas Cloud provider preset** — `atlascloud` (aliases `atlas-cloud`,
+  `atlas`) routes through the OpenAI-compatible chat-completions adapter at
+  `https://api.atlascloud.ai/v1` with `ATLASCLOUD_API_KEY` /
+  `ATLAS_CLOUD_API_KEY`. From
+  [#141](https://github.com/Dicklesworthstone/pi_agent_rust/pull/141),
+  implemented independently after verifying the live service.
 
 - **Newer z.ai (GLM) and MiniMax models in the registry** — the model catalog
   now includes z.ai **GLM-5.1** (`glm-5.1`, 200K context) and **GLM-5.2**
@@ -38,6 +57,37 @@ Repository: <https://github.com/Dicklesworthstone/pi_agent_rust>
 
 ### Bug Fixes
 
+- **`--mode rpc` no longer drops or hangs the turn when stdin closes**
+  — piping a single command (`printf '{"type":"prompt",...}' | pi --mode
+  rpc`) tore the session down while the prompt task was still starting or
+  streaming: current builds silently lost every event after the ack, older
+  builds hung after `turn_start`. The RPC loop now drains in-flight work at
+  EOF (streaming turns with retries and queued steering/follow-ups,
+  extension commands, auto-compaction, background bash), cancels extension
+  UI requests that can no longer be answered, guards the activity flags
+  against panic/cancellation leaks, and flushes the stdout writer behind a
+  shutdown sentinel so the full stream through `agent_end` reaches the
+  client. Fixes
+  [#137](https://github.com/Dicklesworthstone/pi_agent_rust/issues/137).
+- **Startup no longer probes the npm registry for installed packages** —
+  installed exact and conventional-range npm specs are now satisfied
+  locally (ranges like `npm:pkg@^1.2.0` previously re-ran a full
+  `npm install` on every startup, and dist-tag specs could fail startup
+  lock verification), `npm root -g` runs at most once per resolution pass,
+  and `pi update` refreshes ranges/dist-tags while exact pins stay pinned,
+  matching upstream TypeScript pi semantics. Lock entries whose stored
+  `pinned` classification predates this change rotate cleanly instead of
+  hard-failing verification. No new dependencies. From the report in
+  [#140](https://github.com/Dicklesworthstone/pi_agent_rust/pull/140).
+- **CI gates repaired on main** — `tests/e2e_transient_retry_resume.rs` is
+  registered in the suite-classification and traceability registries
+  (caught via
+  [#135](https://github.com/Dicklesworthstone/pi_agent_rust/pull/135));
+  the provider-metadata snapshot suite reflects reality again (95 canonical
+  providers / 51 aliases, including previously unregistered `cursor`,
+  `llamacpp`, and `mistralrs`); and `clippy --all-targets -- -D warnings`
+  is clean again (six `future_not_send` guard-across-await sites converted
+  to `OwnedMutexGuard`).
 - **Windows `WSAENOTCONN` retry now also fires for TLS errors surfaced through
   non-`Io` variants** — `is_retryable_not_connected_tls` walks the `TlsError`
   source chain in addition to matching the direct `Io` variant, so a "socket
@@ -45,6 +95,50 @@ Repository: <https://github.com/Dicklesworthstone/pi_agent_rust>
   detected and retried with a fresh connection. Hardens
   [#111](https://github.com/Dicklesworthstone/pi_agent_rust/issues/111) /
   [#106](https://github.com/Dicklesworthstone/pi_agent_rust/issues/106).
+- **Streamed tool-call partials carry id/name from the first delta**
+  ([#129](https://github.com/Dicklesworthstone/pi_agent_rust/issues/129)),
+  **fsync refusals on virtiofs/FUSE filesystems no longer fail writes**
+  ([#136](https://github.com/Dicklesworthstone/pi_agent_rust/issues/136)),
+  and the extension compatibility layer supports current Pi package APIs
+  (pi-subagents 0.34.0 import contract; groundwork for
+  [#132](https://github.com/Dicklesworthstone/pi_agent_rust/issues/132)).
+
+### Internal
+
+- Async runtime migrated to **asupersync 0.3.9** with `OwnedMutexGuard` at
+  every spawned lock site; the fuzz workspace dropped its stale asupersync
+  git-rev pin and re-locked on the published crate.
+
+## [v0.1.22] — 2026-07-10
+
+First version published to crates.io since `0.1.18` (the `v0.1.19`–`v0.1.21`
+tags never reached crates.io because the Publish workflow was missing the
+`CARGO_REGISTRY_TOKEN` secret; the secret is now configured — see
+[#127](https://github.com/Dicklesworthstone/pi_agent_rust/issues/127)).
+
+### Bug Fixes
+
+- **Streaming tool-call arguments now reach RPC/ACP clients** — the #124 fix
+  grew the tool-call `arguments` on the provider's internal partial, but the
+  partial message that `--mode rpc` / ACP clients actually receive is rebuilt
+  in the agent loop, which left `arguments` as `null` on every
+  `toolcall_delta` until the terminal event. The agent loop now accumulates
+  the raw argument deltas per content index and applies the same best-effort
+  partial-JSON completion, for every provider, so snapshot-based IDE
+  frontends render large tool calls streaming in live. Verified by an
+  end-to-end test that serializes agent events exactly as the RPC surface
+  does. Fixes
+  [#126](https://github.com/Dicklesworthstone/pi_agent_rust/issues/126).
+- **Transient provider failures resume the turn instead of replaying it from
+  the user message** — avoids re-executing tool calls that already ran.
+  Fixes [#125](https://github.com/Dicklesworthstone/pi_agent_rust/issues/125).
+
+### Maintenance
+
+- Migrated to published **asupersync 0.3.6** (crates.io) and bumped the
+  pinned toolchain to `nightly-2026-07-05` (required by `sysinfo 0.39`'s
+  `cfg_select!`), with a mechanical clippy sweep for the newer nightly's
+  strengthened lints.
 
 ## [v0.1.20] — 2026-06-13 — Tag-only
 

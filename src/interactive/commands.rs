@@ -91,7 +91,7 @@ impl SlashCommand {
   /logout [provider] - Remove stored credentials
   /clear, /cls       - Clear conversation history
   /model, /m [id|provider/id] - Open model selector or switch directly
-  /thinking, /t [level] - Set thinking level (off/minimal/low/medium/high/xhigh)
+  /thinking, /t [level] - Set thinking level (off/minimal/low/medium/high/xhigh/max)
   /scoped-models [patterns|clear] - Show or set scoped models for cycling
   /history, /hist    - Show input history
   /export [path]     - Export conversation to HTML
@@ -516,7 +516,7 @@ pub fn strip_thinking_level_suffix(pattern: &str) -> &str {
         return pattern;
     };
     match suffix.to_ascii_lowercase().as_str() {
-        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" => prefix,
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => prefix,
         _ => pattern,
     }
 }
@@ -1480,7 +1480,12 @@ impl PiApp {
                             extra,
                         };
 
-                        if let Ok(mut session_guard) = session.lock(&task_cx).await {
+                        // Owned guard: `MutexGuard` is `!Send` (asupersync 0.3.9)
+                        // and this future is spawned, so the guard held across
+                        // `save().await` must itself be `Send`.
+                        if let Ok(mut session_guard) =
+                            OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await
+                        {
                             session_guard.append_message(bash_message);
                             if save_enabled {
                                 let _ = session_guard.save().await;
@@ -1936,8 +1941,9 @@ impl PiApp {
                     }
 
                     let new_session_id = {
-                        let mut guard = match session.lock(&task_cx).await {
-                            Ok(guard) => guard,
+                        let mut guard =
+                            match OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await {
+                                Ok(guard) => guard,
                             Err(err) => {
                                 let _ = crate::interactive::enqueue_pi_event(
                                     &event_tx,
@@ -1959,8 +1965,9 @@ impl PiApp {
                     };
 
                     {
-                        let mut agent_guard = match agent.lock(&task_cx).await {
-                            Ok(guard) => guard,
+                        let mut agent_guard =
+                            match OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
+                                Ok(guard) => guard,
                             Err(err) => {
                                 let _ = crate::interactive::enqueue_pi_event(
                                     &event_tx,
@@ -2136,7 +2143,7 @@ impl PiApp {
                     runtime_handle.spawn(async move {
                         let cx = Cx::current().unwrap_or_else(Cx::for_request);
                         let (initial_selected_id, branch_count, entry_count) =
-                            match session.lock(&cx).await {
+                            match OwnedMutexGuard::lock(Arc::clone(&session), &cx).await {
                                 Ok(session_guard) => {
                                     let initial_selected_id =
                                         resolve_tree_selector_initial_id(&session_guard, &args);

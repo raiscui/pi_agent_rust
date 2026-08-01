@@ -28728,12 +28728,11 @@ impl ExtensionManager {
     pub fn hostcall_compat_kill_switch_global(&self) -> bool {
         self.inner
             .lock()
-            .ok()
-            .is_some_and(|guard| guard.hostcall_compat_kill_switch_global)
+            .is_ok_and(|guard| guard.hostcall_compat_kill_switch_global)
     }
 
     pub fn hostcall_compat_kill_switch_for_extension(&self, extension_id: &str) -> bool {
-        self.inner.lock().ok().is_some_and(|guard| {
+        self.inner.lock().is_ok_and(|guard| {
             guard
                 .hostcall_compat_kill_switch_extensions
                 .contains(extension_id)
@@ -28825,8 +28824,7 @@ impl ExtensionManager {
     pub fn hostcall_reactor_enabled(&self) -> bool {
         self.inner
             .lock()
-            .ok()
-            .is_some_and(|guard| guard.hostcall_reactor.is_some())
+            .is_ok_and(|guard| guard.hostcall_reactor.is_some())
     }
 
     /// Submit a fast-lane hostcall to the reactor mesh for shard-local dispatch.
@@ -29110,7 +29108,7 @@ impl ExtensionManager {
 
     /// Check whether an extension is currently killed.
     pub fn is_killed(&self, extension_id: &str) -> bool {
-        self.inner.lock().ok().is_some_and(|guard| {
+        self.inner.lock().is_ok_and(|guard| {
             guard
                 .trust_states
                 .get(extension_id)
@@ -38455,7 +38453,7 @@ mod tests {
 
     #[test]
     fn extension_manager_with_budget_stores_it() {
-        let budget = Budget::with_deadline_secs(30);
+        let budget = Budget::with_deadline_at_secs(30);
         let manager = ExtensionManager::with_budget(budget);
         let stored = manager.budget();
         assert!(stored.deadline.is_some());
@@ -38466,7 +38464,7 @@ mod tests {
         let manager = ExtensionManager::new();
         assert!(manager.budget().deadline.is_none());
 
-        manager.set_budget(Budget::with_deadline_secs(10));
+        manager.set_budget(Budget::with_deadline_at_secs(10));
         assert!(manager.budget().deadline.is_some());
     }
 
@@ -38480,7 +38478,7 @@ mod tests {
 
     #[test]
     fn extension_cx_applies_configured_budget() {
-        let manager = ExtensionManager::with_budget(Budget::with_deadline_secs(30));
+        let manager = ExtensionManager::with_budget(Budget::with_deadline_at_secs(30));
         let cx = manager.extension_cx();
         assert!(cx.budget().deadline.is_some());
     }

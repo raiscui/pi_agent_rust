@@ -1114,9 +1114,7 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::metadata(path)
-            .ok()
-            .is_some_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
     }
 
     #[cfg(not(unix))]
@@ -8614,7 +8612,7 @@ fn reservation_patterns_overlap(left: &str, right: &str) -> bool {
     left == right || simple_glob_match(left, right) || simple_glob_match(right, left)
 }
 
-fn simple_glob_match(pattern: &str, text: &str) -> bool {
+const fn simple_glob_match(pattern: &str, text: &str) -> bool {
     let pattern = pattern.as_bytes();
     let text = text.as_bytes();
     let mut pattern_index = 0;

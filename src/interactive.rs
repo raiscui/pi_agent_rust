@@ -14,7 +14,7 @@
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::runtime::RuntimeHandle;
-use asupersync::sync::Mutex;
+use asupersync::sync::{Mutex, OwnedMutexGuard};
 use async_trait::async_trait;
 use bubbles::cursor::{BlinkCanceledMsg, BlinkMsg as CursorBlinkMsg, InitialBlinkMsg};
 use bubbles::spinner::{SpinnerModel, TickMsg as SpinnerTickMsg, spinners};
@@ -146,10 +146,7 @@ impl TmuxWheelGuard {
     /// - `tmux` binary is not available or returns errors
     fn install() -> Option<Self> {
         // Respect opt-out env var.
-        if std::env::var("PI_TMUX_WHEEL_OVERRIDE")
-            .ok()
-            .is_some_and(|v| v == "0")
-        {
+        if std::env::var("PI_TMUX_WHEEL_OVERRIDE").is_ok_and(|v| v == "0") {
             return None;
         }
 
@@ -241,7 +238,7 @@ impl TmuxWheelGuard {
         }
     }
 
-    fn next_shell_token_bounds(input: &str, from: usize) -> Option<(usize, usize)> {
+    const fn next_shell_token_bounds(input: &str, from: usize) -> Option<(usize, usize)> {
         let bytes = input.as_bytes();
         let mut idx = from;
         while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
@@ -664,11 +661,9 @@ impl PiApp {
     }
 
     fn effective_show_hardware_cursor(&self) -> bool {
-        self.config.show_hardware_cursor.unwrap_or_else(|| {
-            std::env::var("PI_HARDWARE_CURSOR")
-                .ok()
-                .is_some_and(|val| val == "1")
-        })
+        self.config
+            .show_hardware_cursor
+            .unwrap_or_else(|| std::env::var("PI_HARDWARE_CURSOR").is_ok_and(|val| val == "1"))
     }
 
     fn effective_default_permissive(&self) -> bool {
@@ -1052,18 +1047,21 @@ impl PiApp {
         let runtime_handle = self.runtime_handle.clone();
         let task_cx = Cx::current().unwrap_or_else(Cx::for_request);
         runtime_handle.spawn(async move {
-            let mut session_guard = match session.lock(&task_cx).await {
-                Ok(guard) => guard,
-                Err(err) => {
-                    let _ = crate::interactive::enqueue_pi_event(
-                        &event_tx,
-                        &Cx::for_request(),
-                        PiMsg::AgentError(format!("Failed to lock session: {err}")),
-                    )
-                    .await;
-                    return;
-                }
-            };
+            // Owned guard: `MutexGuard` is `!Send` (asupersync 0.3.9), and
+            // `RuntimeHandle::spawn` requires the future to be `Send`.
+            let mut session_guard =
+                match OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await {
+                    Ok(guard) => guard,
+                    Err(err) => {
+                        let _ = crate::interactive::enqueue_pi_event(
+                            &event_tx,
+                            &Cx::for_request(),
+                            PiMsg::AgentError(format!("Failed to lock session: {err}")),
+                        )
+                        .await;
+                        return;
+                    }
+                };
 
             if let Err(err) = session_guard.save().await {
                 let _ = crate::interactive::enqueue_pi_event(
@@ -1559,51 +1557,54 @@ impl PiApp {
 
             // Replace the session.
             {
-                let mut session_guard = match session.lock(&task_cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event(
-                            &event_tx,
-                            &Cx::for_request(),
-                            PiMsg::AgentError(format!("Failed to lock session: {err}")),
-                        )
-                        .await;
-                        return;
-                    }
-                };
+                let mut session_guard =
+                    match OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await {
+                        Ok(guard) => guard,
+                        Err(err) => {
+                            let _ = crate::interactive::enqueue_pi_event(
+                                &event_tx,
+                                &Cx::for_request(),
+                                PiMsg::AgentError(format!("Failed to lock session: {err}")),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
                 *session_guard = loaded_session;
             }
 
             // Update the agent messages.
             {
-                let mut agent_guard = match agent.lock(&task_cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event(
-                            &event_tx,
-                            &task_cx,
-                            PiMsg::AgentError(format!("Failed to lock agent: {err}")),
-                        )
-                        .await;
-                        return;
-                    }
-                };
+                let mut agent_guard =
+                    match OwnedMutexGuard::lock(Arc::clone(&agent), &task_cx).await {
+                        Ok(guard) => guard,
+                        Err(err) => {
+                            let _ = crate::interactive::enqueue_pi_event(
+                                &event_tx,
+                                &task_cx,
+                                PiMsg::AgentError(format!("Failed to lock agent: {err}")),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
                 agent_guard.replace_messages(messages_for_agent);
             }
 
             let (messages, usage) = {
-                let session_guard = match session.lock(&task_cx).await {
-                    Ok(guard) => guard,
-                    Err(err) => {
-                        let _ = crate::interactive::enqueue_pi_event(
-                            &event_tx,
-                            &Cx::for_request(),
-                            PiMsg::AgentError(format!("Failed to lock session: {err}")),
-                        )
-                        .await;
-                        return;
-                    }
-                };
+                let session_guard =
+                    match OwnedMutexGuard::lock(Arc::clone(&session), &task_cx).await {
+                        Ok(guard) => guard,
+                        Err(err) => {
+                            let _ = crate::interactive::enqueue_pi_event(
+                                &event_tx,
+                                &Cx::for_request(),
+                                PiMsg::AgentError(format!("Failed to lock session: {err}")),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
                 conversation_from_session(&session_guard)
             };
 

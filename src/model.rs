@@ -272,8 +272,16 @@ pub enum StreamEvent {
         content: String,
     },
 
+    /// A tool-call content block opened. `id`/`name` carry whatever the
+    /// provider already knows at this point (most providers send both on the
+    /// opening chunk); empty strings mean "not known yet" and the terminal
+    /// [`StreamEvent::ToolCallEnd`] still carries the authoritative values.
+    /// Populating them here lets snapshot clients (RPC/ACP) correlate the
+    /// growing partial with the later tool-execution events (#129).
     ToolCallStart {
         content_index: usize,
+        id: String,
+        name: String,
     },
     ToolCallDelta {
         content_index: usize,
@@ -392,6 +400,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     XHigh,
+    Max,
 }
 
 impl std::str::FromStr for ThinkingLevel {
@@ -405,6 +414,7 @@ impl std::str::FromStr for ThinkingLevel {
             "medium" | "med" | "2" => Ok(Self::Medium),
             "high" | "3" => Ok(Self::High),
             "xhigh" | "4" => Ok(Self::XHigh),
+            "max" | "5" => Ok(Self::Max),
             _ => Err(format!("Invalid thinking level: {s}")),
         }
     }
@@ -420,6 +430,7 @@ impl ThinkingLevel {
             Self::Medium => 8192,
             Self::High => 16384,
             Self::XHigh => 32768, // High reasonable limit
+            Self::Max => 65536,   // Top tier above xhigh
         }
     }
 }
@@ -433,6 +444,7 @@ impl std::fmt::Display for ThinkingLevel {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
         };
         write!(f, "{s}")
     }
@@ -1079,6 +1091,8 @@ mod tests {
             ("3", ThinkingLevel::High),
             ("xhigh", ThinkingLevel::XHigh),
             ("4", ThinkingLevel::XHigh),
+            ("max", ThinkingLevel::Max),
+            ("5", ThinkingLevel::Max),
         ];
         for (input, expected) in &cases {
             let parsed: ThinkingLevel = input.parse().expect(input);

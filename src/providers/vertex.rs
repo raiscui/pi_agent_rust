@@ -366,7 +366,7 @@ impl Provider for VertexProvider {
                                 );
                             }
                             state.finished = true;
-                            let err = Error::api(format!("SSE error: {e}"));
+                            let err = Error::sse(&e);
                             return Some((Err(err), state));
                         }
                         None => {
@@ -515,8 +515,11 @@ where
 
                         self.ensure_started();
 
-                        self.pending_events
-                            .push_back(StreamEvent::ToolCallStart { content_index });
+                        self.pending_events.push_back(StreamEvent::ToolCallStart {
+                            content_index,
+                            id: tool_call.id.clone(),
+                            name: tool_call.name.clone(),
+                        });
                         self.pending_events.push_back(StreamEvent::ToolCallDelta {
                             content_index,
                             delta: args_str,

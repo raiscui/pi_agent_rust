@@ -121,6 +121,8 @@ fn every_remote_provider_has_at_least_one_auth_env_key() {
     let auth_env_optional_providers = [
         "google-antigravity",
         "google-gemini-cli",
+        "llamacpp",
+        "mistralrs",
         "ollama",
         "openai-codex",
     ];
@@ -269,6 +271,9 @@ fn all_oai_compatible_base_urls_are_unique() {
         ("minimax-coding-plan", "minimax"),
         ("minimax-cn", "minimax-cn-coding-plan"),
         ("minimax-cn-coding-plan", "minimax-cn"),
+        // Local OpenAI-compatible servers that both default to 127.0.0.1:1234.
+        ("lmstudio", "mistralrs"),
+        ("mistralrs", "lmstudio"),
     ]);
     for meta in PROVIDER_METADATA {
         if let Some(defaults) = &meta.routing_defaults {
@@ -302,6 +307,7 @@ fn oai_compatible_defaults_use_known_api_family() {
         "bedrock-converse-stream",
         "gitlab-chat",
         "copilot-openai",
+        "cursor-agent",
     ];
     for meta in PROVIDER_METADATA {
         if let Some(defaults) = &meta.routing_defaults {
@@ -637,7 +643,7 @@ fn generate_canonical_id_alias_table_json() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn canonical_id_snapshot_detects_additions_and_removals() {
-    // ── Snapshot: 91 canonical IDs (sorted) ─────────────────────────────
+    // ── Snapshot: 95 canonical IDs (sorted) ─────────────────────────────
     // To update: run the failing test, copy the "actual" list printed
     // below, and replace this array.
     const EXPECTED: &[&str] = &[
@@ -649,6 +655,7 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "alibaba-us",
         "amazon-bedrock",
         "anthropic",
+        "atlascloud",
         "azure-openai",
         "bailing",
         "baseten",
@@ -659,6 +666,7 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "cloudflare-workers-ai",
         "cohere",
         "cortecs",
+        "cursor",
         "deepinfra",
         "deepseek",
         "fastrouter",
@@ -682,6 +690,7 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "jiekou",
         "kimi-for-coding",
         "llama",
+        "llamacpp",
         "lmstudio",
         "lucidquery",
         "minimax",
@@ -689,6 +698,7 @@ fn canonical_id_snapshot_detects_additions_and_removals() {
         "minimax-cn-coding-plan",
         "minimax-coding-plan",
         "mistral",
+        "mistralrs",
         "moark",
         "modelscope",
         "moonshotai",
@@ -759,6 +769,8 @@ fn alias_mapping_snapshot_is_current() {
     // ── Snapshot: alias → canonical_id (sorted by alias) ────────────────
     const EXPECTED_ALIASES: &[(&str, &str)] = &[
         ("antigravity", "google-antigravity"),
+        ("atlas", "atlascloud"),
+        ("atlas-cloud", "atlascloud"),
         ("azure", "azure-openai"),
         ("azure-cognitive-services", "azure-openai"),
         ("azure-openai-responses", "azure-openai"),
@@ -767,6 +779,7 @@ fn alias_mapping_snapshot_is_current() {
         ("chatgpt-codex", "openai-codex"),
         ("codex", "openai-codex"),
         ("copilot", "github-copilot"),
+        ("cursor-agent", "cursor"),
         ("dashscope", "alibaba"),
         ("deep-infra", "deepinfra"),
         ("deep-seek", "deepseek"),
@@ -783,7 +796,12 @@ fn alias_mapping_snapshot_is_current() {
         ("kimi", "moonshotai"),
         ("kimi-code", "kimi-for-coding"),
         ("kimi-coding", "kimi-for-coding"),
+        ("llama-cpp", "llamacpp"),
+        ("llama-server", "llamacpp"),
+        ("llama.cpp", "llamacpp"),
         ("lm-studio", "lmstudio"),
+        ("mistral-rs", "mistralrs"),
+        ("mistral.rs", "mistralrs"),
         ("mistralai", "mistral"),
         ("moonshot", "moonshotai"),
         ("nanogpt", "nano-gpt"),
@@ -975,12 +993,15 @@ fn no_accidental_duplicate_routing_defaults() {
     }
 
     // Known intentional duplicates: coding-plan variants share base_url
-    // with their parent.
+    // with their parent, and mistral.rs deliberately defaults to LM Studio's
+    // localhost port (both are local OpenAI-compatible servers on
+    // 127.0.0.1:1234).
     let intentional_pairs: HashSet<&str> = [
         "minimax-coding-plan",
         "minimax-cn-coding-plan",
         "zai-coding-plan",
         "zhipuai-coding-plan",
+        "mistralrs",
     ]
     .iter()
     .copied()

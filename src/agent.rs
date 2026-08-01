@@ -48,7 +48,7 @@ use crate::semantic_workspace_graph::{ContextBundleItem, SemanticContextBundle};
 use crate::session::{AutosaveFlushTrigger, Session, SessionHandle};
 use crate::tools::{Tool, ToolEffects, ToolOutput, ToolRegistry, ToolUpdate};
 use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
-use asupersync::sync::{Mutex, Notify};
+use asupersync::sync::{Mutex, Notify, OwnedMutexGuard};
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::FutureExt;
@@ -2354,6 +2354,14 @@ impl Agent {
         // Track whether we've already emitted `MessageStart` for this streaming response.
         // Avoids cloning the full message on every event just to re-emit a redundant start.
         let mut sent_start = false;
+        // #126: raw accumulated tool-call argument fragments, keyed by content
+        // index, for THIS streaming response. Providers keep their own partial's
+        // `arguments` growing (#124), but the partial that RPC/ACP clients
+        // actually receive is rebuilt here from `StreamEvent`s — so the
+        // accumulation and best-effort JSON completion must happen here too,
+        // uniformly for every provider.
+        let mut tool_call_raw_args: std::collections::HashMap<usize, String> =
+            std::collections::HashMap::new();
 
         'stream: loop {
             if checkpoint_cx.checkpoint().is_err() {
@@ -2787,7 +2795,11 @@ impl Agent {
                         });
                     }
                 }
-                StreamEvent::ToolCallStart { content_index, .. } => {
+                StreamEvent::ToolCallStart {
+                    content_index,
+                    id,
+                    name,
+                } => {
                     self.seed_partial_message_if_missing(&mut added_partial);
                     if let Some(Message::Assistant(msg_arc)) = self
                         .messages
@@ -2796,13 +2808,25 @@ impl Agent {
                         .find(|m| matches!(m, Message::Assistant(_)))
                     {
                         let msg = Arc::make_mut(msg_arc);
+                        // #129: seed `id`/`name` from the start event so every
+                        // emitted partial carries the correlation key from the
+                        // first `toolcall_delta`, not only at `toolcall_end`.
                         if content_index == msg.content.len() {
                             msg.content.push(ContentBlock::ToolCall(ToolCall {
-                                id: String::new(),
-                                name: String::new(),
+                                id,
+                                name,
                                 arguments: serde_json::Value::Null,
                                 thought_signature: None,
                             }));
+                        } else if let Some(ContentBlock::ToolCall(tc)) =
+                            msg.content.get_mut(content_index)
+                        {
+                            if tc.id.is_empty() {
+                                tc.id = id;
+                            }
+                            if tc.name.is_empty() {
+                                tc.name = name;
+                            }
                         }
                         let shared = Arc::clone(msg_arc);
                         if !sent_start {
@@ -2832,19 +2856,42 @@ impl Agent {
                         .rev()
                         .find(|m| matches!(m, Message::Assistant(_)))
                     {
-                        if msg_arc.content.get(content_index).is_none()
-                            && content_index == msg_arc.content.len()
                         {
                             let msg = Arc::make_mut(msg_arc);
-                            msg.content.push(ContentBlock::ToolCall(ToolCall {
-                                id: String::new(),
-                                name: String::new(),
-                                arguments: serde_json::Value::Null,
-                                thought_signature: None,
-                            }));
+                            if msg.content.get(content_index).is_none()
+                                && content_index == msg.content.len()
+                            {
+                                msg.content.push(ContentBlock::ToolCall(ToolCall {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    arguments: serde_json::Value::Null,
+                                    thought_signature: None,
+                                }));
+                            }
+                            // #126: grow this partial's `arguments` as deltas
+                            // arrive so snapshot-based clients (RPC/ACP IDE
+                            // frontends) render a large tool call streaming in,
+                            // like text, instead of pause-then-pop-in. The #124
+                            // provider-side update mutates the provider's OWN
+                            // partial, which is not the one emitted to clients —
+                            // this one is, so the accumulated prefix must be
+                            // completed here. On an un-completable fragment,
+                            // `complete_partial_json` returns `None` and we keep
+                            // the last good value (never wrong data). The
+                            // terminal `ToolCallEnd` still sets the fully-parsed
+                            // arguments.
+                            let raw = tool_call_raw_args.entry(content_index).or_default();
+                            raw.push_str(&delta);
+                            if let Some(partial_args) =
+                                crate::providers::openai::complete_partial_json(raw)
+                            {
+                                if let Some(ContentBlock::ToolCall(tc)) =
+                                    msg.content.get_mut(content_index)
+                                {
+                                    tc.arguments = partial_args;
+                                }
+                            }
                         }
-                        // No mutation needed for ToolCallDelta – args stay Null until ToolCallEnd.
-                        // Just share the current Arc (O(1) refcount bump, zero deep copies).
                         let shared = Arc::clone(msg_arc);
                         if !sent_start {
                             on_event(AgentEvent::MessageStart {
@@ -8934,9 +8981,7 @@ impl AgentSession {
         from_extension: bool,
     ) -> Result<()> {
         let cx = crate::agent_cx::AgentCx::for_request();
-        let mut session = self
-            .session
-            .lock(cx.cx())
+        let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
             .await
             .map_err(|e| Error::session(e.to_string()))?;
 
@@ -9449,9 +9494,7 @@ impl AgentSession {
     pub async fn save_and_index(&mut self) -> Result<()> {
         if self.save_enabled {
             let cx = crate::agent_cx::AgentCx::for_request();
-            let mut session = self
-                .session
-                .lock(cx.cx())
+            let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
             session
@@ -9466,9 +9509,7 @@ impl AgentSession {
             return Ok(());
         }
         let cx = crate::agent_cx::AgentCx::for_request();
-        let mut session = self
-            .session
-            .lock(cx.cx())
+        let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
             .await
             .map_err(|e| Error::session(e.to_string()))?;
         session
@@ -9602,6 +9643,29 @@ impl AgentSession {
             .map_err(|e| Error::session(e.to_string()))?;
 
         let reverted = session.revert_last_user_message();
+        if reverted {
+            let messages = session.to_messages_for_current_path();
+            self.agent.replace_messages(messages);
+        }
+        Ok(reverted)
+    }
+
+    /// Revert only the incomplete trailing assistant output of a failed request
+    /// (the partial/error message from a transient connection drop), preserving
+    /// the user prompt and every completed tool cycle. Used before a retry that
+    /// *resumes* the turn (`run_continue_with_abort`) rather than replaying it
+    /// from the user message (pi_agent_rust#125). Syncs the agent's in-memory
+    /// transcript to the reverted session path so a subsequent resume streams
+    /// from the last completed state.
+    pub async fn revert_incomplete_response(&mut self) -> Result<bool> {
+        let cx = crate::agent_cx::AgentCx::for_request();
+        let mut session = self
+            .session
+            .lock(cx.cx())
+            .await
+            .map_err(|e| Error::session(e.to_string()))?;
+
+        let reverted = session.revert_incomplete_response();
         if reverted {
             let messages = session.to_messages_for_current_path();
             self.agent.replace_messages(messages);
@@ -9999,9 +10063,7 @@ impl AgentSession {
 
         {
             let cx = crate::agent_cx::AgentCx::for_request();
-            let mut session = self
-                .session
-                .lock(cx.cx())
+            let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
             session.append_model_message(prompt_message.clone());
@@ -10087,9 +10149,10 @@ impl AgentSession {
 
         {
             let cx = crate::agent_cx::AgentCx::for_request();
-            let mut session = self
-                .session
-                .lock(cx.cx())
+            // Owned guard: `MutexGuard` is `!Send` (asupersync 0.3.9); this future
+            // is reachable from `RuntimeHandle::spawn` (the ACP prompt task in
+            // src/acp.rs), which requires the whole future to be `Send`.
+            let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
             session.append_model_message(user_message.clone());
@@ -10169,9 +10232,10 @@ impl AgentSession {
 
         {
             let cx = crate::agent_cx::AgentCx::for_request();
-            let mut session = self
-                .session
-                .lock(cx.cx())
+            // Owned guard: `MutexGuard` is `!Send` (asupersync 0.3.9); this future
+            // is reachable from `RuntimeHandle::spawn` (the ACP prompt task in
+            // src/acp.rs), which requires the whole future to be `Send`.
+            let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
             session.append_model_message(user_message.clone());
@@ -10208,13 +10272,63 @@ impl AgentSession {
         Ok(result)
     }
 
+    /// Resume the current turn after a transient failure WITHOUT adding a new
+    /// user message: the agent loop continues from the last completed state
+    /// (the user prompt plus any already-completed tool cycles that are still
+    /// on the session path), so a retry re-issues only the failed provider
+    /// request instead of replaying the whole turn. This is what makes
+    /// auto-retry idempotent — no tool re-execution, no re-billing of prior
+    /// work (pi_agent_rust#125).
+    ///
+    /// Callers should strip the failed request's incomplete output first via
+    /// [`Self::revert_incomplete_response`] so the resume streams from a clean
+    /// tail (no dangling error/partial assistant, no orphaned tool call).
+    pub async fn run_continue_with_abort(
+        &mut self,
+        abort: Option<AbortSignal>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
+        let on_event: AgentEventHandler = Arc::new(on_event);
+        self.sync_runtime_selection_from_session_header().await?;
+
+        // Rehydrate the agent transcript from the (already reverted) session
+        // path so the resume streams from the last completed state.
+        let history = {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = self
+                .session
+                .lock(cx.cx())
+                .await
+                .map_err(|e| Error::session(e.to_string()))?;
+            session.to_messages_for_current_path()
+        };
+        self.agent.replace_messages(history);
+        let start_len = self.agent.messages().len();
+
+        let streaming_guard = AtomicBoolGuard::activate(&self.extensions_is_streaming);
+        let on_event_for_run = Arc::clone(&on_event);
+        let result = self
+            .agent
+            .run_continue_with_abort(abort, move |event| {
+                on_event_for_run(event);
+            })
+            .await;
+        drop(streaming_guard);
+
+        // Persist any NEW messages generated by the resume, even on error.
+        // No user message was added, so nothing to skip: persist from start_len.
+        let persist_result = self.persist_new_messages(start_len, result.is_err()).await;
+
+        let result = result?;
+        persist_result?;
+        Ok(result)
+    }
+
     async fn persist_new_messages(&self, start_len: usize, run_failed: bool) -> Result<()> {
         let new_messages = self.agent.messages()[start_len..].to_vec();
         {
             let cx = crate::agent_cx::AgentCx::for_request();
-            let mut session = self
-                .session
-                .lock(cx.cx())
+            let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
             for message in new_messages {
