@@ -309,8 +309,12 @@ fn provenance_verification_evidence_log() {
     // Write evidence log
     let evidence_json = serde_json::to_string_pretty(&evidence).expect("serialize evidence log");
 
-    let output_path =
-        repo_root.join("tests/ext_conformance/artifacts/PROVENANCE_VERIFICATION.json");
+    // 写到临时目录: committed 的 PROVENANCE_VERIFICATION.json 是 release gate
+    // 的静态证据, 测试运行不应覆盖它 (否则全量测试后 git 状态必脏)
+    let output_path = std::env::temp_dir().join(format!(
+        "pi-provenance-verification-{}.json",
+        std::process::id()
+    ));
     fs::write(&output_path, &evidence_json).expect("write evidence log");
 
     // Print summary for test output

@@ -1090,3 +1090,18 @@
 - [ ] models.rs: built_in_models 抽 resolver 注入, 1 测试改调
 - [ ] agent.rs: resolve_stream_api_key_for_model 注入, 3 测试改调
 - [ ] 编译 + 跑 A 类测试验证
+
+## [2026-08-01 23:50:00] [Session ID: root-merge-590d618] 最终: 测试基线修复完成
+
+### 结果
+- 全量测试: 115 个失败 → 10 个失败 (其中 2 个是产物互踩, restore 后绿; 真实遗留 8 个)
+- lib 6757 全绿; e2e_cli/tui/golden/auth_oauth/tui_snapshot/tui_state/doctor_swarm/cargo_headroom/sdk/security/ext_conformance/traceability/tiered_corpus/swarm 等全绿
+
+### 遗留 8 个 (需真实 perf 或完整 pi-mono)
+- orchestrate 5: extension Criterion 数据 (bd-2zcs5.51) 缺失, 需真实 perf 运行
+- slash 2 + certification 1: pi-mono 缺 core/tools 模块 (git 中从未存在), 差分 runner 无法运行
+
+### 过程要点
+- merge 回归 (5f877467 通过/主仓库失败): auth_oauth_refresh 格式、session_index 锁超时、provider_smoke cursor、sdk_thinking_level 模型选择
+- 测试运行会改写 repo 内产物 (时间戳/报告), 跑完全量必须 restore
+- insta accept 需 test+accept 两步 (--accept 只生成 .snap.new)

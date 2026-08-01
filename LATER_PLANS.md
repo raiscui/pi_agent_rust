@@ -183,3 +183,18 @@
 ### 建议
 - 下次主线收尾时, 把这两条从 LATER_PLANS.md 删除或加 "[已完成 by <支线>]" 标记。
 - 持续学习 skill 不主动删除主线文件, 只追加索引; 清理权限留给主线 agent。
+
+## [2026-08-01 23:50:00] [Session ID: root-merge-590d618] 遗留: 8 个无法在本次修复的测试失败
+
+1. orchestrate_* (5 个, bench_schema): 需要真实 perf 运行生成 extension Criterion
+   证据 (bd-2zcs5.51 的 ext_cold_load_simple_p95 / policy_eval_p99 / protocol_parse_p99)。
+   跑真实 perf (release build + criterion) 后可满足 preflight/staging 门禁。
+2. test_combinatorial_slash_commands / test_slash_command_differential_harness /
+   test_certification_artifacts_fail_closed (3 个): pi-mono legacy 代码不完整,
+   packages/coding-agent/src/core/tools/ 目录在 git 中从未存在, 差分 runner
+   无法启动。需补齐 pi-mono 缺失模块或调整差分测试的依赖。
+3. 全量测试运行会改写 repo 内产物文件 (tests/artifacts、tests/ext_conformance/reports、
+   tests/full_suite_gate 等约 40 个): 建议将产物目录纳入 .gitignore 或
+   建立"跑完 restore"的约定, 避免提交噪音。
+4. pi-mono 依赖安装: 本机需 npm ci --ignore-scripts + 手动 esbuild install
+   (pnpm workspace 布局不链接依赖, npm 的 esbuild postinstall 失败)。

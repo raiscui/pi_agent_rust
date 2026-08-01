@@ -475,3 +475,25 @@
 - merge 回归判断必须用 merge-base 两侧的 worktree 复跑对比, 不能只看失败数量
 - 测试运行会改写仓库内产物文件, 提交前必须检查并还原非意图变更
 - 本仓库测试套件基线本身不绿 (存在环境依赖与未同步测试), 跑全量前先建立基线认知
+
+## [2026-08-01 23:50:00] [Session ID: root-merge-590d618] 测试基线修复 (115 → 8 个遗留)
+
+### 任务内容
+- 全量测试基线修复: merge 后 115 个失败降至 8 个无法修复的遗留 (perf 产物/pi-mono 不完整)
+- 修复了 merge 引入的 4 个真实产品缺陷 (auth_oauth 格式断言、session_index 锁超时、
+  provider_smoke cursor、TUI snapshot) 与约 100 个既有失败
+
+### 完成过程
+- A 类 env 污染: resolve_api_key_isolated / load_with_key_resolver 注入链 (lib 6757 全绿)
+- B 类 VCR 请求体: maxTokens 8192 -> 64000 同步 (e2e_cli/tui/golden 全绿)
+- C 类 snapshot: cargo insta accept 两步流程 (143/143)
+- 环境: pi-mono npm ci --ignore-scripts + esbuild 手动装; rch 测试加 inode 参数
+- 数据: claude-rules 元数据清理 (71 个文件误清后回滚, 精确清 20+ 个)、
+  checksum 同步、tiered corpus rank 重排、swarm golden 更新
+- 每个 target 修复后单独验证, 最终全量 --no-fail-fast 确认
+
+### 总结感悟
+- 回归判断必须用 merge 前 commit 的 worktree 复跑对比 (本次确认 4 个真回归)
+- 测试产物互踩是仓库结构问题 (产物在 repo 内), 全量跑后必须 restore
+- 数据清理 (JSON 条目) 必须精确匹配结构, 避免内容引用误伤
+- insta 的 --accept 只生成 .snap.new, 需单独 cargo insta accept

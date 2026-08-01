@@ -326,3 +326,30 @@
 
 ### 后续讨论入口
 - 建议: 将测试产物目录加入 .gitignore 或明确产物提交策略; 修复测试基线 (TS 表/断言同步, key 类测试隔离)
+
+## [2026-08-01 23:50:00] [Session ID: root-merge-590d618] 主题: 测试产物互踩 + 远程自带缺陷模式
+
+### 发现来源
+- 全量测试基线修复 (merge 590d6189 后)
+
+### 核心问题
+1. 本仓库测试运行会改写 repo 内产物文件 (时间戳/报告), 全量跑完 git 状态必脏
+2. 远程 0.1.23 自带 2 个缺陷: auth_oauth_refresh 测试读旧字段名 (access_token vs access),
+   session_index 锁超时 (5s) 小于 DirLock stale 阈值 (10s) 导致崩溃恢复失败
+3. pi-mono legacy 代码不完整 (core/tools 从未提交), slash 差分测试永远无法通过
+
+### 为什么重要
+- 后续任何 agent 跑全量测试都可能误判"产物改动"为"代码改动"
+- 崩溃恢复锁缺陷是真实产品 bug (SIGINT/SIGHUP/kill 后重建索引失败), 已修复 (15s)
+- 远程发布质量: 0.1.23 测试套件本身不绿 (auth_oauth 5 个 + startup_migrations 1 个)
+
+### 未来风险
+- 产物互踩会导致误提交 (本次已发生 1 次, 已修正)
+- pi-mono 不完整会持续阻塞 slash 差分/certification 门禁
+
+### 当前结论
+- merge 回归 4 个全部修复并验证 (worktree 基线对比)
+- 产物 restore 约定: 全量测试后必须 git restore tests/artifacts 等
+
+### 后续讨论入口
+- 是否将产物目录纳入 .gitignore; 是否补 pi-mono core/tools; 是否跑真实 perf 满足 orchestrate 门禁

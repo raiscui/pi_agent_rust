@@ -786,18 +786,6 @@ fn generate_conformance_report_impl() {
         negative_pass + negative_fail
     );
 
-    // 本地全量测试不产生 smoke/parity/scenario 输入数据: 此时重新生成会把
-    // committed 的 conformance_summary.json 覆盖成全 N/A (pass rate 0%),
-    // 导致 release_evidence_gate 误报失败。与 CI 的跳过逻辑一致:
-    // 没有任何输入数据时, 只打印提示, 不覆盖 repo 内的已提交报告。
-    if statuses.is_empty() && negative_pass == 0 && negative_fail == 0 {
-        eprintln!(
-            "[conformance_report] 没有可用输入报告 (smoke/parity/scenario 均缺), \
-             跳过写入以保护 committed 报告; 需要生成报告请先运行 conformance 套件"
-        );
-        return;
-    }
-
     // 3. Write JSONL events
     let events_path = reports.join("conformance_events.jsonl");
     let mut jsonl_lines: Vec<String> = Vec::new();
@@ -986,12 +974,15 @@ fn generate_conformance_report_impl() {
 
 #[test]
 fn generate_conformance_report() {
-    // Skip on CI: the detailed conformance report inputs (load-time, scenario,
-    // smoke, parity JSONL files) are not generated during CI runs, so
-    // regenerating the summary would overwrite the committed summary with zeros
-    // and cause the release_evidence_gate threshold check to fail.
-    if std::env::var("CI").is_ok() {
-        eprintln!("[conformance_report] Skipping report generation on CI");
+    // 默认不覆盖 committed 的 conformance 报告: 本地全量测试的输入数据
+    // (load-time/scenario/smoke 报告) 并不完整, 重新生成会把已提交的
+    // summary 覆盖成部分/N-A 数据, 导致 release_evidence_gate 误报。
+    // 与 CI 行为一致; 需要显式生成时设置 PI_WRITE_CONFORMANCE_REPORT=1。
+    if std::env::var("PI_WRITE_CONFORMANCE_REPORT").is_err() {
+        eprintln!(
+            "[conformance_report] Skipping report generation (set \
+             PI_WRITE_CONFORMANCE_REPORT=1 to regenerate committed reports)"
+        );
         return;
     }
     let _guard = CONFORMANCE_REPORT_IO_LOCK

@@ -40,6 +40,9 @@ tests/certification/
 tests/security_compat/
 tests/full_suite_gate/
 tests/perf/reports/
+# 测试自动生成的文档数据 (ext_entry_scan / ext_conformance_matrix 每次运行重写)
+docs/extension-conformance-test-plan.json
+docs/extension-entry-scan.json
 # committed baselines
 !tests/ext_conformance/reports/CONFORMANCE_REPORT.md
 !tests/ext_conformance/reports/conformance_baseline.json
