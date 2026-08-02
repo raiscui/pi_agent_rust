@@ -233,11 +233,9 @@ fn collect_cancellable_lifecycle_results(cancel_manager: &ExtensionManager) -> V
 }
 
 fn write_lifecycle_hook_parity_artifact(ordering_trace: &[String], cancellable_results: &[Value]) {
-    let artifact_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("ext_conformance")
-        .join("reports")
-        .join("lifecycle_hooks");
+    // 写到临时目录: committed 的 lifecycle_hook_parity_matrix.json 是静态证据,
+    // 测试运行不应覆盖它 (否则全量测试后 git 状态必脏)
+    let artifact_dir = std::env::temp_dir().join(format!("pi-lifecycle-hooks-{}", std::process::id()));
     std::fs::create_dir_all(&artifact_dir).expect("create lifecycle hook report dir");
     let artifact_path = artifact_dir.join("lifecycle_hook_parity_matrix.json");
     let artifact = json!({
