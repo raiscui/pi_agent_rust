@@ -497,3 +497,24 @@
 - 测试产物互踩是仓库结构问题 (产物在 repo 内), 全量跑后必须 restore
 - 数据清理 (JSON 条目) 必须精确匹配结构, 避免内容引用误伤
 - insta 的 --accept 只生成 .snap.new, 需单独 cargo insta accept
+
+## [2026-08-02 00:20:00] [Session ID: root-merge-590d618] 任务: 测试产物纳入 .gitignore
+
+### 任务内容
+- 将测试运行产物目录纳入 .gitignore 并停止 git 跟踪, 达成"全量测试后 git 状态干净"
+
+### 完成过程
+- .gitignore 新增: tests/artifacts/perf、tests/evidence_bundle、tests/certification、
+  tests/security_compat、tests/full_suite_gate、tests/perf/reports、
+  docs/extension-conformance-test-plan.json、docs/extension-entry-scan.json
+- git rm --cached 移除 53 个已跟踪产物 (磁盘保留, 测试可再生成; 读取者均为可选读取)
+- 生成测试改输出 temp: ext_risk_review / ext_provenance_verification /
+  extensions_event_wiring (committed 证据保护)
+- conformance_report 默认跳过生成 (PI_WRITE_CONFORMANCE_REPORT=1 显式触发),
+  根治"本地全量把 committed summary 覆盖成 0%"
+- 最终验证: 全量测试 8 个失败 (全部已知遗留), git 产物脏 = 0 (之前 40+)
+
+### 总结感悟
+- 产物互踩的根治: 生成测试输出 temp + committed 证据静态化 + 显式 env 触发重生成
+- gitignore 对已跟踪文件无效, 必须 git rm --cached
+- 区分"纯产物" (可再生成) 与"静态证据" (release gate 依赖, 保留跟踪)
