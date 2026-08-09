@@ -198,3 +198,26 @@
    建立"跑完 restore"的约定, 避免提交噪音。
 4. pi-mono 依赖安装: 本机需 npm ci --ignore-scripts + 手动 esbuild install
    (pnpm workspace 布局不链接依赖, npm 的 esbuild postinstall 失败)。
+
+## [2026-08-09 15:10:00] [Session ID: 1] 转录: secret_cleanup 待用户授权 4 条
+
+### 来源
+- 原计划: `archive/branch_contexts/secret_cleanup/LATER_PLANS__secret_cleanup.md` (Session ID: `019f5551-7950-7a21-b33b-617b24f4f8d0`)
+- 原任务主题: DeepSeek API Key 本地与仓库隔离 (脱敏清理闭环)
+- 转录原因: 阶段 6 仍有 4 条不可逆 / 外部授权操作, 不能被归档动作丢失。
+
+### 必做事项 (转录自原文, 不重写)
+1. 在 DeepSeek 控制台吊销当前 Key, 创建新 Key, 再更新忽略的 `.envrc`。
+2. 评估完整环境快照中出现过的其他凭据, 对仍有效的 token 一并轮换。
+3. 在没有并行工作树写入的安全窗口, 重写 `main` 和 `feature/read-scope-allowlist` 中受影响的 `WORKLOG.md` 对象。
+   - 注: 2026-07-12 已完成 `main` 与 `feature/read-scope-allowlist` 的 history rewrite + reflog expire, 此条主要为后续 round-robin 留窗口。
+4. 验证所有引用、reflog 和可达 / 不可达对象不再命中旧指纹后, 再推送远端。
+
+### 授权边界 (转录自原文)
+- Key 吊销属于外部账号状态变更。
+- history rewrite、reflog expire 和 object pruning 属于不可逆 Git / 文件系统操作。
+- 上述动作均需用户明确确认具体命令与影响范围后再执行。
+
+### 索引
+- 完整上下文见 `archive/branch_contexts/secret_cleanup/INDEX.md`
+- 当前树 + Git 历史已隔离; 唯一遗留项是这 4 条授权动作。

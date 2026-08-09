@@ -518,3 +518,24 @@
 - 产物互踩的根治: 生成测试输出 temp + committed 证据静态化 + 显式 env 触发重生成
 - gitignore 对已跟踪文件无效, 必须 git rm --cached
 - 区分"纯产物" (可再生成) 与"静态证据" (release gate 依赖, 保留跟踪)
+
+## [2026-08-09 15:15:00] [Session ID: 1] 任务名称: 文档化 perf evidence 已知缺口 + 三个支线归档
+
+### 任务内容
+- 不跑 cargo test / cargo bench (用户警告并行会爆内存,本机 Load Avg 30/16/9)。
+- 落盘 `docs/evidence/perf-evidence-known-gap.md` 说明 budget_summary.json 是 stale evidence。
+- 把 3 个未跟踪支线 (`__continue_goal` / `__ultragoal_goal` / `__secret_cleanup`) 移到 `archive/branch_contexts/<topic>/`。
+- 在 `LATER_PLANS.md` 转录 secret_cleanup 待用户授权的 4 条不可逆操作。
+
+### 完成过程
+- 5 步只读调查 + 验证 orchestrate 5 真实状态 (fake toolchain 测试 vs stale budget evidence)。
+- 编写 `docs/evidence/perf-evidence-known-gap.md` (153 行, 14 个 missing artifact + 3 个 stale evidence + 本机不能跑原因 + RCH 计划)。
+- mkdir + mv 三个 topic 目录, 各写 `INDEX.md` (摘要 + Session ID + 重新激活条件)。
+- secret_cleanup 待授权 4 条按原文转录到主线 `LATER_PLANS.md` (无改动, 仅注明来源)。
+- 中途尝试 `cargo test --test bench_schema --no-run --profile dev` 在 sccache + pedantic+nursery lints 下超过 4 分钟仍在编译 asupersync 依赖链, 已 kill, 转静态分析。
+
+### 总结感悟
+- 用户对"并行 cargo 爆内存"的警告是真:本机当前 Load Avg 30/16/9, 单个 `--no-run` 都跑不完 asupersync 依赖链。
+- `tests/perf/reports/budget_summary.json` 的 stale 状态不应被当成 active test failure; 14 个 missing artifact + 3 个 1598h stale evidence 都是历史真实 perf run 的快照。
+- 支线归档不是删除: `mv` 是 rename, archive/branch_contexts/ 是 OMX 标准的支线归宿, archive/manifests/ARCHIVE_MANIFEST 记录每次归档的摘要。
+- secret_cleanup 的 history rewrite 已经完成, 唯一遗留是 4 条不可逆外部操作, 必须等用户授权, 不能由 agent 推进。

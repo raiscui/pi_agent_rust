@@ -1105,3 +1105,104 @@
 - merge 回归 (5f877467 通过/主仓库失败): auth_oauth_refresh 格式、session_index 锁超时、provider_smoke cursor、sdk_thinking_level 模型选择
 - 测试运行会改写 repo 内产物 (时间戳/报告), 跑完全量必须 restore
 - insta accept 需 test+accept 两步 (--accept 只生成 .snap.new)
+
+## [2026-08-02 00:30:00] [Session ID: root-merge-590d618] 子任务: 处理 8 个遗留测试失败
+
+### 遗留清单
+- orchestrate 5 (bench_schema): 缺 extension Criterion 证据 (bd-2zcs5.51)
+- slash 3 (dropin_slash_differential + certification): pi-mono 缺 core/tools 模块
+
+### 分析步骤
+- [ ] slash: 摸清 pi-mono coding-agent 缺失模块清单与上游来源
+- [ ] slash: 决定补齐 vs 调整测试
+- [ ] orchestrate: 摸清 Criterion 证据生成路径
+- [ ] 实施并验证
+
+## [2026-08-09 14:25:00] [Session ID: 1] 硬约束: 测试/bench 并行度上限
+
+### 用户警告 (本会话追加)
+- "之前测试/bench 太多并行 会用巨量的内存,会让机器卡死"
+- 影响范围: orchestrate 5 (bench_schema) / slash 3 / certification / 其他 Criterion 路径
+- 适用范围: 本机所有 cargo test / cargo bench 路径, 不限于 orchestrate
+
+### 行动规则
+- [ ] 跑 cargo test / cargo bench 时必须显式限制 --jobs / -j, 默认不超过 2
+- [ ] Criterion bench 必须单线程跑, 不允许 cargo bench --jobs N>1
+- [ ] 长任务前先 `lsof / vm_stat / top` 看内存水位, 记录到 WORKLOG
+- [ ] 如果遇到 OOM / 卡死, 立刻 kill, 不重试
+- [ ] orchestrate 5 这类 Criterion 证据路径必须先估算 workload, 再决定 serial 还是分组跑
+
+## [2026-08-09 14:35:00] [Session ID: 1] 阶段1启动: orchestrate 5 只读调查
+
+### 目标
+不跑任何 cargo test/bench, 先弄清楚这 6 个 orchestrate 测试为什么算"遗留失败"。
+是 ignored? 是脚本 contract 变更没同步? 还是真 bench evidence 缺失?
+
+### 5 步调查
+- [ ] 1. tests/bench_schema.rs 中这 6 个测试的 ignore / 条件 skip 状态
+- [ ] 2. tests/bench_schema.rs 最近改动 (git log)
+- [ ] 3. tests/perf/reports/budget_summary.json 当前内容
+- [ ] 4. br ready --json 当前开放的 bead
+- [ ] 5. /data/tmp/pi_agent_rust_cargo stale 锁 / 残留 cargo process
+
+### 调查发现 (5 步)
+- 1. 6 个 orchestrate 测试均为 `#[test]`,无 #[ignore]; 都用 fake toolchain stub + `PERF_SKIP_CRITERION=1` 跳过 Criterion
+- 2. 关键 commit `891390f9`: evidence-writing suites opt-in via `PI_GENERATE_*`; `dea876b2`: bench_schema 测试加 `--no-rch`
+- 3. budget_summary.json: ci_fail=0, ci_no_data=12, data_contract_failures_count=15, 19 个 budget 全 value=None
+- 4. br ready=0, br list --status=open=0 (所有 bead 已 closed, 包含 2zcs5 系列)
+- 5. /data/tmp/pi_agent_rust_cargo 不存在 (DarkGoose 清理过), 无 cargo 残留, 仅有 zeroclaw daemon (无关)
+
+### 关键修正
+- "orchestrate 5 失败" = budget_summary.json stale evidence, 而非 active blocker
+- 测试本身用 fake toolchain, 内存安全, 但需要单跑验证
+
+## [2026-08-09 14:55:00] [Session ID: 1] 阶段C启动: 文档化 budget_summary stale 为 known gap
+
+### 行动
+- [ ] C1. 写 docs/evidence/perf-evidence-known-gap.md (14+3 artifact + 本机原因 + RCH 计划)
+- [ ] C2. 在 task_plan.md 引用该 known gap 文档, 让后续 agent 不会被 budget_summary stale 误导
+
+## [2026-08-09 15:05:00] [Session ID: 1] 阶段A启动: 三个未跟踪支线归档
+
+### 决定
+- continue_goal (Jun 30, 146 行, 6 文件): 旧 macOS 授权阻塞已被推翻, G002/G004 已结案, ultragoal 上下文过期。**整体 archive**。
+- ultragoal_goal (Jun 30, 177 行, 6 文件): 与 continue_goal 重叠, G005 reconciliation 未做, ultragoal 已 inactive。**整体 archive**。
+- secret_cleanup (Jul 12, 318 行, 7 文件): 阶段 1-5 已完成, 阶段 6 部分完成 (history rewrite + reflog 已完, DeepSeek Key 吊销与 .envrc 轮换仍待用户授权)。**整体 archive, 但将待授权事项转录到主线 LATER_PLANS.md**。
+
+### 行动
+- [ ] A1. mkdir archive/branch_contexts/continue_goal, ultragoal_goal, secret_cleanup
+- [ ] A2. mv 各自 __<topic>.md 到对应目录
+- [ ] A3. 写 archive/branch_contexts/<topic>/INDEX.md (摘要 + Session ID + 原因)
+- [ ] A4. 主线 LATER_PLANS.md 追加 secret_cleanup 待授权 4 条
+- [ ] A5. WORKLOG.md 记录本次归档动作
+- [ ] A6. 主线 task_plan.md 索引这次归档 + 指向 docs/evidence/perf-evidence-known-gap.md
+
+## [2026-08-09 15:20:00] [Session ID: 1] 阶段C+A 完成
+
+### 产出
+- `docs/evidence/perf-evidence-known-gap.md` 落盘 (153 行, 解释 budget_summary stale 真相)
+- `archive/branch_contexts/continue_goal/` 5 文件 + INDEX.md
+- `archive/branch_contexts/ultragoal_goal/` 4 文件 + INDEX.md
+- `archive/branch_contexts/secret_cleanup/` 6 文件 + INDEX.md
+- `LATER_PLANS.md` 追加 secret_cleanup 4 条待用户授权 (转录自原文, 不重写)
+- `WORKLOG.md` 追加本次 C+A 任务产出
+
+### 下一步候选 (请用户选择)
+1. 推本地 88 个 commit 到 `my/main` (减少 origin/main 跟进的双向差异)
+2. 用 RCH 远程跑 perf evidence (12 + 3 artifact 全绿, 但需联网与 RCH 健康)
+3. 处理主线 task_plan 剩下的"8 个遗留测试失败"中非 orchestrate 的部分 (slash 3 + certification 1)
+4. 其他由用户指定
+
+## [2026-08-09 15:25:00] [Session ID: 1] 阶段1: 推本地 88 commits 到 my/main
+
+### 准备工作
+- [x] 1a. 看 88 commits messages (从本地 main 到 my/main)
+- [x] 1b. 扫本地 working tree + git ls-files 无 DeepSeek 真值 (src/tools.rs 命中是 fixture, docs/provider-config-examples.md 是 placeholder, .envrc 在 gitignore)
+- [x] 1c. git log --all -S 'sk-' 仅命中 fixture 引入 commit `8341d687 Gate tool artifact lifecycle metadata`
+- [x] 1d. my remote 是 https://github.com/raiscui/pi_agent_rust.git, server-side HEAD e0cc86895 (2026-06-08), 本地领先 88 commits, fast-forward 安全
+
+### 行动
+- [ ] 1e. git add (精确 scope, 不 git add .)
+- [ ] 1f. git commit (scoped message)
+- [ ] 1g. git push my main
+- [ ] 1h. 验证 my/main HEAD 更新 + 本地 working tree 状态
