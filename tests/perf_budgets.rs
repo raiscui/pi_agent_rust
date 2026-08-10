@@ -12,12 +12,50 @@
     clippy::unreadable_literal
 )]
 
-use pi::perf_build::BINARY_SIZE_RELEASE_BUDGET_MB;
+use pi::perf_build::{
+    BINARY_SIZE_RELEASE_BUDGET_MB, BUILD_FINGERPRINT_CONTRACT, BenchmarkBuildVerification,
+    BenchmarkProvenance, CANONICAL_PIJS_PERF_FEATURES, benchmark_provenance_config_hash,
+    matches_canonical_perf_build_fingerprint, matches_canonical_pijs_perf_features,
+    profile_from_target_path, sha256_file,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum BudgetComparison {
+    Maximum,
+    Minimum,
+}
+
+impl BudgetComparison {
+    fn passes(self, actual: f64, threshold: f64) -> bool {
+        match self {
+            Self::Maximum => actual <= threshold,
+            Self::Minimum => actual >= threshold,
+        }
+    }
+
+    const fn symbol(self) -> &'static str {
+        match self {
+            Self::Maximum => "<=",
+            Self::Minimum => ">=",
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Maximum => "maximum",
+            Self::Minimum => "minimum",
+        }
+    }
+}
 
 // ─── Budget Definitions ──────────────────────────────────────────────────────
 
@@ -32,8 +70,11 @@ struct Budget {
     metric: &'static str,
     /// Unit of measurement (ms, us, MB, count).
     unit: &'static str,
-    /// Budget threshold (must not exceed this value).
+    /// Comparison boundary interpreted according to `comparison`.
     threshold: f64,
+    /// Whether passing requires the measured value to stay at or below the
+    /// threshold, or at or above it.
+    comparison: BudgetComparison,
     /// Measurement methodology.
     methodology: &'static str,
     /// Whether this budget is enforced in CI.
@@ -49,6 +90,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 latency",
         unit: "ms",
         threshold: 100.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "hyperfine: `pi --version` (10 runs, 3 warmup)",
         ci_enforced: true,
     },
@@ -58,6 +100,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 latency",
         unit: "ms",
         threshold: 200.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "hyperfine: `pi --print '.'` with full init (10 runs, 3 warmup)",
         ci_enforced: false, // Requires API key or VCR
     },
@@ -68,6 +111,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 cold load time",
         unit: "ms",
         threshold: 5.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: load_init_cold for simple single-file extensions (10 samples)",
         ci_enforced: true,
     },
@@ -77,6 +121,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 cold load time",
         unit: "ms",
         threshold: 50.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: load_init_cold for multi-registration extensions (10 samples)",
         ci_enforced: false,
     },
@@ -86,17 +131,19 @@ const BUDGETS: &[Budget] = &[
         metric: "total load time (60 official extensions)",
         unit: "ms",
         threshold: 10000.0, // 10 seconds total for all 60
+        comparison: BudgetComparison::Maximum,
         methodology: "conformance runner: sequential load of all 60 official extensions",
         ci_enforced: false,
     },
     // ── Tool Call ─────────────────────────────────────────────────────────
     Budget {
-        name: "tool_call_latency_p99",
+        name: "tool_call_latency_mean",
         category: "tool_call",
-        metric: "p99 per-call latency",
+        metric: "mean per-call latency",
         unit: "us",
         threshold: 200.0,
-        methodology: "pijs_workload: 2000 iterations x 1 tool call, perf profile",
+        comparison: BudgetComparison::Maximum,
+        methodology: "pijs_workload: arithmetic mean across exactly 2000 iterations x 1 tool call, executable-path-verified perf profile",
         ci_enforced: true,
     },
     Budget {
@@ -104,8 +151,9 @@ const BUDGETS: &[Budget] = &[
         category: "tool_call",
         metric: "minimum calls/sec",
         unit: "calls/sec",
-        threshold: 5000.0, // Must exceed 5k calls/sec
-        methodology: "pijs_workload: 2000 iterations x 10 tool calls, perf profile",
+        threshold: 5000.0, // Must meet or exceed 5k calls/sec
+        comparison: BudgetComparison::Minimum,
+        methodology: "pijs_workload: aggregate throughput across exactly 2000 iterations x 10 tool calls, executable-path-verified perf profile",
         ci_enforced: true,
     },
     // ── Event Dispatch ───────────────────────────────────────────────────
@@ -115,6 +163,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p99 dispatch latency",
         unit: "us",
         threshold: 5000.0, // 5ms
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: event_hook dispatch for before_agent_start (100 samples)",
         ci_enforced: false,
     },
@@ -125,6 +174,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 cold graph build latency",
         unit: "ms",
         threshold: 500.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: semantic_context/graph_build_cold on large filesystem fixture",
         ci_enforced: true,
     },
@@ -134,6 +184,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 warm graph build latency",
         unit: "ms",
         threshold: 250.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: semantic_context/graph_build_warm on large filesystem fixture",
         ci_enforced: true,
     },
@@ -143,6 +194,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 single-change rebuild latency",
         unit: "ms",
         threshold: 250.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: semantic_context/incremental_update rebuild after one changed file",
         ci_enforced: true,
     },
@@ -152,6 +204,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 planner latency",
         unit: "ms",
         threshold: 50.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: semantic_context/planning on large graph fixture",
         ci_enforced: true,
     },
@@ -161,6 +214,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p95 bundle serialization latency",
         unit: "ms",
         threshold: 25.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: semantic_context/bundle_serialization on large bundle fixture",
         ci_enforced: true,
     },
@@ -170,6 +224,7 @@ const BUDGETS: &[Budget] = &[
         metric: "bundle estimated size",
         unit: "bytes",
         threshold: 262_144.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "semantic_context budget artifact: estimated selected bundle bytes",
         ci_enforced: true,
     },
@@ -180,6 +235,7 @@ const BUDGETS: &[Budget] = &[
         metric: "p99 evaluation time",
         unit: "ns",
         threshold: 500.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: ext_policy/evaluate with various modes and capabilities",
         ci_enforced: true,
     },
@@ -190,6 +246,7 @@ const BUDGETS: &[Budget] = &[
         metric: "RSS at idle",
         unit: "MB",
         threshold: 50.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "sysinfo: measure RSS after startup, before any user input",
         ci_enforced: true,
     },
@@ -199,6 +256,7 @@ const BUDGETS: &[Budget] = &[
         metric: "RSS growth under 30s sustained load",
         unit: "percent",
         threshold: 5.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "stress test: 15 extensions, 50 events/sec for 30 seconds",
         ci_enforced: false,
     },
@@ -209,6 +267,7 @@ const BUDGETS: &[Budget] = &[
         metric: "release binary size",
         unit: "MB",
         threshold: BINARY_SIZE_RELEASE_BUDGET_MB,
+        comparison: BudgetComparison::Maximum,
         methodology: "ls -la target/release/pi (stripped)",
         ci_enforced: true,
     },
@@ -219,10 +278,44 @@ const BUDGETS: &[Budget] = &[
         metric: "p99 parse+validate time",
         unit: "us",
         threshold: 50.0,
+        comparison: BudgetComparison::Maximum,
         methodology: "criterion: ext_protocol/parse_and_validate for host_call and log messages",
         ci_enforced: true,
     },
 ];
+
+/// Canonical cross-language inventory serialization used by release consumers.
+///
+/// Array and field order are fixed. Thresholds use exactly six decimal places,
+/// avoiding parser-dependent `100` versus `100.0` spellings while retaining all
+/// precision used by the v0.2.0 budget inventory.
+fn budget_inventory_canonical_json() -> String {
+    let mut canonical = String::from("[");
+    for (index, budget) in BUDGETS.iter().enumerate() {
+        if index != 0 {
+            canonical.push(',');
+        }
+        let name = serde_json::to_string(budget.name).expect("serialize budget name");
+        let category = serde_json::to_string(budget.category).expect("serialize budget category");
+        let metric = serde_json::to_string(budget.metric).expect("serialize budget metric");
+        let unit = serde_json::to_string(budget.unit).expect("serialize budget unit");
+        let comparison =
+            serde_json::to_string(budget.comparison.as_str()).expect("serialize comparison");
+        let methodology = serde_json::to_string(budget.methodology).expect("serialize methodology");
+        let _ = write!(
+            canonical,
+            "{{\"name\":{name},\"category\":{category},\"metric\":{metric},\"unit\":{unit},\"threshold\":{:.6},\"comparison\":{comparison},\"ci_enforced\":{},\"methodology\":{methodology}}}",
+            budget.threshold, budget.ci_enforced
+        );
+    }
+    canonical.push(']');
+    canonical
+}
+
+fn budget_inventory_sha256() -> String {
+    let digest = Sha256::digest(budget_inventory_canonical_json().as_bytes());
+    format!("{digest:x}")
+}
 
 const DEFAULT_MAX_ARTIFACT_AGE_HOURS: f64 = 24.0;
 const BUN_KILLER_MAX_RUST_VS_BUN_RATIO: f64 = 0.33;
@@ -253,6 +346,7 @@ const CONTEXT_INTELLIGENCE_BUDGET_METRICS: &[(&str, &str)] = &[
 ];
 const CONTEXT_INTELLIGENCE_CACHE_FIELDS: &[&str] =
     &["cold_graph_build", "warm_graph_build", "incremental_update"];
+const PIJS_REGRESSION_GATE_ITERATIONS: u64 = 2_000;
 
 // ─── Data Readers ────────────────────────────────────────────────────────────
 
@@ -274,20 +368,26 @@ fn resolve_target_dir(root: &Path, raw_target_dir: Option<&std::ffi::OsStr>) -> 
     )
 }
 
-fn target_dir(root: &Path) -> PathBuf {
-    resolve_target_dir(root, std::env::var_os("CARGO_TARGET_DIR").as_deref())
+fn target_dir_candidates_for(
+    root: &Path,
+    canonical_project_root: &Path,
+    raw_target_dir: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    if root == canonical_project_root {
+        vec![resolve_target_dir(root, raw_target_dir)]
+    } else {
+        // Callers evaluating a fixture root must remain hermetic and must not
+        // inherit artifacts from the real project's Cargo target directory.
+        vec![root.join("target")]
+    }
 }
 
 fn target_dir_candidates(root: &Path) -> Vec<PathBuf> {
-    let resolved_target = target_dir(root);
-    let default_target = root.join("target");
-    let project_root = project_root();
-    let paths = if root == project_root.as_path() {
-        vec![resolved_target, default_target]
-    } else {
-        vec![default_target, resolved_target]
-    };
-    dedup_paths(paths)
+    target_dir_candidates_for(
+        root,
+        &project_root(),
+        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
+    )
 }
 
 fn resolve_env_path(root: &Path, path: PathBuf) -> Option<PathBuf> {
@@ -309,10 +409,10 @@ fn dedup_paths(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 fn perf_evidence_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(raw) = std::env::var_os("PERF_EVIDENCE_DIR") {
-        if let Some(path) = resolve_env_path(root, PathBuf::from(raw)) {
-            dirs.push(path);
-        }
+    if let Some(raw) = std::env::var_os("PERF_EVIDENCE_DIR")
+        && let Some(path) = resolve_env_path(root, PathBuf::from(raw))
+    {
+        dirs.push(path);
     }
     if let Some(raw) = std::env::var_os("PERF_EVIDENCE_DIRS") {
         for path in std::env::split_paths(&raw) {
@@ -351,9 +451,59 @@ fn evidence_then_target_paths(
     dedup_paths(paths)
 }
 
+fn portable_relative_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn display_source_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .map_or_else(|_| path.display().to_string(), |p| p.display().to_string())
+    for (index, evidence_dir) in perf_evidence_dirs(root).iter().enumerate() {
+        if let Ok(relative) = path.strip_prefix(evidence_dir) {
+            return format!("evidence[{index}]://{}", portable_relative_path(relative));
+        }
+    }
+    for (index, target_dir) in target_dir_candidates(root).iter().enumerate() {
+        if let Ok(relative) = path.strip_prefix(target_dir) {
+            return format!(
+                "cargo-target[{index}]://{}",
+                portable_relative_path(relative)
+            );
+        }
+    }
+    if let Ok(relative) = path.strip_prefix(root) {
+        return format!("repo://{}", portable_relative_path(relative));
+    }
+    format!(
+        "external://{}",
+        path.file_name()
+            .map_or_else(|| "artifact".into(), |name| name.to_string_lossy())
+    )
+}
+
+fn canonicalize_diagnostic_text(root: &Path, text: &str) -> String {
+    let mut replacements = Vec::new();
+    for (index, evidence_dir) in perf_evidence_dirs(root).iter().enumerate() {
+        replacements.push((
+            format!("{}/", evidence_dir.to_string_lossy().trim_end_matches('/')),
+            format!("evidence[{index}]://"),
+        ));
+    }
+    for (index, target_dir) in target_dir_candidates(root).iter().enumerate() {
+        replacements.push((
+            format!("{}/", target_dir.to_string_lossy().trim_end_matches('/')),
+            format!("cargo-target[{index}]://"),
+        ));
+    }
+    replacements.push((
+        format!("{}/", root.to_string_lossy().trim_end_matches('/')),
+        "repo://".to_string(),
+    ));
+    replacements.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+
+    replacements
+        .into_iter()
+        .fold(text.to_string(), |canonical, (prefix, replacement)| {
+            canonical.replace(&prefix, &replacement)
+        })
 }
 
 fn read_json_file(path: &Path) -> Option<Value> {
@@ -386,6 +536,7 @@ struct BudgetResult {
     budget_name: String,
     category: String,
     threshold: f64,
+    comparison: BudgetComparison,
     unit: String,
     actual: Option<f64>,
     status: String, // "PASS", "FAIL", "NO_DATA"
@@ -406,6 +557,18 @@ struct DataContractFailure {
 
 fn perf_strict_mode() -> bool {
     std::env::var("PI_PERF_STRICT").is_ok_and(|v| v == "1")
+}
+
+fn budget_report_generation_enabled(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "1")
+}
+
+fn budget_report_generation_requested() -> bool {
+    budget_report_generation_enabled(
+        std::env::var("PI_GENERATE_PERF_BUDGET_REPORT")
+            .ok()
+            .as_deref(),
+    )
 }
 
 fn max_artifact_age_hours() -> f64 {
@@ -431,16 +594,259 @@ fn perf_run_id() -> Option<String> {
     })
 }
 
+fn tracked_index_flags_are_default(output: &[u8]) -> bool {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .all(|record| record.starts_with(b"H "))
+}
+
+fn git_command_succeeds(root: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn clean_source_commit(root: &Path) -> Option<String> {
+    let index_flags = Command::new("git")
+        .args(["ls-files", "-v", "-z", "--"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !index_flags.status.success() || !tracked_index_flags_are_default(&index_flags.stdout) {
+        return None;
+    }
+
+    let status = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        return None;
+    }
+    if !git_command_succeeds(root, &["diff", "--quiet", "--no-ext-diff", "HEAD", "--"])
+        || !git_command_succeeds(
+            root,
+            &["diff", "--cached", "--quiet", "--no-ext-diff", "HEAD", "--"],
+        )
+    {
+        return None;
+    }
+    let mut head_commit = String::from("HEAD^");
+    head_commit.push('{');
+    head_commit.push_str("commit");
+    head_commit.push('}');
+    let revision = Command::new("git")
+        .args(["rev-parse", "--verify"])
+        .arg(head_commit)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !revision.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8(revision.stdout).ok()?;
+    let commit = commit.trim();
+    (commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| commit.to_ascii_lowercase())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn claim_readiness_blockers(
+    strict_mode: bool,
+    source_commit: Option<&str>,
+    run_id: Option<&str>,
+    correlation_id: Option<&str>,
+    ci_enforced: usize,
+    ci_with_data: usize,
+    ci_fail: usize,
+    ci_no_data: usize,
+    fail: usize,
+    no_data: usize,
+    data_contract_failures: usize,
+) -> Vec<&'static str> {
+    let mut blockers = BTreeSet::new();
+    if !strict_mode {
+        blockers.insert("strict_mode_disabled");
+    }
+    if source_commit.is_none() {
+        blockers.insert("source_commit_unbound");
+    }
+    if run_id.is_none() {
+        blockers.insert("run_id_missing");
+    }
+    if correlation_id.is_none() || run_id != correlation_id {
+        blockers.insert("correlation_id_missing");
+    }
+    if ci_with_data != ci_enforced || ci_no_data != 0 {
+        blockers.insert("ci_budget_data_missing");
+    }
+    if ci_fail != 0 {
+        blockers.insert("ci_budget_failed");
+    }
+    if fail != 0 {
+        blockers.insert("budget_failed");
+    }
+    if no_data != 0 {
+        blockers.insert("budget_data_missing");
+    }
+    if data_contract_failures != 0 {
+        blockers.insert("data_contract_failure");
+    }
+    blockers.into_iter().collect()
+}
+
+fn budget_definitions_value() -> Vec<Value> {
+    BUDGETS
+        .iter()
+        .map(|budget| {
+            json!({
+                "name": budget.name,
+                "category": budget.category,
+                "metric": budget.metric,
+                "unit": budget.unit,
+                "threshold": budget.threshold,
+                "comparison": budget.comparison,
+                "ci_enforced": budget.ci_enforced,
+                "methodology": budget.methodology,
+            })
+        })
+        .collect()
+}
+
+struct BudgetSummaryLineage<'a> {
+    generated_at: &'a str,
+    source_commit: Option<&'a str>,
+    run_id: Option<&'a str>,
+    correlation_id: Option<&'a str>,
+    strict_mode: bool,
+}
+
+fn benchmark_lineage_is_authoritative(lineage: &BudgetSummaryLineage<'_>) -> bool {
+    lineage.strict_mode
+        && lineage.source_commit.is_some()
+        && lineage.run_id.is_some()
+        && lineage.run_id == lineage.correlation_id
+}
+
+fn blocked_sentinel_result(budget: &Budget) -> BudgetResult {
+    BudgetResult {
+        budget_name: budget.name.to_string(),
+        category: budget.category.to_string(),
+        threshold: budget.threshold,
+        comparison: budget.comparison,
+        unit: budget.unit.to_string(),
+        actual: None,
+        status: "NO_DATA".to_string(),
+        source: "not evaluated: authoritative benchmark lineage is incomplete".to_string(),
+        ci_enforced: budget.ci_enforced,
+        failure_reason: None,
+    }
+}
+
+fn evaluate_budget_report(
+    root: &Path,
+    lineage: &BudgetSummaryLineage<'_>,
+) -> (Vec<BudgetResult>, Vec<DataContractFailure>) {
+    if !benchmark_lineage_is_authoritative(lineage) {
+        return (
+            BUDGETS.iter().map(blocked_sentinel_result).collect(),
+            Vec::new(),
+        );
+    }
+
+    (
+        BUDGETS
+            .iter()
+            .map(|budget| check_budget_with_strict_at_root(budget, true, root))
+            .collect(),
+        collect_data_contract_failures(root),
+    )
+}
+
+fn budget_summary_value(
+    lineage: &BudgetSummaryLineage<'_>,
+    results: &[BudgetResult],
+    data_contract_failures: &[DataContractFailure],
+) -> Value {
+    let pass_count = results
+        .iter()
+        .filter(|result| result.status == "PASS")
+        .count();
+    let fail_count = results
+        .iter()
+        .filter(|result| result.status == "FAIL")
+        .count();
+    let no_data_count = results
+        .iter()
+        .filter(|result| result.status == "NO_DATA")
+        .count();
+    let ci_enforced_count = BUDGETS.iter().filter(|budget| budget.ci_enforced).count();
+    let ci_results = results
+        .iter()
+        .filter(|result| result.ci_enforced)
+        .collect::<Vec<_>>();
+    let ci_with_data_count = ci_results
+        .iter()
+        .filter(|result| result.actual.is_some())
+        .count();
+    let ci_fail_count = ci_results
+        .iter()
+        .filter(|result| result.status == "FAIL")
+        .count();
+    let ci_no_data_count = ci_results
+        .iter()
+        .filter(|result| result.status == "NO_DATA")
+        .count();
+    let readiness_blockers = claim_readiness_blockers(
+        lineage.strict_mode,
+        lineage.source_commit,
+        lineage.run_id,
+        lineage.correlation_id,
+        ci_enforced_count,
+        ci_with_data_count,
+        ci_fail_count,
+        ci_no_data_count,
+        fail_count,
+        no_data_count,
+        data_contract_failures.len(),
+    );
+    let claims_authorized = readiness_blockers.is_empty();
+
+    json!({
+        "schema": "pi.perf.budget_summary.v2",
+        "generated_at": lineage.generated_at,
+        "source_commit": lineage.source_commit,
+        "run_id": lineage.run_id,
+        "correlation_id": lineage.correlation_id,
+        "strict_mode": lineage.strict_mode,
+        "total_budgets": BUDGETS.len(),
+        "ci_enforced": ci_enforced_count,
+        "ci_with_data": ci_with_data_count,
+        "ci_fail": ci_fail_count,
+        "ci_no_data": ci_no_data_count,
+        "pass": pass_count,
+        "fail": fail_count,
+        "no_data": no_data_count,
+        "data_contract_failures_count": data_contract_failures.len(),
+        "failing_data_contracts": data_contract_failures,
+        "budgets": budget_definitions_value(),
+        "budget_results": results,
+        "claim_readiness": {
+            "status": if claims_authorized { "claim_ready" } else { "blocked" },
+            "performance_claims_authorized": claims_authorized,
+            "blocking_reason_codes": readiness_blockers,
+        },
+    })
+}
+
 fn classify_budget_status(budget: &Budget, actual: Option<f64>, strict: bool) -> &'static str {
     match actual {
         Some(val) => {
-            if budget.name == "tool_call_throughput_min" {
-                if val >= budget.threshold {
-                    "PASS"
-                } else {
-                    "FAIL"
-                }
-            } else if val <= budget.threshold {
+            if budget.comparison.passes(val, budget.threshold) {
                 "PASS"
             } else {
                 "FAIL"
@@ -457,15 +863,19 @@ fn artifact_age_hours(path: &Path) -> Option<f64> {
     Some(elapsed.as_secs_f64() / 3600.0)
 }
 
-fn format_path_list(paths: &[PathBuf]) -> String {
+fn format_path_list(root: &Path, paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(|p| p.display().to_string())
+        .map(|path| display_source_path(root, path))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn evaluate_artifact_contract(paths: &[PathBuf], max_age_hours: f64) -> Option<String> {
+fn evaluate_artifact_contract(
+    root: &Path,
+    paths: &[PathBuf],
+    max_age_hours: f64,
+) -> Option<String> {
     if paths.is_empty() {
         return Some("no artifact paths configured".to_string());
     }
@@ -474,7 +884,7 @@ fn evaluate_artifact_contract(paths: &[PathBuf], max_age_hours: f64) -> Option<S
     if existing.is_empty() {
         return Some(format!(
             "missing artifacts; expected one of [{}]",
-            format_path_list(paths)
+            format_path_list(root, paths)
         ));
     }
 
@@ -485,11 +895,14 @@ fn evaluate_artifact_contract(paths: &[PathBuf], max_age_hours: f64) -> Option<S
             Some(age_hours) if age_hours <= max_age_hours => {
                 fresh_found = true;
             }
-            Some(age_hours) => {
-                stale_details.push(format!("{} ({age_hours:.2}h old)", path.display()));
+            Some(_) => {
+                stale_details.push(format!("{} (stale)", display_source_path(root, path)));
             }
             None => {
-                stale_details.push(format!("{} (mtime unavailable)", path.display()));
+                stale_details.push(format!(
+                    "{} (mtime unavailable)",
+                    display_source_path(root, path)
+                ));
             }
         }
     }
@@ -506,7 +919,9 @@ fn evaluate_artifact_contract(paths: &[PathBuf], max_age_hours: f64) -> Option<S
 
 fn budget_artifact_candidates(root: &Path, budget_name: &str) -> Vec<PathBuf> {
     match budget_name {
-        "tool_call_latency_p99" | "tool_call_throughput_min" => pijs_workload_candidate_paths(root),
+        "tool_call_latency_mean" | "tool_call_throughput_min" => {
+            pijs_workload_candidate_paths(root)
+        }
         "ext_cold_load_simple_p95" => criterion_estimate_candidate_paths(
             root,
             "criterion/ext_load_init/load_init_cold/hello/new/estimates.json",
@@ -600,6 +1015,7 @@ fn collect_estimate_json_files(base: &Path) -> Vec<PathBuf> {
     for entry in entries.flatten() {
         files.push(entry.path().join("new/estimates.json"));
     }
+    files.sort();
     if files.is_empty() {
         files.push(base.to_path_buf());
     }
@@ -646,10 +1062,10 @@ fn context_intelligence_budget_candidate_paths(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(path) = std::env::var("PERF_CONTEXT_INTELLIGENCE_BUDGET_JSON") {
         let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            if let Some(path) = resolve_env_path(root, PathBuf::from(trimmed)) {
-                paths.push(path);
-            }
+        if !trimmed.is_empty()
+            && let Some(path) = resolve_env_path(root, PathBuf::from(trimmed))
+        {
+            paths.push(path);
         }
     }
     for dir in perf_evidence_dirs(root) {
@@ -925,7 +1341,7 @@ fn evaluate_phase1_weighted_attribution_contract(
 ) -> Vec<DataContractFailure> {
     let mut failures = Vec::new();
     let candidates = phase1_matrix_validation_candidates(root);
-    if let Some(detail) = evaluate_artifact_contract(&candidates, max_age_hours) {
+    if let Some(detail) = evaluate_artifact_contract(root, &candidates, max_age_hours) {
         failures.push(DataContractFailure {
             contract_id: "missing_or_stale_phase1_matrix_validation_evidence".to_string(),
             budget_name: None,
@@ -1162,7 +1578,7 @@ fn evaluate_required_e2e_ratio_contract(
 ) -> Vec<DataContractFailure> {
     let mut failures = Vec::new();
     let candidates = extension_stratification_candidates(root);
-    if let Some(detail) = evaluate_artifact_contract(&candidates, max_age_hours) {
+    if let Some(detail) = evaluate_artifact_contract(root, &candidates, max_age_hours) {
         failures.push(DataContractFailure {
             contract_id: "missing_or_stale_e2e_matrix_evidence".to_string(),
             budget_name: None,
@@ -1255,7 +1671,7 @@ fn load_context_intelligence_budget_payload(
     max_age_hours: f64,
 ) -> Result<(PathBuf, Value), DataContractFailure> {
     let candidates = context_intelligence_budget_candidate_paths(root);
-    if let Some(detail) = evaluate_artifact_contract(&candidates, max_age_hours) {
+    if let Some(detail) = evaluate_artifact_contract(root, &candidates, max_age_hours) {
         return Err(context_intelligence_failure(
             "missing_or_stale_context_intelligence_budget_evidence",
             None,
@@ -1422,11 +1838,19 @@ fn collect_data_contract_failures(root: &Path) -> Vec<DataContractFailure> {
     let mut failures = Vec::new();
 
     for budget in BUDGETS.iter().filter(|budget| budget.ci_enforced) {
+        if matches!(
+            budget.name,
+            "tool_call_latency_mean" | "tool_call_throughput_min"
+        ) {
+            // PiJS selects one canonical artifact by precedence. Its dedicated
+            // contract below binds freshness and parsing to that exact source.
+            continue;
+        }
         let candidates = budget_artifact_candidates(root, budget.name);
         if candidates.is_empty() {
             continue;
         }
-        if let Some(detail) = evaluate_artifact_contract(&candidates, max_age_hours) {
+        if let Some(detail) = evaluate_artifact_contract(root, &candidates, max_age_hours) {
             failures.push(DataContractFailure {
                 contract_id: "missing_or_stale_budget_artifact".to_string(),
                 budget_name: Some(budget.name.to_string()),
@@ -1446,56 +1870,66 @@ fn collect_data_contract_failures(root: &Path) -> Vec<DataContractFailure> {
         root,
         max_age_hours,
     ));
+    failures.extend(evaluate_pijs_workload_gate_contract(root, max_age_hours));
+    for failure in &mut failures {
+        failure.detail = canonicalize_diagnostic_text(root, &failure.detail);
+    }
     failures
 }
 
 fn check_budget(budget: &Budget) -> BudgetResult {
-    let root = project_root();
-    let strict = perf_strict_mode();
+    check_budget_with_strict(budget, perf_strict_mode())
+}
 
+fn check_budget_with_strict(budget: &Budget, strict: bool) -> BudgetResult {
+    let root = project_root();
+    check_budget_with_strict_at_root(budget, strict, &root)
+}
+
+fn check_budget_with_strict_at_root(budget: &Budget, strict: bool, root: &Path) -> BudgetResult {
     // Try to find actual measurement for this budget
     let (actual, source) = match budget.name {
-        "tool_call_latency_p99" => read_pijs_workload_latency(&root),
-        "tool_call_throughput_min" => read_pijs_workload_throughput(&root),
-        "ext_cold_load_simple_p95" => read_criterion_load_time(&root, "hello"),
-        "ext_cold_load_complex_p95" => read_criterion_load_time(&root, "pirate"),
-        "ext_load_60_total" => read_total_load_time(&root),
-        "sustained_load_rss_growth" => read_stress_rss_growth(&root),
-        "startup_version_p95" => read_criterion_startup(&root, "version"),
-        "startup_full_agent_p95" => read_criterion_startup(&root, "help"),
-        "event_dispatch_p99" => read_scenario_runner_per_call(&root, "event_dispatch"),
+        "tool_call_latency_mean" => read_pijs_workload_mean_latency(root),
+        "tool_call_throughput_min" => read_pijs_workload_throughput(root),
+        "ext_cold_load_simple_p95" => read_criterion_load_time(root, "hello"),
+        "ext_cold_load_complex_p95" => read_criterion_load_time(root, "pirate"),
+        "ext_load_60_total" => read_total_load_time(root),
+        "sustained_load_rss_growth" => read_stress_rss_growth(root),
+        "startup_version_p95" => read_criterion_startup(root, "version"),
+        "startup_full_agent_p95" => read_criterion_startup(root, "help"),
+        "event_dispatch_p99" => read_scenario_runner_per_call(root, "event_dispatch"),
         "context_graph_build_cold_p95" => read_context_intelligence_budget_metric(
-            &root,
+            root,
             "context_graph_build_cold_p95",
             Some("graph_build_cold"),
         ),
         "context_graph_build_warm_p95" => read_context_intelligence_budget_metric(
-            &root,
+            root,
             "context_graph_build_warm_p95",
             Some("graph_build_warm"),
         ),
         "context_incremental_update_p95" => read_context_intelligence_budget_metric(
-            &root,
+            root,
             "context_incremental_update_p95",
             Some("incremental_update"),
         ),
         "context_planning_p95" => {
-            read_context_intelligence_budget_metric(&root, "context_planning_p95", Some("planning"))
+            read_context_intelligence_budget_metric(root, "context_planning_p95", Some("planning"))
         }
         "context_bundle_serialization_p95" => read_context_intelligence_budget_metric(
-            &root,
+            root,
             "context_bundle_serialization_p95",
             Some("bundle_serialization"),
         ),
         "context_bundle_estimated_bytes_max" => read_context_intelligence_budget_metric(
-            &root,
+            root,
             "context_bundle_estimated_bytes_max",
             None,
         ),
-        "policy_eval_p99" => read_criterion_policy_eval(&root),
+        "policy_eval_p99" => read_criterion_policy_eval(root),
         "idle_memory_rss" => read_idle_memory_rss(),
-        "binary_size_release" => read_binary_size(&root),
-        "protocol_parse_p99" => read_criterion_protocol_parse(&root),
+        "binary_size_release" => read_binary_size(root),
+        "protocol_parse_p99" => read_criterion_protocol_parse(root),
         _ => (None, "no data source configured".to_string()),
     };
 
@@ -1510,6 +1944,7 @@ fn check_budget(budget: &Budget) -> BudgetResult {
         budget_name: budget.name.to_string(),
         category: budget.category.to_string(),
         threshold: budget.threshold,
+        comparison: budget.comparison,
         unit: budget.unit.to_string(),
         actual,
         status: status.to_string(),
@@ -1519,46 +1954,624 @@ fn check_budget(budget: &Budget) -> BudgetResult {
     }
 }
 
-fn read_pijs_workload_latency(root: &Path) -> (Option<f64>, String) {
-    let (events, source) = read_pijs_workload_events(root);
-    for event in &events {
-        if event
-            .get("tool_calls_per_iteration")
-            .and_then(Value::as_u64)
-            == Some(1)
-        {
-            if let Some(us) = event.get("per_call_us").and_then(Value::as_f64) {
-                return (Some(us), source);
-            }
+fn require_pijs_string(record: &Value, field: &str, expected: &str) -> Result<(), String> {
+    let observed = record.get(field).and_then(Value::as_str);
+    if observed == Some(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{field} must equal {expected:?} (observed={observed:?})"
+        ))
+    }
+}
+
+fn require_pijs_perf_binary_path(record: &Value) -> Result<(), String> {
+    let binary_path = record
+        .get("binary_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "binary_path must be a non-empty string".to_string())?;
+    let path = Path::new(binary_path);
+    if !path.is_absolute() {
+        return Err("binary_path must be absolute".to_string());
+    }
+    if path.file_stem().and_then(|name| name.to_str()) != Some("pijs_workload") {
+        return Err(format!(
+            "binary_path must identify the pijs_workload executable (observed={binary_path:?})"
+        ));
+    }
+    let derived_profile = profile_from_target_path(path);
+    if derived_profile.as_deref() != Some("perf") {
+        return Err(format!(
+            "binary_path must resolve to Cargo profile \"perf\" (observed={binary_path:?}, derived_profile={derived_profile:?})"
+        ));
+    }
+    require_pijs_string(record, "executable_build_profile", "perf")?;
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|err| format!("binary_path must resolve to an existing executable: {err}"))?;
+    if canonical_path != path {
+        return Err(format!(
+            "binary_path must be canonical (observed={binary_path:?}, canonical={:?})",
+            canonical_path.display().to_string()
+        ));
+    }
+    let claimed_sha256 = record
+        .get("binary_sha256")
+        .and_then(Value::as_str)
+        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| "binary_sha256 must be a 64-character hexadecimal string".to_string())?;
+    let observed_sha256 = sha256_file(path)
+        .map_err(|err| format!("failed to hash binary_path {binary_path:?}: {err}"))?;
+    if claimed_sha256 != observed_sha256 {
+        return Err(format!(
+            "binary_sha256 does not match binary_path (claimed={claimed_sha256}, observed={observed_sha256})"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pijs_gate_classification(record: &Value) -> Result<(), String> {
+    for (field, expected) in [
+        ("schema", "pi.perf.workload.v1"),
+        ("tool", "pijs_workload"),
+        ("scenario", "tool_call_roundtrip"),
+        ("runtime_engine", "quickjs"),
+        ("build_profile", "perf"),
+        ("build_fingerprint_contract", BUILD_FINGERPRINT_CONTRACT),
+        ("compiled_profile_family", "release"),
+        ("compiled_opt_level", "3"),
+        ("compiled_debug", "true"),
+        ("evidence_class", "measured"),
+        ("confidence", "high"),
+        ("measurement_method", "wall_clock_observation"),
+        ("measurement_boundary", "production_extension_manager"),
+        (
+            "measurement_contract_version",
+            "production_extension_manager.v1",
+        ),
+        ("disk_cache_policy", "disabled"),
+        ("host_page_cache_policy", "not_applicable_measured_region"),
+        ("allocator_requested", "system"),
+        ("allocator_request_source", "env"),
+        ("allocator_effective", "system"),
+    ] {
+        require_pijs_string(record, field, expected)?;
+    }
+
+    if record
+        .get("eligible_for_regression_gate")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("eligible_for_regression_gate must equal true".to_string());
+    }
+    if record
+        .get("build_profile_verified")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("build_profile_verified must equal true".to_string());
+    }
+    for field in ["build_fingerprint_verified", "executable_profile_verified"] {
+        if record.get(field).and_then(Value::as_bool) != Some(true) {
+            return Err(format!("{field} must equal true"));
         }
     }
-    (None, "no pijs_workload data".to_string())
+    if record.get("debug_assertions").and_then(Value::as_bool) != Some(false) {
+        return Err("debug_assertions must equal false".to_string());
+    }
+    Ok(())
+}
+
+fn validate_pijs_gate_build(record: &Value) -> Result<Vec<&str>, String> {
+    require_pijs_perf_binary_path(record)?;
+
+    if !matches_canonical_perf_build_fingerprint(
+        record
+            .get("compiled_profile_family")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        record
+            .get("compiled_opt_level")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        record
+            .get("compiled_debug")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    ) {
+        return Err(
+            "compiled Cargo settings do not match the canonical perf fingerprint".to_string(),
+        );
+    }
+    let compiled_features = record
+        .get("compiled_features")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "compiled_features must be an array".to_string())?
+        .iter()
+        .map(|feature| {
+            feature
+                .as_str()
+                .ok_or_else(|| "compiled_features entries must be strings".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if !matches_canonical_pijs_perf_features(&compiled_features) {
+        return Err(format!(
+            "compiled_features must equal canonical shipping feature set {CANONICAL_PIJS_PERF_FEATURES:?} (observed={compiled_features:?})"
+        ));
+    }
+    if record
+        .get("allocator_fallback_reason")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(
+            "allocator_fallback_reason must be null for the canonical system lane".to_string(),
+        );
+    }
+    Ok(compiled_features)
+}
+
+fn validate_pijs_gate_lineage(record: &Value, compiled_features: &[&str]) -> Result<(), String> {
+    if record.get("source_dirty").and_then(Value::as_bool) != Some(false) {
+        return Err("source_dirty must equal false".to_string());
+    }
+    let source_commit = record
+        .get("source_commit")
+        .and_then(Value::as_str)
+        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| "source_commit must be a full 40-character Git SHA".to_string())?;
+    if source_commit.bytes().all(|byte| byte == b'0') {
+        return Err("source_commit must not be the all-zero Git SHA".to_string());
+    }
+    let run_id = record
+        .get("run_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "run_id must be a non-empty string".to_string())?;
+    let correlation_id = record
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "correlation_id must be a non-empty string".to_string())?;
+    if run_id != correlation_id {
+        return Err("run_id and correlation_id must be identical".to_string());
+    }
+    let binary_path = record["binary_path"]
+        .as_str()
+        .expect("validated binary_path");
+    let binary_sha256 = record["binary_sha256"]
+        .as_str()
+        .expect("validated binary_sha256");
+    let expected_config_hash = benchmark_provenance_config_hash(&BenchmarkProvenance {
+        source_commit,
+        source_dirty: false,
+        build_profile: "perf",
+        executable_build_profile: "perf",
+        verification: BenchmarkBuildVerification {
+            executable_profile: true,
+            build_fingerprint: true,
+            build_profile: true,
+        },
+        build_fingerprint_contract: BUILD_FINGERPRINT_CONTRACT,
+        compiled_profile_family: "release",
+        compiled_opt_level: "3",
+        compiled_debug: "true",
+        compiled_features,
+        binary_path,
+        binary_sha256,
+        debug_assertions: false,
+    });
+    let claimed_config_hash = record
+        .get("config_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "config_hash must be a string".to_string())?;
+    if claimed_config_hash != expected_config_hash {
+        return Err(format!(
+            "config_hash does not match asserted provenance (claimed={claimed_config_hash}, expected={expected_config_hash})"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pijs_gate_workload_shape(
+    record: &Value,
+    expected_tool_calls: u64,
+) -> Result<(), String> {
+    let iterations = record
+        .get("iterations")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "iterations must be an integer".to_string())?;
+    if iterations != PIJS_REGRESSION_GATE_ITERATIONS {
+        return Err(format!(
+            "iterations must equal {PIJS_REGRESSION_GATE_ITERATIONS} (observed={iterations})"
+        ));
+    }
+    let tool_calls = record
+        .get("tool_calls_per_iteration")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "tool_calls_per_iteration must be a positive integer".to_string())?;
+    if tool_calls != expected_tool_calls {
+        return Err(format!(
+            "tool_calls_per_iteration must equal {expected_tool_calls} (observed={tool_calls})"
+        ));
+    }
+    let total_calls = record
+        .get("total_calls")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "total_calls must be a positive integer".to_string())?;
+    let expected_total = iterations
+        .checked_mul(tool_calls)
+        .ok_or_else(|| "iterations * tool_calls_per_iteration overflows u64".to_string())?;
+    if total_calls != expected_total {
+        return Err(format!(
+            "total_calls must equal iterations * tool_calls_per_iteration ({expected_total}); observed={total_calls}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pijs_gate_record(record: &Value, expected_tool_calls: u64) -> Result<(), String> {
+    validate_pijs_gate_classification(record)?;
+    let compiled_features = validate_pijs_gate_build(record)?;
+    validate_pijs_gate_lineage(record, &compiled_features)?;
+    validate_pijs_gate_workload_shape(record, expected_tool_calls)
+}
+
+fn require_positive_pijs_float(record: &Value, field: &str) -> Result<f64, String> {
+    record
+        .get(field)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| format!("{field} must contain a finite positive metric"))
+}
+
+fn pijs_float_matches(claimed: f64, derived: f64) -> bool {
+    let serialization_tolerance = derived.abs().max(1.0) * f64::EPSILON * 16.0;
+    (claimed - derived).abs() <= serialization_tolerance
+}
+
+fn derive_and_validate_pijs_metrics(record: &Value) -> Result<(f64, f64), String> {
+    let total_calls = record
+        .get("total_calls")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "total_calls must be a positive integer".to_string())?;
+    let elapsed_us = record
+        .get("elapsed_us")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "elapsed_us must be a positive integer".to_string())?;
+    let elapsed_us_f64 = require_positive_pijs_float(record, "elapsed_us_f64")?;
+    let elapsed_us_lower_bound = elapsed_us as f64;
+    let elapsed_us_upper_bound = elapsed_us
+        .checked_add(1)
+        .map(|value| value as f64)
+        .ok_or_else(|| "elapsed_us is too large to validate its floating-point pair".to_string())?;
+    if elapsed_us_f64 < elapsed_us_lower_bound || elapsed_us_f64 >= elapsed_us_upper_bound {
+        return Err(format!(
+            "elapsed_us must equal floor(elapsed_us_f64) (elapsed_us={elapsed_us}, elapsed_us_f64={elapsed_us_f64})"
+        ));
+    }
+
+    let total_calls_f64 = total_calls as f64;
+    let derived_mean_latency = elapsed_us_f64 / total_calls_f64;
+    let claimed_mean_latency = require_positive_pijs_float(record, "per_call_us_f64")?;
+    if !pijs_float_matches(claimed_mean_latency, derived_mean_latency) {
+        return Err(format!(
+            "per_call_us_f64 is inconsistent with elapsed_us_f64 / total_calls (claimed={claimed_mean_latency}, derived={derived_mean_latency})"
+        ));
+    }
+
+    let claimed_integer_latency = record
+        .get("per_call_us")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "per_call_us must be an integer".to_string())?;
+    let expected_integer_latency = elapsed_us / total_calls;
+    if claimed_integer_latency != expected_integer_latency {
+        return Err(format!(
+            "per_call_us must equal elapsed_us / total_calls with integer truncation ({expected_integer_latency}); observed={claimed_integer_latency}"
+        ));
+    }
+
+    let claimed_throughput = record
+        .get("calls_per_sec")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "calls_per_sec must be a positive integer".to_string())?;
+    let expected_throughput = u128::from(total_calls)
+        .checked_mul(1_000_000)
+        .ok_or_else(|| "total_calls * 1_000_000 overflows u128".to_string())?
+        / u128::from(elapsed_us);
+    if u128::from(claimed_throughput) != expected_throughput {
+        return Err(format!(
+            "calls_per_sec must equal total_calls * 1_000_000 / elapsed_us with integer truncation ({expected_throughput}); observed={claimed_throughput}"
+        ));
+    }
+
+    let derived_throughput = total_calls_f64 * 1_000_000.0 / elapsed_us_f64;
+    Ok((derived_mean_latency, derived_throughput))
+}
+
+fn validate_pijs_timestamp(
+    record: &Value,
+    max_age_hours: f64,
+) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    let raw = record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "timestamp must be a non-empty RFC3339 string".to_string())?;
+    let timestamp = chrono::DateTime::parse_from_rfc3339(raw)
+        .map_err(|err| format!("timestamp must be valid RFC3339: {err}"))?
+        .with_timezone(&chrono::Utc);
+    let age = chrono::Utc::now().signed_duration_since(timestamp);
+    if age < chrono::TimeDelta::minutes(-5) {
+        return Err("timestamp is more than five minutes in the future".to_string());
+    }
+    let max_age_ms = max_age_hours * 60.0 * 60.0 * 1_000.0;
+    if age.num_milliseconds() as f64 > max_age_ms {
+        return Err(format!("timestamp is stale (maximum {max_age_hours:.2}h)"));
+    }
+    Ok(timestamp)
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedPijsGatePair {
+    mean_latency_us: f64,
+    throughput_calls_per_sec: f64,
+}
+
+fn validate_pijs_gate_pair(
+    events: &[Value],
+    max_age_hours: f64,
+) -> Result<ValidatedPijsGatePair, String> {
+    let mut admitted = Vec::new();
+    for event in events.iter().filter(|event| {
+        event
+            .get("eligible_for_regression_gate")
+            .and_then(Value::as_bool)
+            == Some(true)
+    }) {
+        let tool_calls = event
+            .get("tool_calls_per_iteration")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                "eligible PiJS record tool_calls_per_iteration must be an integer".to_string()
+            })?;
+        if !matches!(tool_calls, 1 | 10) {
+            return Err(format!(
+                "eligible PiJS record uses unsupported tool_calls_per_iteration={tool_calls}"
+            ));
+        }
+        validate_pijs_gate_record(event, tool_calls)?;
+        let metrics = derive_and_validate_pijs_metrics(event)?;
+        let timestamp = validate_pijs_timestamp(event, max_age_hours)?;
+        admitted.push((tool_calls, event, metrics, timestamp));
+    }
+
+    if admitted.len() != 2 {
+        return Err(format!(
+            "PiJS regression gate requires exactly two eligible records (one 1-call lane and one 10-call lane); observed {}",
+            admitted.len()
+        ));
+    }
+    admitted.sort_by_key(|(tool_calls, ..)| *tool_calls);
+    if admitted[0].0 != 1 || admitted[1].0 != 10 {
+        return Err(
+            "PiJS regression gate requires exactly one 1-call lane and one 10-call lane"
+                .to_string(),
+        );
+    }
+
+    let latency_record = admitted[0].1;
+    let throughput_record = admitted[1].1;
+    for field in [
+        "run_id",
+        "correlation_id",
+        "source_commit",
+        "binary_path",
+        "binary_sha256",
+        "build_fingerprint_contract",
+        "config_hash",
+        "compiled_profile_family",
+        "compiled_opt_level",
+        "compiled_debug",
+        "allocator_requested",
+        "allocator_effective",
+    ] {
+        if latency_record.get(field) != throughput_record.get(field) {
+            return Err(format!("PiJS 1-call and 10-call lanes must share {field}"));
+        }
+    }
+    if latency_record.get("compiled_features") != throughput_record.get("compiled_features") {
+        return Err("PiJS 1-call and 10-call lanes must share compiled_features".to_string());
+    }
+    let timestamp_span = admitted[1].3.signed_duration_since(admitted[0].3).abs();
+    if timestamp_span > chrono::TimeDelta::minutes(15) {
+        return Err("PiJS lane timestamps must be within 15 minutes of one another".to_string());
+    }
+
+    Ok(ValidatedPijsGatePair {
+        mean_latency_us: admitted[0].2.0,
+        throughput_calls_per_sec: admitted[1].2.1,
+    })
+}
+
+fn read_pijs_gate_pair(root: &Path, max_age_hours: f64) -> (Option<ValidatedPijsGatePair>, String) {
+    let (events, source) = match load_pijs_workload_artifact(root) {
+        PijsWorkloadArtifact::Missing => {
+            return (None, "no pijs_workload data".to_string());
+        }
+        PijsWorkloadArtifact::Invalid { source, detail, .. } => {
+            return (
+                None,
+                format!("invalid pijs_workload artifact {source}: {detail}"),
+            );
+        }
+        PijsWorkloadArtifact::Loaded {
+            path,
+            source,
+            events,
+        } => {
+            if let Err(detail) = validate_selected_pijs_freshness(&path, &source, max_age_hours) {
+                return (None, detail);
+            }
+            (events, source)
+        }
+    };
+    match validate_pijs_gate_pair(&events, max_age_hours) {
+        Ok(pair) => (Some(pair), source),
+        Err(detail) => (
+            None,
+            format!("no admissible pijs_workload pair in {source}: {detail}"),
+        ),
+    }
+}
+
+fn read_pijs_workload_mean_latency(root: &Path) -> (Option<f64>, String) {
+    let (pair, source) = read_pijs_gate_pair(root, max_artifact_age_hours());
+    (pair.map(|pair| pair.mean_latency_us), source)
 }
 
 fn read_pijs_workload_throughput(root: &Path) -> (Option<f64>, String) {
-    let (events, source) = read_pijs_workload_events(root);
-    for event in &events {
-        if event
-            .get("tool_calls_per_iteration")
-            .and_then(Value::as_u64)
-            == Some(10)
-        {
-            if let Some(cps) = event.get("calls_per_sec").and_then(Value::as_f64) {
-                return (Some(cps), source);
-            }
-        }
-    }
-    (None, "no pijs_workload data".to_string())
+    let (pair, source) = read_pijs_gate_pair(root, max_artifact_age_hours());
+    (pair.map(|pair| pair.throughput_calls_per_sec), source)
 }
 
-fn read_pijs_workload_events(root: &Path) -> (Vec<Value>, String) {
-    for path in pijs_workload_candidate_paths(root) {
-        let events = read_jsonl_file(&path);
-        if !events.is_empty() {
-            return (events, display_source_path(root, &path));
+fn evaluate_pijs_workload_gate_contract(
+    root: &Path,
+    max_age_hours: f64,
+) -> Vec<DataContractFailure> {
+    let (contract_id, detail, remediation) = match load_pijs_workload_artifact(root) {
+        PijsWorkloadArtifact::Missing => (
+            "missing_or_stale_budget_artifact",
+            format!(
+                "missing artifacts; expected one of [{}]",
+                format_path_list(root, &pijs_workload_candidate_paths(root))
+            ),
+            "Generate the canonical PiJS workload artifact in the current perf run.".to_string(),
+        ),
+        PijsWorkloadArtifact::Invalid { source, detail } => (
+            "invalid_pijs_workload_artifact",
+            format!("invalid selected artifact {source}: {detail}"),
+            "Regenerate the selected PiJS JSONL artifact; every nonblank line must be valid JSON."
+                .to_string(),
+        ),
+        PijsWorkloadArtifact::Loaded {
+            path,
+            source,
+            events,
+        } => {
+            if let Err(detail) = validate_selected_pijs_freshness(&path, &source, max_age_hours) {
+                (
+                    "missing_or_stale_budget_artifact",
+                    detail,
+                    "Regenerate the selected PiJS workload artifact in the current perf run."
+                        .to_string(),
+                )
+            } else if let Err(detail) = validate_pijs_gate_pair(&events, max_age_hours) {
+                (
+                    "ineligible_pijs_workload_artifact",
+                    format!("no admissible PiJS pair in {source}: {detail}"),
+                    format!(
+                        "Generate one same-run pair of exactly {PIJS_REGRESSION_GATE_ITERATIONS}-iteration canonical perf-profile QuickJS measurements through the production extension manager."
+                    ),
+                )
+            } else {
+                return Vec::new();
+            }
         }
+    };
+
+    ["tool_call_latency_mean", "tool_call_throughput_min"]
+        .into_iter()
+        .map(|budget_name| DataContractFailure {
+            contract_id: contract_id.to_string(),
+            budget_name: Some(budget_name.to_string()),
+            detail: detail.clone(),
+            remediation: remediation.clone(),
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+enum PijsWorkloadArtifact {
+    Missing,
+    Invalid {
+        source: String,
+        detail: String,
+    },
+    Loaded {
+        path: PathBuf,
+        source: String,
+        events: Vec<Value>,
+    },
+}
+
+fn load_pijs_workload_artifact(root: &Path) -> PijsWorkloadArtifact {
+    for path in pijs_workload_candidate_paths(root) {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                let source = display_source_path(root, &path);
+                return PijsWorkloadArtifact::Invalid {
+                    source,
+                    detail: format!("could not read selected artifact: {err}"),
+                };
+            }
+        };
+        let source = display_source_path(root, &path);
+        let mut events = Vec::new();
+        for (line_index, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str(line) {
+                Ok(event) => events.push(event),
+                Err(err) => {
+                    return PijsWorkloadArtifact::Invalid {
+                        source,
+                        detail: format!("line {} is not valid JSON: {err}", line_index + 1),
+                    };
+                }
+            }
+        }
+        if events.is_empty() {
+            return PijsWorkloadArtifact::Invalid {
+                source,
+                detail: "artifact contains no nonblank JSON records".to_string(),
+            };
+        }
+        return PijsWorkloadArtifact::Loaded {
+            path,
+            source,
+            events,
+        };
     }
-    (Vec::new(), "no pijs_workload data".to_string())
+    PijsWorkloadArtifact::Missing
+}
+
+fn validate_selected_pijs_freshness(
+    path: &Path,
+    source: &str,
+    max_age_hours: f64,
+) -> Result<(), String> {
+    match artifact_age_hours(path) {
+        Some(age_hours) if age_hours <= max_age_hours => Ok(()),
+        Some(_) => Err(format!(
+            "selected artifact {source} is stale (maximum {max_age_hours:.2}h)"
+        )),
+        None => Err(format!(
+            "selected artifact {source} has unavailable or invalid modification time"
+        )),
+    }
 }
 
 fn pijs_workload_candidate_paths(root: &Path) -> Vec<PathBuf> {
@@ -1610,15 +2623,14 @@ fn read_criterion_load_time(root: &Path, ext: &str) -> (Option<f64>, String) {
     // Criterion stores results in target/criterion/<group>/<bench>/new/estimates.json
     let relative = format!("criterion/ext_load_init/load_init_cold/{ext}/new/estimates.json");
     for path in criterion_estimate_candidate_paths(root, &relative) {
-        if let Some(estimates) = read_json_file(&path) {
-            if let Some(mean_ns) = estimates
+        if let Some(estimates) = read_json_file(&path)
+            && let Some(mean_ns) = estimates
                 .get("mean")
                 .and_then(|m| m.get("point_estimate"))
                 .and_then(Value::as_f64)
-            {
-                let ms = mean_ns / 1_000_000.0;
-                return (Some(ms), display_source_path(root, &path));
-            }
+        {
+            let ms = mean_ns / 1_000_000.0;
+            return (Some(ms), display_source_path(root, &path));
         }
     }
     (None, format!("no criterion data for {ext}"))
@@ -1626,21 +2638,21 @@ fn read_criterion_load_time(root: &Path, ext: &str) -> (Option<f64>, String) {
 
 fn read_total_load_time(root: &Path) -> (Option<f64>, String) {
     let path = root.join("tests/ext_conformance/reports/load_time_benchmark.json");
-    if let Some(report) = read_json_file(&path) {
-        if let Some(results) = report.get("results").and_then(Value::as_array) {
-            let total_ms: f64 = results
-                .iter()
-                .filter_map(|r| {
-                    r.get("rust")
-                        .and_then(|rust| rust.get("load_time_ms"))
-                        .and_then(Value::as_f64)
-                })
-                .sum();
-            return (
-                Some(total_ms),
-                "load_time_benchmark.json (sum of Rust load times)".to_string(),
-            );
-        }
+    if let Some(report) = read_json_file(&path)
+        && let Some(results) = report.get("results").and_then(Value::as_array)
+    {
+        let total_ms: f64 = results
+            .iter()
+            .filter_map(|r| {
+                r.get("rust")
+                    .and_then(|rust| rust.get("load_time_ms"))
+                    .and_then(Value::as_f64)
+            })
+            .sum();
+        return (
+            Some(total_ms),
+            "load_time_benchmark.json (sum of Rust load times)".to_string(),
+        );
     }
     (None, "no load time benchmark data".to_string())
 }
@@ -1687,15 +2699,14 @@ fn read_criterion_startup(root: &Path, subcommand: &str) -> (Option<f64>, String
     // Criterion stores startup benchmarks at target/criterion/startup/<subcommand>/warm/new/estimates.json
     let relative = format!("criterion/startup/{subcommand}/warm/new/estimates.json");
     for path in criterion_estimate_candidate_paths(root, &relative) {
-        if let Some(estimates) = read_json_file(&path) {
-            if let Some(mean_ns) = estimates
+        if let Some(estimates) = read_json_file(&path)
+            && let Some(mean_ns) = estimates
                 .get("mean")
                 .and_then(|m| m.get("point_estimate"))
                 .and_then(Value::as_f64)
-            {
-                let ms = mean_ns / 1_000_000.0;
-                return (Some(ms), display_source_path(root, &path));
-            }
+        {
+            let ms = mean_ns / 1_000_000.0;
+            return (Some(ms), display_source_path(root, &path));
         }
     }
     (None, format!("no criterion data for startup/{subcommand}"))
@@ -1703,17 +2714,16 @@ fn read_criterion_startup(root: &Path, subcommand: &str) -> (Option<f64>, String
 
 fn read_criterion_context_intelligence(root: &Path, bench_name: &str) -> (Option<f64>, String) {
     for path in context_criterion_estimate_candidate_paths(root, bench_name) {
-        if let Some(estimates) = read_json_file(&path) {
-            if let Some(mean_ns) = estimates
+        if let Some(estimates) = read_json_file(&path)
+            && let Some(mean_ns) = estimates
                 .get("mean")
                 .and_then(|m| m.get("point_estimate"))
                 .and_then(Value::as_f64)
-            {
-                return (
-                    Some(mean_ns / 1_000_000.0),
-                    display_source_path(root, &path),
-                );
-            }
+        {
+            return (
+                Some(mean_ns / 1_000_000.0),
+                display_source_path(root, &path),
+            );
         }
     }
     (
@@ -1800,14 +2810,13 @@ fn read_criterion_policy_eval(root: &Path) -> (Option<f64>, String) {
         root,
         "criterion/ext_policy/evaluate",
     )) {
-        if let Some(estimates) = read_json_file(&path) {
-            if let Some(mean_ns) = estimates
+        if let Some(estimates) = read_json_file(&path)
+            && let Some(mean_ns) = estimates
                 .get("mean")
                 .and_then(|m| m.get("point_estimate"))
                 .and_then(Value::as_f64)
-            {
-                max_ns = Some(max_ns.map_or(mean_ns, |prev: f64| prev.max(mean_ns)));
-            }
+        {
+            max_ns = Some(max_ns.map_or(mean_ns, |prev: f64| prev.max(mean_ns)));
         }
     }
     max_ns.map_or_else(
@@ -1817,21 +2826,9 @@ fn read_criterion_policy_eval(root: &Path) -> (Option<f64>, String) {
 }
 
 fn read_idle_memory_rss() -> (Option<f64>, String) {
-    // Measure the current process RSS as a proxy for idle memory.
-    // This runs during test, so it's an approximation.
-    let pid = sysinfo::Pid::from_u32(std::process::id());
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[pid]),
-        true,
-        sysinfo::ProcessRefreshKind::nothing().with_memory(),
-    );
-    system.process(pid).map_or_else(
-        || (None, "could not read process RSS".to_string()),
-        |p| {
-            let rss_mb = p.memory() as f64 / 1024.0 / 1024.0;
-            (Some(rss_mb), "sysinfo: current process RSS".to_string())
-        },
+    (
+        None,
+        "no canonical idle Pi RSS artifact; test-harness process RSS is inadmissible".to_string(),
     )
 }
 
@@ -1854,15 +2851,14 @@ fn read_criterion_protocol_parse(root: &Path) -> (Option<f64>, String) {
         root,
         "criterion/ext_protocol/parse_and_validate",
     )) {
-        if let Some(estimates) = read_json_file(&path) {
-            if let Some(mean_ns) = estimates
+        if let Some(estimates) = read_json_file(&path)
+            && let Some(mean_ns) = estimates
                 .get("mean")
                 .and_then(|m| m.get("point_estimate"))
                 .and_then(Value::as_f64)
-            {
-                let us = mean_ns / 1000.0;
-                max_us = Some(max_us.map_or(us, |prev: f64| prev.max(us)));
-            }
+        {
+            let us = mean_ns / 1000.0;
+            max_us = Some(max_us.map_or(us, |prev: f64| prev.max(us)));
         }
     }
     max_us.map_or_else(
@@ -1895,6 +2891,24 @@ fn target_dir_resolution_honors_cargo_target_dir_shape() {
             ))
         ),
         PathBuf::from("/data/tmp/pi_agent_rust_cargo/sunnybeacon/target")
+    );
+}
+
+#[test]
+fn explicit_target_dir_is_authoritative_and_fixture_roots_are_hermetic() {
+    let project = Path::new("/workspace/pi_agent_rust");
+    let explicit = std::ffi::OsStr::new("/data/tmp/pi-release-target");
+    assert_eq!(
+        target_dir_candidates_for(project, project, Some(explicit)),
+        vec![PathBuf::from("/data/tmp/pi-release-target")],
+        "an explicit Cargo target must not fall through to ignored repo-local artifacts"
+    );
+
+    let fixture = Path::new("/tmp/pi-budget-fixture");
+    assert_eq!(
+        target_dir_candidates_for(fixture, project, Some(explicit)),
+        vec![fixture.join("target")],
+        "fixture evaluations must not inherit the real project's target directory"
     );
 }
 
@@ -1983,6 +2997,64 @@ fn budget_names_are_unique() {
             budget.name
         );
     }
+}
+
+#[test]
+fn budget_comparison_directions_are_explicit_and_not_name_derived() {
+    let minimum_budgets = BUDGETS
+        .iter()
+        .filter(|budget| budget.comparison == BudgetComparison::Minimum)
+        .map(|budget| budget.name)
+        .collect::<Vec<_>>();
+    assert_eq!(minimum_budgets, vec!["tool_call_throughput_min"]);
+
+    let maximum = BUDGETS
+        .iter()
+        .find(|budget| budget.name == "tool_call_latency_mean")
+        .expect("maximum budget");
+    assert_eq!(
+        classify_budget_status(maximum, Some(maximum.threshold), true),
+        "PASS"
+    );
+    assert_eq!(
+        classify_budget_status(maximum, Some(maximum.threshold + 1.0), true),
+        "FAIL"
+    );
+
+    let minimum = BUDGETS
+        .iter()
+        .find(|budget| budget.name == "tool_call_throughput_min")
+        .expect("minimum budget");
+    assert_eq!(
+        classify_budget_status(minimum, Some(minimum.threshold), true),
+        "PASS"
+    );
+    assert_eq!(
+        classify_budget_status(minimum, Some(minimum.threshold - 1.0), true),
+        "FAIL"
+    );
+}
+
+#[test]
+fn budget_inventory_has_stable_cross_language_serialization() {
+    let canonical = budget_inventory_canonical_json();
+    let parsed: Value = serde_json::from_str(&canonical).expect("canonical inventory is JSON");
+    assert_eq!(
+        parsed.as_array().map(Vec::len),
+        Some(BUDGETS.len()),
+        "canonical inventory must serialize every budget in declaration order"
+    );
+    assert!(canonical.starts_with(
+        "[{\"name\":\"startup_version_p95\",\"category\":\"startup\",\"metric\":\"p95 latency\",\"unit\":\"ms\",\"threshold\":100.000000,\"comparison\":\"maximum\",\"ci_enforced\":true,\"methodology\":"
+    ));
+    assert!(canonical.contains(
+        "\"name\":\"tool_call_throughput_min\",\"category\":\"tool_call\",\"metric\":\"minimum calls/sec\",\"unit\":\"calls/sec\",\"threshold\":5000.000000,\"comparison\":\"minimum\""
+    ));
+    assert_eq!(
+        budget_inventory_sha256(),
+        "96e3147ef23e1c634d56265581975a2b619ac9a701f4839ef6f3f4b3987226ad",
+        "canonical v0.2.0 budget inventory drifted"
+    );
 }
 
 #[test]
@@ -2115,11 +3187,11 @@ fn ci_enforced_budgets_fail_on_regression_or_missing_data() {
 }
 
 #[test]
-fn check_tool_call_budget() {
+fn check_tool_call_mean_latency_budget() {
     let budget = BUDGETS
         .iter()
-        .find(|b| b.name == "tool_call_latency_p99")
-        .expect("tool_call_latency_p99 budget should exist");
+        .find(|b| b.name == "tool_call_latency_mean")
+        .expect("tool_call_latency_mean budget should exist");
 
     let result = check_budget(budget);
     eprintln!(
@@ -2135,7 +3207,7 @@ fn check_tool_call_budget() {
     if let Some(actual) = result.actual {
         assert!(
             actual <= budget.threshold,
-            "tool call latency {actual}us exceeds budget {}us",
+            "mean tool call latency {actual}us exceeds budget {}us",
             budget.threshold
         );
     }
@@ -2171,11 +3243,16 @@ fn check_tool_call_throughput_budget() {
 #[test]
 fn pijs_workload_profile_field_is_present_when_data_exists() {
     let root = project_root();
-    let (events, source) = read_pijs_workload_events(&root);
-    if events.is_empty() {
-        eprintln!("[budget] No pijs_workload data — skipping profile field check");
-        return;
-    }
+    let (events, source) = match load_pijs_workload_artifact(&root) {
+        PijsWorkloadArtifact::Missing => {
+            eprintln!("[budget] No pijs_workload data — skipping profile field check");
+            return;
+        }
+        PijsWorkloadArtifact::Invalid { source, detail } => {
+            panic!("invalid pijs_workload artifact {source}: {detail}");
+        }
+        PijsWorkloadArtifact::Loaded { events, source, .. } => (events, source),
+    };
 
     for event in &events {
         let profile = event
@@ -2186,7 +3263,176 @@ fn pijs_workload_profile_field_is_present_when_data_exists() {
             !profile.trim().is_empty(),
             "pijs_workload event missing non-empty build_profile in {source}: {event}"
         );
+        assert!(
+            event
+                .get("build_profile_verified")
+                .and_then(Value::as_bool)
+                .is_some(),
+            "pijs_workload event missing boolean build_profile_verified in {source}: {event}"
+        );
     }
+}
+
+fn valid_pijs_gate_record(root: &Path, tool_calls_per_iteration: u64) -> Value {
+    let iterations = PIJS_REGRESSION_GATE_ITERATIONS;
+    let total_calls = iterations * tool_calls_per_iteration;
+    let elapsed_us = total_calls * 99 / 2;
+    let elapsed_us_f64 = elapsed_us as f64;
+    let binary_path = root.join("target/perf/examples/pijs_workload");
+    std::fs::create_dir_all(binary_path.parent().expect("PiJS binary parent"))
+        .expect("create PiJS binary parent");
+    if !binary_path.exists() {
+        std::fs::write(&binary_path, b"canonical-pijs-test-binary")
+            .expect("write PiJS test binary");
+    }
+    let binary_path = std::fs::canonicalize(binary_path).expect("canonicalize PiJS test binary");
+    let binary_sha256 = sha256_file(&binary_path).expect("hash PiJS test binary");
+    let binary_path = binary_path.display().to_string();
+    let source_commit = "0123456789abcdef0123456789abcdef01234567";
+    let config_hash = benchmark_provenance_config_hash(&BenchmarkProvenance {
+        source_commit,
+        source_dirty: false,
+        build_profile: "perf",
+        executable_build_profile: "perf",
+        verification: BenchmarkBuildVerification {
+            executable_profile: true,
+            build_fingerprint: true,
+            build_profile: true,
+        },
+        build_fingerprint_contract: BUILD_FINGERPRINT_CONTRACT,
+        compiled_profile_family: "release",
+        compiled_opt_level: "3",
+        compiled_debug: "true",
+        compiled_features: CANONICAL_PIJS_PERF_FEATURES,
+        binary_path: &binary_path,
+        binary_sha256: &binary_sha256,
+        debug_assertions: false,
+    });
+    let mut record = json!({
+        "schema": "pi.perf.workload.v1",
+        "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "run_id": "pijs-test-run",
+        "correlation_id": "pijs-test-run",
+        "source_commit": source_commit,
+        "source_dirty": false,
+        "tool": "pijs_workload",
+        "scenario": "tool_call_roundtrip",
+        "iterations": iterations,
+        "tool_calls_per_iteration": tool_calls_per_iteration,
+        "total_calls": total_calls,
+        "elapsed_ms": elapsed_us / 1_000,
+        "elapsed_us": elapsed_us,
+        "elapsed_us_f64": elapsed_us_f64,
+        "per_call_us": elapsed_us / total_calls,
+        "per_call_us_f64": 49.5,
+        "calls_per_sec": total_calls * 1_000_000 / elapsed_us,
+    });
+    let provenance = json!({
+        "build_profile": "perf",
+        "build_profile_verified": true,
+        "build_fingerprint_contract": BUILD_FINGERPRINT_CONTRACT,
+        "build_fingerprint_verified": true,
+        "compiled_profile_family": "release",
+        "compiled_opt_level": "3",
+        "compiled_debug": "true",
+        "compiled_features": CANONICAL_PIJS_PERF_FEATURES,
+        "executable_build_profile": "perf",
+        "executable_profile_verified": true,
+        "debug_assertions": false,
+        "binary_path": binary_path,
+        "binary_sha256": binary_sha256,
+        "config_hash": config_hash,
+        "runtime_engine": "quickjs",
+        "evidence_class": "measured",
+        "confidence": "high",
+        "eligible_for_regression_gate": true,
+        "measurement_method": "wall_clock_observation",
+        "measurement_boundary": "production_extension_manager",
+        "measurement_contract_version": "production_extension_manager.v1",
+        "disk_cache_policy": "disabled",
+        "host_page_cache_policy": "not_applicable_measured_region",
+        "allocator_requested": "system",
+        "allocator_request_source": "env",
+        "allocator_effective": "system",
+        "allocator_fallback_reason": null
+    });
+    record.as_object_mut().expect("PiJS fixture record").extend(
+        provenance
+            .as_object()
+            .expect("PiJS fixture provenance")
+            .clone(),
+    );
+    record
+}
+
+fn write_pijs_workload_records(path: &Path, records: &[Value]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create pijs workload artifact directory");
+    }
+    let payload = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{payload}\n")).expect("write pijs workload artifact");
+}
+
+fn retarget_pijs_record(record: &mut Value, binary_path: &Path, contents: &[u8]) {
+    std::fs::create_dir_all(binary_path.parent().expect("PiJS binary parent"))
+        .expect("create PiJS binary parent");
+    std::fs::write(binary_path, contents).expect("write retargeted PiJS binary");
+    let binary_path = std::fs::canonicalize(binary_path).expect("canonicalize PiJS binary");
+    record["binary_path"] = json!(binary_path.display().to_string());
+    record["executable_build_profile"] =
+        json!(profile_from_target_path(&binary_path).expect("derive retargeted binary profile"));
+    record["binary_sha256"] =
+        json!(sha256_file(&binary_path).expect("hash retargeted PiJS binary"));
+    refresh_pijs_test_config_hash(record);
+}
+
+fn refresh_pijs_test_config_hash(record: &mut Value) {
+    let features = record["compiled_features"]
+        .as_array()
+        .expect("compiled features")
+        .iter()
+        .map(|value| value.as_str().expect("compiled feature string"))
+        .collect::<Vec<_>>();
+    let hash = benchmark_provenance_config_hash(&BenchmarkProvenance {
+        source_commit: record["source_commit"].as_str().expect("source commit"),
+        source_dirty: record["source_dirty"].as_bool().expect("source dirty"),
+        build_profile: record["build_profile"].as_str().expect("build profile"),
+        executable_build_profile: record["executable_build_profile"]
+            .as_str()
+            .expect("executable build profile"),
+        verification: BenchmarkBuildVerification {
+            executable_profile: record["executable_profile_verified"]
+                .as_bool()
+                .expect("executable profile verified"),
+            build_fingerprint: record["build_fingerprint_verified"]
+                .as_bool()
+                .expect("build fingerprint verified"),
+            build_profile: record["build_profile_verified"]
+                .as_bool()
+                .expect("build profile verified"),
+        },
+        build_fingerprint_contract: record["build_fingerprint_contract"]
+            .as_str()
+            .expect("build fingerprint contract"),
+        compiled_profile_family: record["compiled_profile_family"]
+            .as_str()
+            .expect("compiled profile family"),
+        compiled_opt_level: record["compiled_opt_level"]
+            .as_str()
+            .expect("compiled opt level"),
+        compiled_debug: record["compiled_debug"].as_str().expect("compiled debug"),
+        compiled_features: &features,
+        binary_path: record["binary_path"].as_str().expect("binary path"),
+        binary_sha256: record["binary_sha256"].as_str().expect("binary sha256"),
+        debug_assertions: record["debug_assertions"]
+            .as_bool()
+            .expect("debug assertions"),
+    });
+    record["config_hash"] = json!(hash);
 }
 
 #[test]
@@ -2195,27 +3441,441 @@ fn pijs_workload_reader_prefers_profile_labeled_artifact_path() {
     let profile_dir = tmp.path().join("target/perf/perf");
     std::fs::create_dir_all(&profile_dir).expect("create profile perf dir");
     let path = profile_dir.join("pijs_workload_perf.jsonl");
-    let payload = json!({
-        "schema": "pi.perf.workload.v1",
-        "tool": "pijs_workload",
-        "scenario": "tool_call_roundtrip",
-        "iterations": 200,
-        "tool_calls_per_iteration": 1,
-        "total_calls": 200,
-        "elapsed_ms": 10,
-        "per_call_us": 50.0,
-        "calls_per_sec": 20000.0,
-        "build_profile": "perf"
-    });
-    std::fs::write(
+    write_pijs_workload_records(
         &path,
-        format!("{}\n", serde_json::to_string(&payload).unwrap_or_default()),
-    )
-    .expect("write pijs workload profile artifact");
+        &[
+            valid_pijs_gate_record(tmp.path(), 1),
+            valid_pijs_gate_record(tmp.path(), 10),
+        ],
+    );
 
-    let (latency, source) = read_pijs_workload_latency(tmp.path());
-    assert_eq!(latency, Some(50.0));
-    assert_eq!(source, "target/perf/perf/pijs_workload_perf.jsonl");
+    let (latency, source) = read_pijs_workload_mean_latency(tmp.path());
+    assert_eq!(latency, Some(49.5));
+    assert_eq!(
+        source,
+        "cargo-target[0]://perf/perf/pijs_workload_perf.jsonl"
+    );
+}
+
+#[test]
+fn pijs_gate_reader_accepts_perf_quickjs_production_record() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    write_pijs_workload_records(
+        &path,
+        &[
+            valid_pijs_gate_record(tmp.path(), 1),
+            valid_pijs_gate_record(tmp.path(), 10),
+        ],
+    );
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, Some(49.5));
+    let throughput = read_pijs_workload_throughput(tmp.path())
+        .0
+        .expect("canonical throughput");
+    assert!((throughput - (1_000_000.0 / 49.5)).abs() < 1e-9);
+    assert!(
+        evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS).is_empty()
+    );
+}
+
+#[test]
+fn pijs_gate_reader_accepts_custom_cargo_target_dir_layout() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let artifact = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let binary = tmp.path().join("pi-build/perf/examples/pijs_workload");
+    let mut latency = valid_pijs_gate_record(tmp.path(), 1);
+    let mut throughput = valid_pijs_gate_record(tmp.path(), 10);
+    retarget_pijs_record(&mut latency, &binary, b"custom-target-pijs-binary");
+    retarget_pijs_record(&mut throughput, &binary, b"custom-target-pijs-binary");
+    write_pijs_workload_records(&artifact, &[latency, throughput]);
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, Some(49.5));
+}
+
+#[test]
+fn pijs_gate_reader_rejects_forged_metrics() {
+    let cases = [
+        (
+            1_u64,
+            "per_call_us_f64",
+            json!(0.01),
+            "per_call_us_f64 is inconsistent",
+        ),
+        (
+            10_u64,
+            "calls_per_sec",
+            json!(9_999_999),
+            "calls_per_sec must equal",
+        ),
+    ];
+    for (lane, field, forged_value, expected_error) in cases {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+        let mut latency = valid_pijs_gate_record(tmp.path(), 1);
+        let mut throughput = valid_pijs_gate_record(tmp.path(), 10);
+        if lane == 1 {
+            latency[field] = forged_value;
+        } else {
+            throughput[field] = forged_value;
+        }
+        write_pijs_workload_records(&path, &[latency, throughput]);
+
+        let failures =
+            evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+        assert_eq!(failures.len(), 2);
+        assert!(
+            failures
+                .iter()
+                .all(|failure| failure.detail.contains(expected_error))
+        );
+    }
+}
+
+#[test]
+fn pijs_gate_reader_rejects_stale_timestamp_even_when_artifact_mtime_is_fresh() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let stale = (chrono::Utc::now() - chrono::TimeDelta::hours(48)).to_rfc3339();
+    let mut latency = valid_pijs_gate_record(tmp.path(), 1);
+    let mut throughput = valid_pijs_gate_record(tmp.path(), 10);
+    latency["timestamp"] = json!(stale);
+    throughput["timestamp"] = latency["timestamp"].clone();
+    write_pijs_workload_records(&path, &[latency, throughput]);
+
+    let failures = evaluate_pijs_workload_gate_contract(tmp.path(), 24.0);
+    assert_eq!(failures.len(), 2);
+    assert!(
+        failures
+            .iter()
+            .all(|failure| failure.detail.contains("timestamp is stale"))
+    );
+}
+
+#[test]
+fn pijs_gate_reader_rejects_mixed_run_identity_and_duplicate_lanes() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let latency = valid_pijs_gate_record(tmp.path(), 1);
+    let mut throughput = valid_pijs_gate_record(tmp.path(), 10);
+    throughput["run_id"] = json!("other-run");
+    throughput["correlation_id"] = json!("other-run");
+    write_pijs_workload_records(&path, &[latency.clone(), throughput]);
+    assert!(
+        read_pijs_workload_mean_latency(tmp.path())
+            .1
+            .contains("must share run_id")
+    );
+
+    write_pijs_workload_records(
+        &path,
+        &[
+            latency.clone(),
+            latency,
+            valid_pijs_gate_record(tmp.path(), 10),
+        ],
+    );
+    assert!(
+        read_pijs_workload_mean_latency(tmp.path())
+            .1
+            .contains("exactly two eligible records")
+    );
+}
+
+#[test]
+fn pijs_gate_reader_rejects_binary_hash_allocator_and_feature_conflicts() {
+    for (field, value, expected_error) in [
+        (
+            "binary_sha256",
+            json!("0".repeat(64)),
+            "binary_sha256 does not match",
+        ),
+        (
+            "allocator_effective",
+            json!("jemalloc"),
+            "allocator_effective must equal \"system\"",
+        ),
+        (
+            "compiled_features",
+            json!(["sqlite-sessions"]),
+            "compiled_features must equal canonical shipping feature set",
+        ),
+        (
+            "compiled_opt_level",
+            json!("z"),
+            "compiled_opt_level must equal \"3\"",
+        ),
+        ("source_dirty", json!(true), "source_dirty must equal false"),
+    ] {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+        let mut latency = valid_pijs_gate_record(tmp.path(), 1);
+        latency[field] = value;
+        write_pijs_workload_records(&path, &[latency, valid_pijs_gate_record(tmp.path(), 10)]);
+        let failures =
+            evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+        assert!(
+            failures
+                .iter()
+                .all(|failure| failure.detail.contains(expected_error)),
+            "unexpected failures: {failures:?}"
+        );
+    }
+}
+
+#[test]
+fn pijs_gate_reader_rejects_zero_work() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let mut record = valid_pijs_gate_record(tmp.path(), 1);
+    record["iterations"] = json!(0);
+    record["total_calls"] = json!(0);
+    write_pijs_workload_records(&path, &[record]);
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+    let failures = evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+    assert!(failures.iter().any(|failure| {
+        failure.contract_id == "ineligible_pijs_workload_artifact"
+            && failure.budget_name.as_deref() == Some("tool_call_latency_mean")
+            && failure
+                .detail
+                .contains("iterations must equal 2000 (observed=0)")
+    }));
+}
+
+#[test]
+fn pijs_gate_reader_requires_exact_canonical_iteration_count() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let mut record = valid_pijs_gate_record(tmp.path(), 1);
+    record["iterations"] = json!(PIJS_REGRESSION_GATE_ITERATIONS - 1);
+    record["total_calls"] = json!(PIJS_REGRESSION_GATE_ITERATIONS - 1);
+    write_pijs_workload_records(&path, &[record]);
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+    let failures = evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+    assert!(failures.iter().any(|failure| {
+        failure.budget_name.as_deref() == Some("tool_call_latency_mean")
+            && failure
+                .detail
+                .contains("iterations must equal 2000 (observed=1999)")
+    }));
+}
+
+#[test]
+fn pijs_gate_reader_rejects_unverified_perf_profile_claim() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let mut record = valid_pijs_gate_record(tmp.path(), 1);
+    record["build_profile_verified"] = json!(false);
+    write_pijs_workload_records(&path, &[record]);
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+    let failures = evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+    assert!(failures.iter().any(|failure| {
+        failure.budget_name.as_deref() == Some("tool_call_latency_mean")
+            && failure
+                .detail
+                .contains("build_profile_verified must equal true")
+    }));
+}
+
+#[test]
+fn pijs_gate_reader_requires_nonempty_binary_path() {
+    for binary_path in [None, Some("")] {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+        let mut record = valid_pijs_gate_record(tmp.path(), 1);
+        match binary_path {
+            Some(value) => record["binary_path"] = json!(value),
+            None => {
+                record
+                    .as_object_mut()
+                    .expect("PiJS fixture object")
+                    .remove("binary_path");
+            }
+        }
+        write_pijs_workload_records(&path, &[record]);
+
+        assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+        let failures =
+            evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+        assert!(failures.iter().any(|failure| {
+            failure.budget_name.as_deref() == Some("tool_call_latency_mean")
+                && failure
+                    .detail
+                    .contains("binary_path must be a non-empty string")
+        }));
+    }
+}
+
+#[test]
+fn pijs_gate_reader_derives_perf_profile_from_binary_path() {
+    let cases = [
+        (
+            "/tmp/pi_agent_rust/target/release/examples/pijs_workload",
+            "derived_profile=Some(\"release\")",
+        ),
+        (
+            "/tmp/pi_agent_rust/bin/pijs_workload",
+            "derived_profile=Some(\"bin\")",
+        ),
+        (
+            "/tmp/pi_agent_rust/target/perf/examples",
+            "must identify the pijs_workload executable",
+        ),
+    ];
+
+    for (binary_path, expected_error) in cases {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+        let mut record = valid_pijs_gate_record(tmp.path(), 1);
+        record["binary_path"] = json!(binary_path);
+        write_pijs_workload_records(&path, &[record]);
+
+        assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+        let failures =
+            evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+        assert!(failures.iter().any(|failure| {
+            failure.budget_name.as_deref() == Some("tool_call_latency_mean")
+                && failure.detail.contains(expected_error)
+        }));
+    }
+}
+
+#[test]
+fn pijs_gate_reader_requires_precise_mean_latency_metric() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let mut record = valid_pijs_gate_record(tmp.path(), 1);
+    record
+        .as_object_mut()
+        .expect("PiJS fixture object")
+        .remove("per_call_us_f64");
+    write_pijs_workload_records(&path, &[record]);
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+    let failures = evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+    assert!(failures.iter().any(|failure| {
+        failure.budget_name.as_deref() == Some("tool_call_latency_mean")
+            && failure
+                .detail
+                .contains("per_call_us_f64 must contain a finite positive metric")
+    }));
+}
+
+#[test]
+fn pijs_gate_reader_rejects_debug_preview_native_and_explicitly_ineligible_rows() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let mut debug = valid_pijs_gate_record(tmp.path(), 1);
+    debug["build_profile"] = json!("debug");
+    let mut preview = valid_pijs_gate_record(tmp.path(), 1);
+    preview["runtime_engine"] = json!("native_rust_preview");
+    let mut native = valid_pijs_gate_record(tmp.path(), 1);
+    native["runtime_engine"] = json!("native_rust_runtime");
+    let mut ineligible = valid_pijs_gate_record(tmp.path(), 1);
+    ineligible["eligible_for_regression_gate"] = json!(false);
+    write_pijs_workload_records(&path, &[debug, preview, native, ineligible]);
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+}
+
+#[test]
+fn pijs_gate_reader_rejects_invalid_eligible_row_even_with_valid_quickjs_row() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let mut preview = valid_pijs_gate_record(tmp.path(), 1);
+    preview["runtime_engine"] = json!("native_rust_preview");
+    preview["per_call_us_f64"] = json!(0.01);
+    let valid = valid_pijs_gate_record(tmp.path(), 1);
+    write_pijs_workload_records(&path, &[preview, valid]);
+
+    assert_eq!(read_pijs_workload_mean_latency(tmp.path()).0, None);
+}
+
+#[test]
+fn pijs_gate_reader_fails_closed_on_invalid_canonical_artifact() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let canonical = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let fallback = tmp
+        .path()
+        .join("target/perf/release/pijs_workload_release.jsonl");
+    let mut invalid = valid_pijs_gate_record(tmp.path(), 1);
+    invalid["confidence"] = json!("medium");
+    write_pijs_workload_records(&canonical, &[invalid]);
+    write_pijs_workload_records(&fallback, &[valid_pijs_gate_record(tmp.path(), 1)]);
+
+    let (latency, source) = read_pijs_workload_mean_latency(tmp.path());
+    assert_eq!(latency, None);
+    assert_eq!(
+        source,
+        "no admissible pijs_workload pair in cargo-target[0]://perf/perf/pijs_workload_perf.jsonl: confidence must equal \"high\" (observed=Some(\"medium\"))"
+    );
+}
+
+#[test]
+fn pijs_gate_reader_rejects_mixed_valid_and_corrupt_jsonl() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let path = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let latency = valid_pijs_gate_record(tmp.path(), 1);
+    let throughput = valid_pijs_gate_record(tmp.path(), 10);
+    std::fs::create_dir_all(path.parent().expect("artifact parent"))
+        .expect("create artifact directory");
+    std::fs::write(&path, format!("{latency}\n{{not-json\n{throughput}\n"))
+        .expect("write mixed-validity artifact");
+
+    let (actual, source) = read_pijs_workload_mean_latency(tmp.path());
+    assert_eq!(actual, None);
+    assert!(source.contains("line 2 is not valid JSON"), "{source}");
+    let failures = evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+    assert_eq!(failures.len(), 2);
+    assert!(failures.iter().all(|failure| {
+        failure.contract_id == "invalid_pijs_workload_artifact"
+            && failure.detail.contains("line 2 is not valid JSON")
+    }));
+}
+
+#[test]
+fn pijs_gate_freshness_is_bound_to_selected_canonical_artifact() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let canonical = tmp.path().join("target/perf/perf/pijs_workload_perf.jsonl");
+    let fallback = tmp
+        .path()
+        .join("target/perf/release/pijs_workload_release.jsonl");
+    write_pijs_workload_records(
+        &canonical,
+        &[
+            valid_pijs_gate_record(tmp.path(), 1),
+            valid_pijs_gate_record(tmp.path(), 10),
+        ],
+    );
+    write_pijs_workload_records(
+        &fallback,
+        &[
+            valid_pijs_gate_record(tmp.path(), 1),
+            valid_pijs_gate_record(tmp.path(), 10),
+        ],
+    );
+    filetime::set_file_mtime(&canonical, filetime::FileTime::from_unix_time(1, 0))
+        .expect("make canonical artifact stale");
+
+    let (actual, source) = read_pijs_workload_mean_latency(tmp.path());
+    assert_eq!(actual, None);
+    assert!(
+        source.contains(
+            "selected artifact cargo-target[0]://perf/perf/pijs_workload_perf.jsonl is stale"
+        ),
+        "{source}"
+    );
+    let failures = evaluate_pijs_workload_gate_contract(tmp.path(), DEFAULT_MAX_ARTIFACT_AGE_HOURS);
+    assert_eq!(failures.len(), 2);
+    assert!(failures.iter().all(|failure| {
+        failure.contract_id == "missing_or_stale_budget_artifact"
+            && failure
+                .detail
+                .contains("cargo-target[0]://perf/perf/pijs_workload_perf.jsonl is stale")
+    }));
 }
 
 #[test]
@@ -2246,11 +3906,338 @@ fn check_extension_load_budget() {
 }
 
 #[test]
+fn budget_report_generation_is_explicitly_opt_in() {
+    assert!(!budget_report_generation_enabled(None));
+    assert!(!budget_report_generation_enabled(Some("")));
+    assert!(!budget_report_generation_enabled(Some("0")));
+    assert!(budget_report_generation_enabled(Some("1")));
+}
+
+#[test]
+fn blocked_sentinel_is_independent_of_artifact_roots_and_contents() {
+    let first = tempfile::tempdir().expect("first fixture root");
+    let second = tempfile::tempdir().expect("second fixture root");
+    let first_artifact = first
+        .path()
+        .join("target/criterion/startup/version/warm/new/estimates.json");
+    std::fs::create_dir_all(first_artifact.parent().expect("first artifact parent"))
+        .expect("create first artifact parent");
+    std::fs::write(&first_artifact, r#"{"mean":{"point_estimate":1.0}}"#)
+        .expect("write first ambient artifact");
+    let second_artifact = second.path().join("target/perf/pijs_workload.jsonl");
+    std::fs::create_dir_all(second_artifact.parent().expect("second artifact parent"))
+        .expect("create second artifact parent");
+    std::fs::write(&second_artifact, "not-json\n").expect("write second ambient artifact");
+    assert_eq!(
+        display_source_path(first.path(), &first_artifact),
+        "cargo-target[0]://criterion/startup/version/warm/new/estimates.json"
+    );
+    assert_eq!(
+        display_source_path(second.path(), &second_artifact),
+        "cargo-target[0]://perf/pijs_workload.jsonl"
+    );
+
+    let lineage = BudgetSummaryLineage {
+        generated_at: "2026-08-05T17:00:00.000Z",
+        source_commit: None,
+        run_id: None,
+        correlation_id: None,
+        strict_mode: false,
+    };
+    let (first_results, first_failures) = evaluate_budget_report(first.path(), &lineage);
+    let (second_results, second_failures) = evaluate_budget_report(second.path(), &lineage);
+    let first_summary = budget_summary_value(&lineage, &first_results, &first_failures);
+    let second_summary = budget_summary_value(&lineage, &second_results, &second_failures);
+
+    assert_eq!(first_summary, second_summary);
+    assert!(first_failures.is_empty());
+    assert_eq!(first_summary["pass"].as_u64(), Some(0));
+    assert_eq!(first_summary["fail"].as_u64(), Some(0));
+    assert_eq!(
+        first_summary["no_data"].as_u64(),
+        Some(BUDGETS.len() as u64)
+    );
+    assert!(first_results.iter().all(|result| {
+        result.actual.is_none()
+            && result.status == "NO_DATA"
+            && result.source == "not evaluated: authoritative benchmark lineage is incomplete"
+    }));
+}
+
+#[test]
+fn clean_source_commit_rejects_hidden_index_flags_and_untracked_files() {
+    fn git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let repo = tempfile::tempdir().expect("temporary git repository");
+    git(repo.path(), &["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(repo.path().join("tracked.txt"), "tracked\n").expect("write tracked file");
+    git(repo.path(), &["add", "tracked.txt"]);
+    git(
+        repo.path(),
+        &[
+            "-c",
+            "user.name=Pi Test",
+            "-c",
+            "user.email=pi-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ],
+    );
+    assert!(clean_source_commit(repo.path()).is_some());
+
+    git(
+        repo.path(),
+        &["update-index", "--skip-worktree", "tracked.txt"],
+    );
+    assert_eq!(clean_source_commit(repo.path()), None);
+    git(
+        repo.path(),
+        &["update-index", "--no-skip-worktree", "tracked.txt"],
+    );
+    git(
+        repo.path(),
+        &["update-index", "--assume-unchanged", "tracked.txt"],
+    );
+    assert_eq!(clean_source_commit(repo.path()), None);
+    git(
+        repo.path(),
+        &["update-index", "--no-assume-unchanged", "tracked.txt"],
+    );
+    assert!(clean_source_commit(repo.path()).is_some());
+
+    let nested = repo.path().join("untracked/nested.txt");
+    std::fs::create_dir_all(nested.parent().expect("nested parent"))
+        .expect("create untracked directory");
+    std::fs::write(nested, "untracked\n").expect("write untracked file");
+    assert_eq!(clean_source_commit(repo.path()), None);
+}
+
+#[test]
+fn claim_readiness_requires_complete_strict_same_run_evidence() {
+    assert!(
+        claim_readiness_blockers(
+            true,
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            Some("release-run"),
+            Some("release-run"),
+            4,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .is_empty()
+    );
+
+    assert_eq!(
+        claim_readiness_blockers(
+            false,
+            None,
+            None,
+            Some("different-run"),
+            4,
+            3,
+            1,
+            1,
+            2,
+            3,
+            2,
+        ),
+        vec![
+            "budget_data_missing",
+            "budget_failed",
+            "ci_budget_data_missing",
+            "ci_budget_failed",
+            "correlation_id_missing",
+            "data_contract_failure",
+            "run_id_missing",
+            "source_commit_unbound",
+            "strict_mode_disabled",
+        ]
+    );
+
+    assert_eq!(
+        claim_readiness_blockers(
+            true,
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            Some("release-run"),
+            Some("release-run"),
+            4,
+            4,
+            0,
+            0,
+            1,
+            0,
+            0,
+        ),
+        vec!["budget_failed"],
+        "a non-CI budget failure must block blanket performance claims",
+    );
+    assert_eq!(
+        claim_readiness_blockers(
+            true,
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            Some("release-run"),
+            Some("release-run"),
+            4,
+            4,
+            0,
+            0,
+            0,
+            1,
+            0,
+        ),
+        vec!["budget_data_missing"],
+        "missing data for a non-CI budget must block blanket performance claims",
+    );
+}
+
+#[test]
+fn checked_in_budget_summary_matches_fresh_canonical_evaluation_exactly() {
+    let root = project_root();
+    let summary_path = root.join("tests/perf/reports/budget_summary.json");
+    let summary_text = std::fs::read_to_string(&summary_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", summary_path.display()));
+    assert!(
+        summary_text.ends_with('\n') && !summary_text.ends_with("\n\n"),
+        "checked-in budget summary must end with exactly one newline"
+    );
+    let checked_in: Value =
+        serde_json::from_str(&summary_text).expect("checked-in budget summary must be valid JSON");
+    assert_eq!(
+        checked_in.get("schema").and_then(Value::as_str),
+        Some("pi.perf.budget_summary.v2")
+    );
+
+    let generated_at = checked_in
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .expect("budget summary generated_at");
+    let parsed_generated_at = chrono::DateTime::parse_from_rfc3339(generated_at)
+        .expect("budget summary generated_at must be RFC3339")
+        .with_timezone(&chrono::Utc);
+    assert_eq!(
+        parsed_generated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        generated_at,
+        "budget summary generated_at must use canonical millisecond UTC form"
+    );
+
+    let optional_string = |field: &str| match checked_in.get(field) {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.as_str()),
+        _ => panic!("budget summary {field} must be null or a non-empty string"),
+    };
+    let source_commit = optional_string("source_commit");
+    if let Some(source_commit) = source_commit {
+        assert!(
+            source_commit.len() == 40
+                && source_commit
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                && !source_commit.bytes().all(|byte| byte == b'0'),
+            "budget summary source_commit must be a full lowercase nonzero Git SHA"
+        );
+    }
+    let run_id = optional_string("run_id");
+    let correlation_id = optional_string("correlation_id");
+    assert_eq!(
+        run_id, correlation_id,
+        "budget summary run and correlation identity must be identical"
+    );
+    let strict_mode = checked_in
+        .get("strict_mode")
+        .and_then(Value::as_bool)
+        .expect("budget summary strict_mode");
+
+    let lineage = BudgetSummaryLineage {
+        generated_at,
+        source_commit,
+        run_id,
+        correlation_id,
+        strict_mode,
+    };
+    let (fresh_results, fresh_failures) = evaluate_budget_report(&root, &lineage);
+    let expected = budget_summary_value(&lineage, &fresh_results, &fresh_failures);
+    assert_eq!(
+        checked_in, expected,
+        "checked-in budget summary must exactly match fresh definitions, results, failures, counts, lineage, and readiness"
+    );
+
+    let events_path = root.join("tests/perf/reports/budget_events.jsonl");
+    let events_text = std::fs::read_to_string(&events_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", events_path.display()));
+    let checked_events = events_text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            serde_json::from_str::<Value>(line).unwrap_or_else(|err| {
+                panic!(
+                    "{} line {} is not valid JSON: {err}",
+                    events_path.display(),
+                    index + 1
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        Value::Array(checked_events),
+        expected["budget_results"],
+        "checked-in budget events must exactly match the canonical summary results"
+    );
+
+    if !benchmark_lineage_is_authoritative(&lineage) {
+        let markdown_path = root.join("tests/perf/reports/PERF_BUDGETS.md");
+        let markdown = std::fs::read_to_string(&markdown_path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", markdown_path.display()));
+        assert!(
+            markdown.contains(
+                "## Failing Data Contracts\n\n- Not evaluated: authoritative benchmark lineage is incomplete."
+            ),
+            "blocked sentinel Markdown must not imply that data contracts were evaluated cleanly"
+        );
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn generate_budget_report() {
+    if !budget_report_generation_requested() {
+        eprintln!(
+            "[budget] Report generation skipped; set PI_GENERATE_PERF_BUDGET_REPORT=1 to write tracked reports"
+        );
+        return;
+    }
     let root = project_root();
-    let results: Vec<BudgetResult> = BUDGETS.iter().map(check_budget).collect();
-    let data_contract_failures = collect_data_contract_failures(&root);
+    // Capture source/run identity before mutating any tracked report. Otherwise
+    // a clean, claim-ready generation would make itself appear dirty.
+    let strict_mode = perf_strict_mode();
+    let source_commit = clean_source_commit(&root);
+    let run_id = perf_run_id();
+    let generated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let lineage = BudgetSummaryLineage {
+        generated_at: &generated_at,
+        source_commit: source_commit.as_deref(),
+        run_id: run_id.as_deref(),
+        correlation_id: run_id.as_deref(),
+        strict_mode,
+    };
+    let (results, data_contract_failures) = evaluate_budget_report(&root, &lineage);
     let reports_dir = root.join("tests/perf/reports");
     let _ = std::fs::create_dir_all(&reports_dir);
 
@@ -2282,45 +4269,37 @@ fn generate_budget_report() {
         .filter(|result| result.status == "NO_DATA")
         .count();
     let data_contract_failures_count = data_contract_failures.len();
-    let run_id = perf_run_id();
     let run_id_json = run_id.as_deref();
     let run_id_label = run_id.as_deref().unwrap_or("not set").to_string();
-
-    let summary = json!({
-        "schema": "pi.perf.budget_summary.v1",
-        "generated_at": chrono::Utc::now().to_rfc3339(),
-        "run_id": run_id_json,
-        "correlation_id": run_id_json,
-        "total_budgets": BUDGETS.len(),
-        "ci_enforced": ci_enforced_count,
-        "ci_with_data": ci_with_data_count,
-        "ci_fail": ci_fail_count,
-        "ci_no_data": ci_no_data_count,
-        "pass": pass_count,
-        "fail": fail_count,
-        "no_data": no_data_count,
-        "data_contract_failures_count": data_contract_failures_count,
-        "failing_data_contracts": data_contract_failures.iter().map(|failure| json!({
-            "contract_id": failure.contract_id,
-            "budget_name": failure.budget_name,
-            "detail": failure.detail,
-            "remediation": failure.remediation,
-        })).collect::<Vec<_>>(),
-        "budgets": BUDGETS.iter().map(|b| json!({
-            "name": b.name,
-            "category": b.category,
-            "metric": b.metric,
-            "unit": b.unit,
-            "threshold": b.threshold,
-            "ci_enforced": b.ci_enforced,
-            "methodology": b.methodology,
-        })).collect::<Vec<_>>(),
-    });
+    let correlation_id = run_id.as_deref();
+    let readiness_blockers = claim_readiness_blockers(
+        strict_mode,
+        source_commit.as_deref(),
+        run_id_json,
+        correlation_id,
+        ci_enforced_count,
+        ci_with_data_count,
+        ci_fail_count,
+        ci_no_data_count,
+        fail_count,
+        no_data_count,
+        data_contract_failures_count,
+    );
+    let claims_authorized = readiness_blockers.is_empty();
+    let claim_readiness_status = if claims_authorized {
+        "claim_ready"
+    } else {
+        "blocked"
+    };
+    let summary = budget_summary_value(&lineage, &results, &data_contract_failures);
 
     let summary_path = reports_dir.join("budget_summary.json");
     std::fs::write(
         &summary_path,
-        serde_json::to_string_pretty(&summary).unwrap_or_default(),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&summary).unwrap_or_default()
+        ),
     )
     .expect("write budget_summary.json");
 
@@ -2328,12 +4307,15 @@ fn generate_budget_report() {
     let mut md = String::with_capacity(8 * 1024);
 
     md.push_str("# Performance Budgets\n\n");
+    let _ = writeln!(md, "> Generated: {generated_at}\n");
+    let _ = writeln!(md, "> Run ID: {run_id_label}\n");
     let _ = writeln!(
         md,
-        "> Generated: {}\n",
-        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+        "> Source commit: {}\n",
+        source_commit.as_deref().unwrap_or("not bound (dirty tree)")
     );
-    let _ = writeln!(md, "> Run ID: {run_id_label}\n");
+    let _ = writeln!(md, "> Strict mode: {strict_mode}\n");
+    let _ = writeln!(md, "> Claim readiness: {claim_readiness_status}\n");
 
     md.push_str("## Summary\n\n");
     md.push_str("| Metric | Value |\n");
@@ -2350,6 +4332,17 @@ fn generate_budget_report() {
         md,
         "| Failing data contracts | {data_contract_failures_count} |\n"
     );
+
+    md.push_str("## Claim Readiness\n\n");
+    if claims_authorized {
+        md.push_str("Performance claims are authorized by this evidence set.\n\n");
+    } else {
+        md.push_str("Performance claims are blocked. Blocking reason codes:\n\n");
+        for blocker in &readiness_blockers {
+            let _ = writeln!(md, "- `{blocker}`");
+        }
+        md.push('\n');
+    }
 
     // Group by category
     let categories = [
@@ -2371,16 +4364,17 @@ fn generate_budget_report() {
         }
 
         let _ = writeln!(md, "## {}\n", capitalize(cat));
-        md.push_str("| Budget | Metric | Threshold | Actual | Status | CI |\n");
-        md.push_str("|---|---|---|---|---|---|\n");
+        md.push_str("| Budget | Metric | Comparison | Threshold | Actual | Status | CI |\n");
+        md.push_str("|---|---|---|---|---|---|---|\n");
 
         for budget in &cat_budgets {
             let Some(result) = results.iter().find(|r| r.budget_name.eq(budget.name)) else {
                 let _ = writeln!(
                     md,
-                    "| {} | {} | {} {} | - | NO_DATA | {} |",
+                    "| {} | {} | {} | {} {} | - | NO_DATA | {} |",
                     budget.name,
                     budget.metric,
+                    budget.comparison.symbol(),
                     format_value(budget.threshold, budget.unit),
                     budget.unit,
                     if budget.ci_enforced { "yes" } else { "no" }
@@ -2394,9 +4388,10 @@ fn generate_budget_report() {
 
             let _ = writeln!(
                 md,
-                "| `{}` | {} | {} {} | {} | {} | {} |",
+                "| `{}` | {} | {} | {} {} | {} | {} | {} |",
                 budget.name,
                 budget.metric,
+                budget.comparison.symbol(),
                 budget.threshold,
                 budget.unit,
                 actual_str,
@@ -2408,7 +4403,9 @@ fn generate_budget_report() {
     }
 
     md.push_str("## Failing Data Contracts\n\n");
-    if data_contract_failures.is_empty() {
+    if !benchmark_lineage_is_authoritative(&lineage) {
+        md.push_str("- Not evaluated: authoritative benchmark lineage is incomplete.\n\n");
+    } else if data_contract_failures.is_empty() {
         md.push_str("- None\n\n");
     } else {
         for failure in &data_contract_failures {
@@ -2438,7 +4435,7 @@ fn generate_budget_report() {
     md.push_str("# Run budget checks\n");
     md.push_str("cargo test --test perf_budgets -- --nocapture\n\n");
     md.push_str("# Generate full budget report\n");
-    md.push_str("cargo test --test perf_budgets generate_budget_report -- --nocapture\n");
+    md.push_str("PI_GENERATE_PERF_BUDGET_REPORT=1 cargo test --test perf_budgets generate_budget_report -- --nocapture\n");
     md.push_str("```\n");
 
     let md_path = reports_dir.join("PERF_BUDGETS.md");
@@ -2478,10 +4475,22 @@ fn format_value(val: f64, unit: &str) -> String {
 fn classify_budget_status_promotes_ci_no_data_to_fail_under_strict() {
     let budget = BUDGETS
         .iter()
-        .find(|budget| budget.name == "tool_call_latency_p99")
-        .expect("tool_call_latency_p99 budget exists");
+        .find(|budget| budget.name == "tool_call_latency_mean")
+        .expect("tool_call_latency_mean budget exists");
     assert_eq!(classify_budget_status(budget, None, false), "NO_DATA");
     assert_eq!(classify_budget_status(budget, None, true), "FAIL");
+}
+
+#[test]
+fn idle_memory_budget_rejects_test_harness_rss_as_release_evidence() {
+    let (actual, source) = read_idle_memory_rss();
+    assert_eq!(actual, None);
+    assert!(source.contains("test-harness process RSS is inadmissible"));
+    let budget = BUDGETS
+        .iter()
+        .find(|budget| budget.name == "idle_memory_rss")
+        .expect("idle-memory budget");
+    assert_eq!(classify_budget_status(budget, actual, true), "FAIL");
 }
 
 #[test]
@@ -2491,7 +4500,7 @@ fn artifact_contract_flags_stale_evidence() {
     std::fs::write(&artifact_path, "{}\n").expect("write artifact");
     std::thread::sleep(std::time::Duration::from_millis(25));
 
-    let violation = evaluate_artifact_contract(&[artifact_path], 0.000001)
+    let violation = evaluate_artifact_contract(tmp.path(), &[artifact_path], 0.000001)
         .expect("stale artifact violation expected");
     assert!(
         violation.contains("stale/invalid"),
@@ -2690,7 +4699,7 @@ fn context_intelligence_budget_reader_prefers_machine_artifact() {
     assert_eq!(actual, Some(42.0));
     assert_eq!(
         source,
-        "target/perf/context_intelligence_planner_budget.json"
+        "cargo-target[0]://perf/context_intelligence_planner_budget.json"
     );
 }
 

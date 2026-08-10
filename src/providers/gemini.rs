@@ -344,14 +344,14 @@ impl Provider for GeminiProvider {
             }
 
             // Apply provider-specific custom headers from compat config.
-            if let Some(compat) = &self.compat {
-                if let Some(custom_headers) = &compat.custom_headers {
-                    request = super::apply_headers_ignoring_blank_auth_overrides(
-                        request,
-                        custom_headers,
-                        &["authorization", "x-goog-api-key"],
-                    );
-                }
+            if let Some(compat) = &self.compat
+                && let Some(custom_headers) = &compat.custom_headers
+            {
+                request = super::apply_headers_ignoring_blank_auth_overrides(
+                    request,
+                    custom_headers,
+                    &["authorization", "x-goog-api-key"],
+                );
             }
 
             // Per-request headers from StreamOptions (highest priority).
@@ -484,14 +484,14 @@ impl Provider for GeminiProvider {
         }
 
         // Apply provider-specific custom headers from compat config.
-        if let Some(compat) = &self.compat {
-            if let Some(custom_headers) = &compat.custom_headers {
-                request = super::apply_headers_ignoring_blank_auth_overrides(
-                    request,
-                    custom_headers,
-                    &["authorization", "x-goog-api-key"],
-                );
-            }
+        if let Some(compat) = &self.compat
+            && let Some(custom_headers) = &compat.custom_headers
+        {
+            request = super::apply_headers_ignoring_blank_auth_overrides(
+                request,
+                custom_headers,
+                &["authorization", "x-goog-api-key"],
+            );
         }
 
         // Per-request headers from StreamOptions (highest priority).
@@ -621,6 +621,7 @@ where
                 model,
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },
@@ -646,10 +647,10 @@ where
         }
 
         // Process candidates
-        if let Some(candidates) = response.candidates {
-            if let Some(candidate) = candidates.into_iter().next() {
-                self.process_candidate(candidate)?;
-            }
+        if let Some(candidates) = response.candidates
+            && let Some(candidate) = candidates.into_iter().next()
+        {
+            self.process_candidate(candidate)?;
         }
 
         Ok(())
@@ -1543,6 +1544,8 @@ mod tests {
             StopReason::Stop => "stop",
             StopReason::Length => "length",
             StopReason::ToolUse => "tool_use",
+            StopReason::PauseTurn => "pause_turn",
+            StopReason::Refusal => "refusal",
             StopReason::Error => "error",
             StopReason::Aborted => "aborted",
         }
@@ -1755,6 +1758,7 @@ mod tests {
             model: "gemini-2.0-flash".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         });
@@ -1786,6 +1790,7 @@ mod tests {
             model: "gemini-2.0-flash".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         });
@@ -1954,6 +1959,7 @@ mod tests {
                     model: "gemini-2.0-flash".to_string(),
                     usage: Usage::default(),
                     stop_reason: StopReason::ToolUse,
+                    stop_details: None,
                     error_message: None,
                     timestamp: 1,
                 }),

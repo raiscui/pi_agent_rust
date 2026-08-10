@@ -40,8 +40,10 @@ pub mod openai_responses;
 pub mod vertex;
 
 pub use model_fetch::{
-    DISABLE_CACHE_ENV, MODEL_CACHE_TTL, fetch_provider_models, refresh_provider_models,
-    static_registry_models,
+    DISABLE_CACHE_ENV, MODEL_CACHE_TTL, ModelCatalogSource, ProviderModelCatalog,
+    ProviderModelCatalogFetchPlan, fetch_provider_model_catalog, fetch_provider_models,
+    persist_provider_model_catalog, prepare_provider_model_catalog_fetch,
+    refresh_provider_model_catalog, refresh_provider_models, static_registry_models,
 };
 
 pub(super) fn first_non_empty_header_value_case_insensitive(
@@ -560,10 +562,10 @@ impl ExtensionStreamSimpleProvider {
             "cacheRetention".to_string(),
             Value::String(cache_retention.to_string()),
         );
-        if let Some(level) = options.thinking_level {
-            if level != crate::model::ThinkingLevel::Off {
-                map.insert("reasoning".to_string(), Value::String(level.to_string()));
-            }
+        if let Some(level) = options.thinking_level
+            && level != crate::model::ThinkingLevel::Off
+        {
+            map.insert("reasoning".to_string(), Value::String(level.to_string()));
         }
         if let Some(budgets) = &options.thinking_budgets {
             map.insert(
@@ -680,6 +682,7 @@ impl ExtensionStreamSimpleProvider {
             })],
             stop_reason: StopReason::default(),
             usage: Usage::default(),
+            stop_details: None,
             error_message: None,
             timestamp: Utc::now().timestamp_millis(),
         }
@@ -910,19 +913,19 @@ pub fn create_provider(
     entry: &ModelEntry,
     extensions: Option<&ExtensionManager>,
 ) -> Result<Arc<dyn Provider>> {
-    if let Some(manager) = extensions {
-        if manager.provider_has_stream_simple(&entry.model.provider) {
-            let runtime = manager.runtime().ok_or_else(|| {
-                Error::provider(
-                    &entry.model.provider,
-                    "Extension runtime not configured for streamSimple provider",
-                )
-            })?;
-            return Ok(Arc::new(ExtensionStreamSimpleProvider::new(
-                entry.model.clone(),
-                runtime,
-            )));
-        }
+    if let Some(manager) = extensions
+        && manager.provider_has_stream_simple(&entry.model.provider)
+    {
+        let runtime = manager.runtime().ok_or_else(|| {
+            Error::provider(
+                &entry.model.provider,
+                "Extension runtime not configured for streamSimple provider",
+            )
+        })?;
+        return Ok(Arc::new(ExtensionStreamSimpleProvider::new(
+            entry.model.clone(),
+            runtime,
+        )));
     }
 
     let (route, canonical_provider, effective_api) = resolve_provider_route(entry)?;
@@ -954,7 +957,7 @@ pub fn create_provider(
                     .with_provider_name(entry.model.provider.clone())
                     .with_base_url(normalize_openai_base(&entry.model.base_url))
                     .with_compat(entry.compat.clone())
-                    .with_tool_use_profile(entry.tool_use_profile.clone())
+                    .with_auth_header(entry.auth_header)
                     .with_reasoning(entry.model.reasoning)
                     .with_client(client),
             ))
@@ -965,6 +968,7 @@ pub fn create_provider(
                     .with_provider_name(entry.model.provider.clone())
                     .with_base_url(normalize_openai_responses_base(&entry.model.base_url))
                     .with_compat(entry.compat.clone())
+                    .with_auth_header(entry.auth_header)
                     .with_client(client),
             ))
         }
@@ -976,6 +980,7 @@ pub fn create_provider(
                 .with_codex_mode(true)
                 .with_base_url(normalize_openai_codex_responses_base(&entry.model.base_url))
                 .with_compat(entry.compat.clone())
+                .with_auth_header(entry.auth_header)
                 .with_client(client),
         )),
         ProviderRouteKind::NativeCursor => Ok(Arc::new(
@@ -1278,13 +1283,13 @@ pub fn normalize_cursor_base(base_url: &str) -> String {
         return cursor::CURSOR_API_URL.to_string();
     }
 
-    if let Ok(url) = Url::parse(trimmed) {
-        if !url.cannot_be_a_base() {
-            if trimmed_url_path(&url).ends_with(&format!("/{RPC_PATH}")) {
-                return canonicalize_url_path(&url);
-            }
-            return append_url_path(&url, RPC_PATH);
+    if let Ok(url) = Url::parse(trimmed)
+        && !url.cannot_be_a_base()
+    {
+        if trimmed_url_path(&url).ends_with(&format!("/{RPC_PATH}")) {
+            return canonicalize_url_path(&url);
         }
+        return append_url_path(&url, RPC_PATH);
     }
 
     let base = trimmed.trim_end_matches('/');
@@ -1397,6 +1402,45 @@ export default function init(pi) {
 }
 "#;
 
+    const API_REGISTERED_PROVIDER_EXTENSION: &str = r#"
+import { createAssistantMessageEventStream, registerApiProvider } from "@earendil-works/pi-ai/compat";
+
+registerApiProvider({
+  api: "extension-fixture-api",
+  stream: (model, context, options) => {
+    const events = createAssistantMessageEventStream();
+    events.push({ type: "done", message: { role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id, stopReason: "stop" } });
+    return events;
+  },
+  streamSimple: (model, context, options) => {
+    const partial = {
+      role: "assistant",
+      content: [{ type: "text", text: "" }],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: 0
+    };
+    const events = createAssistantMessageEventStream();
+    events.push({ type: "start", partial });
+    events.push({ type: "text_start", contentIndex: 0, partial });
+    partial.content[0].text = "via-api-registry";
+    events.push({ type: "text_delta", contentIndex: 0, delta: "via-api-registry", partial });
+    events.push({ type: "done", reason: "stop", message: partial });
+    return events;
+  },
+}, "api-registration-fixture");
+
+export default function init(pi) {
+  pi.registerProvider("api-registered-provider", {
+    api: "extension-fixture-api",
+    models: [{ id: "api-registered-model", name: "API Registered Model", contextWindow: 100, maxTokens: 10, input: ["text"] }]
+  });
+}
+"#;
+
     async fn load_extension(
         source: &str,
         allow_write: bool,
@@ -1501,6 +1545,39 @@ export default function init(pi) {
 
             assert!(saw_start, "expected a Start event");
             assert!(saw_text_delta, "expected a TextDelta event");
+        });
+    }
+
+    #[test]
+    fn extension_api_provider_registration_routes_models_through_registered_handler() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async move {
+            let (_dir, manager) = load_extension(API_REGISTERED_PROVIDER_EXTENSION, false).await;
+            assert!(manager.provider_has_stream_simple("api-registered-provider"));
+
+            let entries = manager.extension_model_entries();
+            assert_eq!(entries.len(), 1);
+            let entry = entries
+                .iter()
+                .find(|entry| entry.model.provider == "api-registered-provider")
+                .expect("registered provider model entry");
+            assert_eq!(entry.model.api, "extension-fixture-api");
+
+            let provider = create_provider(entry, Some(&manager)).expect("create provider");
+            let context = basic_context();
+            let options = basic_options();
+            let mut stream = provider.stream(&context, &options).await.expect("stream");
+
+            let mut text = String::new();
+            while let Some(event) = stream.next().await {
+                if let StreamEvent::TextDelta { delta, .. } = event.expect("stream event") {
+                    text.push_str(&delta);
+                }
+            }
+            assert_eq!(text, "via-api-registry");
         });
     }
 
@@ -1851,7 +1928,6 @@ export default function init(pi) {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         }
     }

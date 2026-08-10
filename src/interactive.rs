@@ -1117,7 +1117,7 @@ impl PiApp {
     /// Once provider text/thinking deltas are streaming, that output already
     /// acts as progress feedback; suppressing the extra animated status row
     /// reduces redraw churn and visible flicker.
-    fn show_processing_status_spinner(&self) -> bool {
+    const fn show_processing_status_spinner(&self) -> bool {
         if matches!(self.agent_state, AgentState::Idle) || self.current_tool.is_some() {
             return false;
         }
@@ -1131,7 +1131,7 @@ impl PiApp {
     ///
     /// The spinner is rendered either for tool execution progress, or for the
     /// generic processing state before visible stream output appears.
-    fn spinner_visible(&self) -> bool {
+    const fn spinner_visible(&self) -> bool {
         if matches!(self.agent_state, AgentState::Idle) {
             return false;
         }
@@ -2272,7 +2272,7 @@ fn persist_last_changelog_version_with_roots(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_startup_changelog_with_roots(
+fn prepare_startup_changelog_with_roots<'a>(
     config: &mut Config,
     global_dir: &Path,
     cwd: &Path,
@@ -2280,22 +2280,22 @@ fn prepare_startup_changelog_with_roots(
     has_existing_messages: bool,
     persist_version_updates: bool,
     current_version: &str,
-    changelog_markdown: &str,
+    changelog_markdown: impl FnOnce() -> &'a str,
 ) -> Option<StartupChangelog> {
     if has_existing_messages {
         return None;
     }
 
     let remember_version = |config: &mut Config| {
-        if persist_version_updates {
-            if let Err(err) = persist_last_changelog_version_with_roots(
+        if persist_version_updates
+            && let Err(err) = persist_last_changelog_version_with_roots(
                 global_dir,
                 cwd,
                 config_override,
                 current_version,
-            ) {
-                tracing::warn!("Failed to persist last changelog version: {err}");
-            }
+            )
+        {
+            tracing::warn!("Failed to persist last changelog version: {err}");
         }
         config.last_changelog_version = Some(current_version.to_string());
     };
@@ -2309,8 +2309,11 @@ fn prepare_startup_changelog_with_roots(
         return None;
     }
 
-    let markdown =
-        collect_startup_changelog_sections(changelog_markdown, current_version, last_seen_version)?;
+    let markdown = collect_startup_changelog_sections(
+        changelog_markdown(),
+        current_version,
+        last_seen_version,
+    )?;
     remember_version(config);
 
     if config.quiet_startup.unwrap_or(false) || config.collapse_changelog.unwrap_or(false) {
@@ -2380,7 +2383,7 @@ mod startup_changelog_tests {
             false,
             true,
             "0.1.9",
-            SAMPLE_CHANGELOG,
+            || SAMPLE_CHANGELOG,
         );
 
         let markdown = match result {
@@ -2401,6 +2404,37 @@ mod startup_changelog_tests {
             serde_json::from_str(&std::fs::read_to_string(&config_path).expect("settings file"))
                 .expect("valid settings json");
         assert_eq!(persisted["lastChangelogVersion"], "0.1.9");
+    }
+
+    #[test]
+    fn prepare_startup_changelog_does_not_read_current_changelog() {
+        let temp = tempdir();
+        let global_dir = temp.path().join("global");
+        let cwd = temp.path().join("cwd");
+        std::fs::create_dir_all(&global_dir).expect("global dir");
+        std::fs::create_dir_all(&cwd).expect("cwd dir");
+
+        let mut config = Config {
+            last_changelog_version: Some("0.1.9".to_string()),
+            ..Config::default()
+        };
+        let read = std::cell::Cell::new(false);
+        let result = prepare_startup_changelog_with_roots(
+            &mut config,
+            &global_dir,
+            &cwd,
+            None,
+            false,
+            false,
+            "0.1.9",
+            || {
+                read.set(true);
+                SAMPLE_CHANGELOG
+            },
+        );
+
+        assert!(result.is_none());
+        assert!(!read.get(), "current changelog should stay compressed");
     }
 }
 
@@ -2737,7 +2771,7 @@ impl PiApp {
             !messages.is_empty(),
             persist_startup_settings,
             VERSION,
-            include_str!("../CHANGELOG.md"),
+            crate::embedded_assets::changelog,
         );
 
         let mut app = Self {
@@ -2838,15 +2872,14 @@ impl PiApp {
         app.scroll_to_bottom();
 
         // Version update check (non-blocking, cache-only on startup)
-        if app.config.should_check_for_updates() {
-            if let crate::version_check::VersionCheckResult::UpdateAvailable { latest } =
+        if app.config.should_check_for_updates()
+            && let crate::version_check::VersionCheckResult::UpdateAvailable { latest } =
                 crate::version_check::check_cached()
-            {
-                app.status_message = Some(format!(
-                    "New version {latest} available (current: {})",
-                    crate::version_check::CURRENT_VERSION
-                ));
-            }
+        {
+            app.status_message = Some(format!(
+                "New version {latest} available (current: {})",
+                crate::version_check::CURRENT_VERSION
+            ));
         }
 
         app
@@ -2934,7 +2967,7 @@ impl PiApp {
 
     /// Return whether the conversation prefix cache is currently valid for
     /// the current message count (integration test helper for PERF-2).
-    pub fn prefix_cache_valid_for_test(&self) -> bool {
+    pub const fn prefix_cache_valid_for_test(&self) -> bool {
         self.message_render_cache.prefix_valid(self.messages.len())
     }
 
@@ -2946,7 +2979,7 @@ impl PiApp {
 
     /// Return the current view capacity hint from render buffers
     /// (integration test helper for PERF-7).
-    pub fn render_buffer_capacity_hint_for_test(&self) -> usize {
+    pub const fn render_buffer_capacity_hint_for_test(&self) -> usize {
         self.render_buffers.view_capacity_hint()
     }
 
@@ -3026,13 +3059,12 @@ impl PiApp {
 
         // Handle mouse wheel events: route to overlays when open, otherwise
         // scroll the conversation viewport.
-        if let Some(mouse) = msg.downcast_ref::<MouseMsg>() {
-            if mouse.is_wheel()
-                && (mouse.button == MouseButton::WheelUp || mouse.button == MouseButton::WheelDown)
-            {
-                let is_up = mouse.button == MouseButton::WheelUp;
-                return self.handle_mouse_wheel(is_up);
-            }
+        if let Some(mouse) = msg.downcast_ref::<MouseMsg>()
+            && mouse.is_wheel()
+            && (mouse.button == MouseButton::WheelUp || mouse.button == MouseButton::WheelDown)
+        {
+            let is_up = mouse.button == MouseButton::WheelUp;
+            return self.handle_mouse_wheel(is_up);
         }
 
         // Ignore spinner ticks when no spinner row is visible so old tick
@@ -3408,10 +3440,10 @@ impl PiApp {
                 // Extension shortcuts: check if unhandled key matches an extension shortcut
                 if matches!(self.agent_state, AgentState::Idle) {
                     let key_id = binding.to_string().to_lowercase();
-                    if let Some(manager) = &self.extensions {
-                        if manager.has_shortcut(&key_id) {
-                            return self.dispatch_extension_shortcut(&key_id);
-                        }
+                    if let Some(manager) = &self.extensions
+                        && manager.has_shortcut(&key_id)
+                    {
+                        return self.dispatch_extension_shortcut(&key_id);
                     }
                 }
             }
@@ -3424,21 +3456,21 @@ impl PiApp {
         if matches!(self.agent_state, AgentState::Idle) {
             let old_height = self.input.height();
 
-            if let Some(key) = msg.downcast_ref::<KeyMsg>() {
-                if key.key_type == KeyType::Space {
-                    let mut key = key.clone();
-                    key.key_type = KeyType::Runes;
-                    key.runes = vec![' '];
+            if let Some(key) = msg.downcast_ref::<KeyMsg>()
+                && key.key_type == KeyType::Space
+            {
+                let mut key = key.clone();
+                key.key_type = KeyType::Runes;
+                key.runes = vec![' '];
 
-                    let result = BubbleteaModel::update(&mut self.input, Message::new(key));
+                let result = BubbleteaModel::update(&mut self.input, Message::new(key));
 
-                    if self.input.height() != old_height {
-                        self.refresh_conversation_viewport(self.follow_stream_tail);
-                    }
-
-                    self.maybe_trigger_autocomplete();
-                    return result;
+                if self.input.height() != old_height {
+                    self.refresh_conversation_viewport(self.follow_stream_tail);
                 }
+
+                self.maybe_trigger_autocomplete();
+                return result;
             }
             let result = BubbleteaModel::update(&mut self.input, msg);
 

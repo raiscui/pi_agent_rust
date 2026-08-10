@@ -44,9 +44,9 @@ pub use crate::error::{Error, Result};
 pub use crate::extensions::{ExtensionManager, ExtensionPolicy, ExtensionRegion};
 pub use crate::model::ThinkingLevel;
 pub use crate::model::{
-    AssistantMessage, ContentBlock, Cost, CustomMessage, ImageContent, Message, StopReason,
-    StreamEvent, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage, UserContent,
-    UserMessage,
+    AssistantMessage, ContentBlock, Cost, CustomMessage, ImageContent, Message, StopDetails,
+    StopReason, StreamEvent, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage,
+    UserContent, UserMessage,
 };
 pub use crate::models::{ModelEntry, ModelRegistry};
 pub use crate::provider::{
@@ -67,7 +67,10 @@ use crate::tools::{
     BashTool, EditTool, FindTool, GrepTool, HashlineEditTool, LsTool, ReadTool, WriteTool,
 };
 
-/// All built-in tool names.
+/// Built-in tool names included in the default non-delegating SDK registry.
+///
+/// The opt-in `subagent` tool is configured through the CLI/session delegation
+/// surface and is intentionally not constructed by [`create_all_tools`].
 pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "read",
     "bash",
@@ -119,7 +122,7 @@ pub fn create_hashline_edit_tool(cwd: &Path) -> Box<dyn Tool> {
     Box::new(HashlineEditTool::new(cwd))
 }
 
-/// Create all built-in tools configured for `cwd`.
+/// Create the default non-delegating built-in tools configured for `cwd`.
 pub fn create_all_tools(cwd: &Path) -> Vec<Box<dyn Tool>> {
     vec![
         create_read_tool(cwd),
@@ -142,7 +145,7 @@ pub fn tool_to_definition(tool: &dyn Tool) -> ToolDefinition {
     }
 }
 
-/// Return [`ToolDefinition`] schemas for all built-in tools.
+/// Return schemas for the default non-delegating built-in tools.
 pub fn all_tool_definitions(cwd: &Path) -> Vec<ToolDefinition> {
     create_all_tools(cwd)
         .iter()
@@ -422,7 +425,7 @@ pub struct AgentSessionState {
 /// Prompt completion payload returned by `SessionTransport`.
 #[derive(Debug, Clone)]
 pub enum SessionPromptResult {
-    InProcess(AssistantMessage),
+    InProcess(Box<AssistantMessage>),
     RpcEvents(Vec<Value>),
 }
 
@@ -695,7 +698,7 @@ impl SessionTransport {
                         (on_event)(SessionTransportEvent::InProcess(event));
                     })
                     .await?;
-                Ok(SessionPromptResult::InProcess(assistant))
+                Ok(SessionPromptResult::InProcess(Box::new(assistant)))
             }
             Self::RpcSubprocess(client) => {
                 let events = client.prompt(input).await?;
@@ -1852,7 +1855,7 @@ mod tests {
     use asupersync::runtime::reactor::create_reactor;
     use asupersync::sync::Mutex as AsyncMutex;
     use std::env;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     fn run_async<F>(future: F) -> F::Output
@@ -1868,10 +1871,7 @@ mod tests {
     }
 
     fn current_dir_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::test_current_dir_lock()
     }
 
     struct CurrentDirGuard {
@@ -2536,6 +2536,7 @@ mod tests {
             model: String::new(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         });
@@ -2569,6 +2570,7 @@ mod tests {
             model: String::new(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         });

@@ -2,9 +2,12 @@
 *.db
 *.db-shm
 *.db-wal
+*.db-fsqlite-ns-*
+*.vacuum-fsqlite-ns-*
 
 # Lock files
 *.lock
+.write.lock
 
 # Temporary
 last-touched

@@ -185,7 +185,6 @@ async fn run_refresh_scenario(
 
     let after_json = read_json(&auth_path);
     let entry = oauth_entry(&after_json, "anthropic");
-    // auth.json 现在按上游 TS 格式序列化: `access` / `refresh` (旧别名 access_token 仅用于读取兼容)
     let after_access = oauth_field(entry, "access");
     let after_refresh = oauth_field(entry, "refresh");
     let after_expires = entry
@@ -524,7 +523,6 @@ fn auth_oauth_refresh_race_condition_vcr() {
 
         let after_json = read_json(&auth_path);
         let entry = oauth_entry(&after_json, "anthropic");
-        // 上游 TS 格式: `access` / `refresh`
         let after_access = oauth_field(entry, "access");
         let after_refresh = oauth_field(entry, "refresh");
         let after_expires = entry

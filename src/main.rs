@@ -1,9 +1,9 @@
-//! Pi - High-performance AI coding agent CLI
+//! Pi - Native AI coding agent CLI
 //!
 //! Rust port of pi-mono (TypeScript) with emphasis on:
-//! - Performance: Sub-100ms startup, smooth TUI at 60fps
-//! - Reliability: No panics in normal operation
-//! - Efficiency: Single binary, minimal dependencies
+//! - Performance-oriented native architecture with instrumented startup and TUI paths
+//! - Reliability through explicit errors, bounded cancellation, and conformance tests
+//! - Distribution through one supported end-user binary in official release archives
 
 #![forbid(unsafe_code)]
 
@@ -42,7 +42,7 @@ use pi::extensions::{
 };
 use pi::extensions_js::PiJsRuntimeConfig;
 use pi::model::{AssistantMessage, ContentBlock, StopReason, ThinkingLevel};
-use pi::models::{ModelEntry, ModelRegistry, default_models_path};
+use pi::models::{ModelEntry, ModelRegistry, default_models_path, fetched_models_path};
 use pi::package_manager::{
     PackageEntry, PackageManager, PackageScope, ResolvedPaths, ResolvedResource, ResourceOrigin,
 };
@@ -89,6 +89,7 @@ const USAGE_ERROR_PATTERNS: &[&str] = &[
     "unsupported swarm-replay-preview policy",
     "unknown --only categories",
     "--only must include at least one category",
+    "--fetch-models cannot be combined",
     "theme file not found",
     "theme spec is empty",
 ];
@@ -124,8 +125,153 @@ fn parse_cli_args(raw_args: Vec<String>) -> Result<Option<(cli::Cli, Vec<cli::Ex
     }
 }
 
-fn parse_cli_from_env() -> Result<Option<(cli::Cli, Vec<cli::ExtensionCliFlag>)>> {
-    parse_cli_args(std::env::args().collect())
+type ParsedCliEnvironment = (cli::Cli, Vec<cli::ExtensionCliFlag>, Vec<String>);
+
+fn parse_cli_from_env() -> Result<Option<ParsedCliEnvironment>> {
+    let raw_args = std::env::args().collect::<Vec<_>>();
+    Ok(parse_cli_args(raw_args.clone())?
+        .map(|(cli, extension_flags)| (cli, extension_flags, raw_args)))
+}
+
+fn add_fetch_models_conflict(
+    conflicts: &mut Vec<&'static str>,
+    condition: bool,
+    description: &'static str,
+) {
+    if condition {
+        conflicts.push(description);
+    }
+}
+
+fn collect_fetch_models_execution_conflicts(
+    cli: &cli::Cli,
+    extension_flags: &[cli::ExtensionCliFlag],
+    raw_args: &[String],
+    conflicts: &mut Vec<&'static str>,
+) {
+    add_fetch_models_conflict(conflicts, cli.version, "--version");
+    add_fetch_models_conflict(
+        conflicts,
+        cli.explain_extension_policy,
+        "--explain-extension-policy",
+    );
+    add_fetch_models_conflict(
+        conflicts,
+        cli.explain_repair_policy,
+        "--explain-repair-policy",
+    );
+    add_fetch_models_conflict(conflicts, cli.list_models.is_some(), "--list-models");
+    add_fetch_models_conflict(conflicts, cli.list_providers, "--list-providers");
+    add_fetch_models_conflict(conflicts, cli.export.is_some(), "--export");
+    add_fetch_models_conflict(
+        conflicts,
+        cli.rpc || cli.mode.as_deref().is_some_and(|mode| !mode.eq("text")),
+        "output-mode arguments",
+    );
+    add_fetch_models_conflict(conflicts, cli.acp, "--acp");
+    add_fetch_models_conflict(conflicts, cli.command.is_some(), "a subcommand");
+    add_fetch_models_conflict(conflicts, !cli.args.is_empty(), "prompt or file arguments");
+    add_fetch_models_conflict(
+        conflicts,
+        !cli.extension.is_empty() || !extension_flags.is_empty(),
+        "extension arguments",
+    );
+    let has_selection_arguments = raw_args
+        .iter()
+        .skip(1)
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| {
+            matches!(argument.as_str(), "--provider" | "--model" | "--tools")
+                || argument.starts_with("--provider=")
+                || argument.starts_with("--model=")
+                || argument.starts_with("--tools=")
+        });
+    add_fetch_models_conflict(
+        conflicts,
+        has_selection_arguments,
+        "provider, model, or tool-selection arguments",
+    );
+    add_fetch_models_conflict(conflicts, cli.models.is_some(), "--models");
+    add_fetch_models_conflict(conflicts, cli.thinking.is_some(), "--thinking");
+    add_fetch_models_conflict(
+        conflicts,
+        cli.system_prompt.is_some() || cli.append_system_prompt.is_some(),
+        "system-prompt arguments",
+    );
+}
+
+fn collect_fetch_models_context_conflicts(
+    cli: &cli::Cli,
+    raw_args: &[String],
+    conflicts: &mut Vec<&'static str>,
+) {
+    let has_session_arguments = cli.r#continue
+        || cli.resume
+        || cli.session.is_some()
+        || cli.session_dir.is_some()
+        || cli.no_session
+        || cli.session_durability.is_some();
+    add_fetch_models_conflict(conflicts, has_session_arguments, "session arguments");
+    add_fetch_models_conflict(conflicts, cli.no_mouse_capture, "--no-mouse-capture");
+    add_fetch_models_conflict(conflicts, cli.no_migrations, "--no-migrations");
+    add_fetch_models_conflict(conflicts, cli.verbose, "--verbose");
+    add_fetch_models_conflict(conflicts, cli.no_tools, "--no-tools");
+    add_fetch_models_conflict(
+        conflicts,
+        cli.extension_policy.is_some() || cli.repair_policy.is_some(),
+        "policy arguments",
+    );
+    add_fetch_models_conflict(
+        conflicts,
+        !cli.skill.is_empty() || !cli.prompt_template.is_empty(),
+        "skill or prompt-template arguments",
+    );
+    add_fetch_models_conflict(
+        conflicts,
+        cli.no_extensions || cli.no_skills || cli.no_prompt_templates || cli.no_themes,
+        "resource-discovery disable arguments",
+    );
+    add_fetch_models_conflict(
+        conflicts,
+        cli.theme.is_some() || !cli.theme_path.is_empty(),
+        "theme arguments",
+    );
+    let has_hide_cwd_argument = raw_args
+        .iter()
+        .skip(1)
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| {
+            argument == "--hide-cwd-in-prompt" || argument.starts_with("--hide-cwd-in-prompt=")
+        });
+    add_fetch_models_conflict(conflicts, has_hide_cwd_argument, "--hide-cwd-in-prompt");
+    add_fetch_models_conflict(
+        conflicts,
+        cli.max_tool_iterations.is_some(),
+        "--max-tool-iterations",
+    );
+}
+
+fn validate_fetch_models_is_standalone(
+    cli: &cli::Cli,
+    extension_flags: &[cli::ExtensionCliFlag],
+    raw_args: &[String],
+) -> Result<()> {
+    if cli.fetch_models.is_none() {
+        return Ok(());
+    }
+
+    let mut conflicts = Vec::new();
+    collect_fetch_models_execution_conflicts(cli, extension_flags, raw_args, &mut conflicts);
+    collect_fetch_models_context_conflicts(cli, raw_args, &mut conflicts);
+
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "--fetch-models cannot be combined with {}; run model discovery as a standalone command",
+            conflicts.join(", ")
+        )
+    }
 }
 
 fn reload_model_registry_with_extra_entries(
@@ -141,42 +287,6 @@ fn reload_model_registry_with_extra_entries(
         registry.merge_entries(extra_entries.to_vec());
     }
     registry
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_session_system_prompt(
-    cli: &cli::Cli,
-    cwd: &Path,
-    enabled_tools: &[&str],
-    resources: &ResourceLoader,
-    model_entry: &ModelEntry,
-    global_dir: &Path,
-    package_dir: &Path,
-    test_mode: bool,
-) -> Result<String> {
-    // 普通 skills 只有在 read 可用时才展示 metadata。profile/model 显式绑定
-    // 的正文由 ResourceLoader 直接内联,不再要求弱模型先自主选择 read。
-    let skills_prompt =
-        resources.format_skills_for_model_prompt(model_entry, enabled_tools.contains(&"read"));
-    let system_prompt = pi::app::build_system_prompt(
-        cli,
-        cwd,
-        enabled_tools,
-        if skills_prompt.is_empty() {
-            None
-        } else {
-            Some(skills_prompt.as_str())
-        },
-        global_dir,
-        package_dir,
-        test_mode,
-        !cli.hide_cwd_in_prompt,
-    )?;
-    Ok(pi::app::append_tool_use_profile_system_prompt(
-        system_prompt,
-        model_entry,
-        enabled_tools,
-    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,31 +340,24 @@ async fn resolve_selection_with_auth(
         };
 
         match pi::app::resolve_api_key(auth, cli, &selection.model_entry) {
+            // Structured SAP credentials are deliberately resolved in the provider, after
+            // custom-header precedence is known. Eager exchange here would touch auth.json or
+            // the network even when a complete Authorization override (or authHeader:false)
+            // makes those credentials unused.
             Ok(key) => return Ok(Some((selection, key))),
             Err(err) => {
-                if let Some(startup) = err.downcast_ref::<StartupError>() {
-                    if let StartupError::MissingApiKey { provider } = startup {
-                        let canonical_provider =
-                            pi::provider_metadata::canonical_provider_id(provider)
-                                .unwrap_or(provider.as_str());
-                        if canonical_provider.eq("sap-ai-core") {
-                            if let Some(token) = pi::auth::exchange_sap_access_token(auth).await? {
-                                return Ok(Some((selection, Some(token))));
-                            }
-                        }
+                if let Some(startup) = err.downcast_ref::<StartupError>()
+                    && allow_setup_prompt
+                {
+                    if run_first_time_setup(startup, auth, cli, models_path).await? {
+                        *model_registry = reload_model_registry_with_extra_entries(
+                            auth,
+                            models_path,
+                            extra_entries,
+                        );
+                        continue;
                     }
-
-                    if allow_setup_prompt {
-                        if run_first_time_setup(startup, auth, cli, models_path).await? {
-                            *model_registry = reload_model_registry_with_extra_entries(
-                                auth,
-                                models_path,
-                                extra_entries,
-                            );
-                            continue;
-                        }
-                        return Ok(None);
-                    }
+                    return Ok(None);
                 }
                 return Err(err);
             }
@@ -314,9 +417,11 @@ fn context_window_tokens_for_entry(entry: &ModelEntry) -> u32 {
 #[allow(clippy::too_many_lines)]
 fn main_impl() -> Result<()> {
     // Parse CLI arguments
-    let Some((mut cli, extension_flags)) = parse_cli_from_env()? else {
+    let Some((mut cli, extension_flags, raw_args)) = parse_cli_from_env()? else {
         return Ok(());
     };
+
+    validate_fetch_models_is_standalone(&cli, &extension_flags, &raw_args)?;
 
     if cli.version {
         print_version();
@@ -503,68 +608,72 @@ fn main_impl() -> Result<()> {
     //
     // IMPORTANT: if extension compat scanning is enabled, or explicit CLI extensions are provided,
     // we must boot the normal startup path so the compat ledger can be emitted deterministically.
-    if cli.command.is_none() {
-        if let Some(pattern) = &cli.list_models {
-            let compat_scan_enabled = std::env::var("PI_EXT_COMPAT_SCAN").is_ok_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
-            let has_cli_extensions = !cli.extension.is_empty();
+    if cli.command.is_none()
+        && let Some(pattern) = &cli.list_models
+    {
+        let compat_scan_enabled = std::env::var("PI_EXT_COMPAT_SCAN").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+        let has_cli_extensions = !cli.extension.is_empty();
 
-            if !compat_scan_enabled && !has_cli_extensions {
-                // Note: we intentionally skip OAuth refresh here to keep this path fast and offline.
-                let models_path = default_models_path(&Config::global_dir());
-                if let Some(payload) = load_list_models_cache(&models_path) {
-                    if let Some(error) = &payload.error {
-                        eprintln!("Warning: models.json error: {error}");
-                    }
-                    list_models_from_cached_rows(&payload.rows, pattern.as_deref());
-                    return Ok(());
-                }
-
-                let auth = AuthStorage::load(Config::auth_path())?;
-                let registry = ModelRegistry::load_for_listing(&auth, Some(models_path.clone()));
-                let error = registry.error().map(std::string::ToString::to_string);
-                if let Some(error) = &error {
+        if !compat_scan_enabled && !has_cli_extensions {
+            // Note: we intentionally skip OAuth refresh here to keep this path fast and offline.
+            let models_path = default_models_path(&Config::global_dir());
+            if let Some(payload) = load_list_models_cache(&models_path) {
+                if let Some(error) = &payload.error {
                     eprintln!("Warning: models.json error: {error}");
                 }
-
-                let mut models = registry.available_models();
-                models.sort_by(|a, b| {
-                    let provider_cmp = a.model.provider.cmp(&b.model.provider);
-                    if matches!(provider_cmp, std::cmp::Ordering::Equal) {
-                        a.model.id.cmp(&b.model.id)
-                    } else {
-                        provider_cmp
-                    }
-                });
-                let rows = build_model_rows(&models);
-                let payload = ListModelsCachePayload {
-                    error,
-                    rows: rows
-                        .into_iter()
-                        .map(|(provider, model, context, max_out, thinking, images)| {
-                            CachedModelRow {
-                                provider,
-                                model,
-                                context,
-                                max_out,
-                                thinking,
-                                images,
-                            }
-                        })
-                        .collect(),
-                };
-                save_list_models_cache(&models_path, &payload);
                 list_models_from_cached_rows(&payload.rows, pattern.as_deref());
                 return Ok(());
             }
+
+            let auth = AuthStorage::load(Config::auth_path())?;
+            let registry = ModelRegistry::load_for_listing(&auth, Some(models_path.clone()));
+            let error = registry.error().map(std::string::ToString::to_string);
+            if let Some(error) = &error {
+                eprintln!("Warning: models.json error: {error}");
+            }
+
+            let mut models = registry.available_models();
+            models.sort_by(|a, b| {
+                let provider_cmp = a.model.provider.cmp(&b.model.provider);
+                if matches!(provider_cmp, std::cmp::Ordering::Equal) {
+                    a.model.id.cmp(&b.model.id)
+                } else {
+                    provider_cmp
+                }
+            });
+            let rows = build_model_rows(&models);
+            let payload = ListModelsCachePayload {
+                error,
+                rows: rows
+                    .into_iter()
+                    .map(
+                        |(provider, model, context, max_out, thinking, images)| CachedModelRow {
+                            provider,
+                            model,
+                            context,
+                            max_out,
+                            thinking,
+                            images,
+                        },
+                    )
+                    .collect(),
+            };
+            save_list_models_cache(&models_path, &payload);
+            list_models_from_cached_rows(&payload.rows, pattern.as_deref());
+            return Ok(());
         }
     }
 
-    if cli.command.is_none() && !cli.acp && cli.mode.as_deref().is_none_or(|mode| mode.ne("rpc")) {
+    if cli.command.is_none()
+        && cli.fetch_models.is_none()
+        && !cli.acp
+        && cli.mode.as_deref().is_none_or(|mode| mode.ne("rpc"))
+    {
         let stdin_content = read_piped_stdin()?;
         pi::app::apply_piped_stdin(&mut cli, stdin_content);
     }
@@ -583,6 +692,7 @@ fn main_impl() -> Result<()> {
         }
     });
     if cli.command.is_none()
+        && cli.fetch_models.is_none()
         && early_mode.eq("text")
         && cli.export.is_none()
         && cli.file_args().is_empty()
@@ -664,10 +774,10 @@ fn is_usage_error(err: &anyhow::Error) -> bool {
 }
 
 fn validate_theme_path_spec(theme_spec: Option<&str>, cwd: &Path) -> Result<()> {
-    if let Some(theme_spec) = theme_spec {
-        if pi::theme::looks_like_theme_path(theme_spec) {
-            pi::theme::Theme::resolve_spec(theme_spec, cwd).map_err(anyhow::Error::new)?;
-        }
+    if let Some(theme_spec) = theme_spec
+        && pi::theme::looks_like_theme_path(theme_spec)
+    {
+        pi::theme::Theme::resolve_spec(theme_spec, cwd).map_err(anyhow::Error::new)?;
     }
     Ok(())
 }
@@ -1067,8 +1177,8 @@ async fn run(
     // constructed so the client's single resolution path sees it. The
     // `--request-timeout` flag is bound to the PI_HTTP_REQUEST_TIMEOUT_SECS env
     // var via clap, so `cli.request_timeout` already reflects either the flag
-    // or that env var. Config-file values are applied later (lower precedence)
-    // once config is loaded. See pi_agent_rust#90.
+    // or that env var. Config-file values are applied at the lowest precedence
+    // before the first provider request. See pi_agent_rust#90.
     if let Some(secs) = cli.request_timeout {
         pi::http::client::set_request_timeout_override(secs);
     }
@@ -1079,7 +1189,18 @@ async fn run(
     }
 
     if let Some(provider) = cli.fetch_models.take() {
-        handle_fetch_models(&provider, cli.refresh_models).await?;
+        if cli.request_timeout.is_none()
+            && let Some(secs) = Config::load()?.request_timeout_secs
+        {
+            pi::http::client::set_request_timeout_override(secs);
+        }
+        handle_fetch_models(
+            &provider,
+            cli.api_key.as_deref(),
+            cli.refresh_models,
+            cli.persist_models,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1096,17 +1217,18 @@ async fn run(
         config.theme = Some(theme_spec.to_string());
     }
     if cli.no_mouse_capture {
-        // CLI flag takes precedence over the persisted setting. The env var is
-        // read in `run_interactive` so only `PI_NO_MOUSE_CAPTURE=1` is truthy.
+        // The CLI flag takes precedence over the persisted setting. The
+        // PI_NO_MOUSE_CAPTURE env var is read separately by run_interactive so
+        // only the literal value `1` is truthy. Workaround for #78.
         config.disable_mouse_capture = Some(true);
     }
     // Apply the persisted request-timeout setting at the lowest precedence:
     // only when neither the CLI flag nor the env var has already supplied one
     // (`cli.request_timeout` reflects both). See pi_agent_rust#90.
-    if cli.request_timeout.is_none() {
-        if let Some(secs) = config.request_timeout_secs {
-            pi::http::client::set_request_timeout_override(secs);
-        }
+    if cli.request_timeout.is_none()
+        && let Some(secs) = config.request_timeout_secs
+    {
+        pi::http::client::set_request_timeout_override(secs);
     }
 
     let startup_mode = cli.mode.clone().unwrap_or_else(|| {
@@ -1382,13 +1504,13 @@ async fn run(
             has_cli_api_key_override(cli.api_key.as_deref()),
         )
     };
-    let initial_has_extensions = !resources.extensions().is_empty();
+    let has_extensions = !resources.extensions().is_empty();
 
     if has_cli_api_key_override(cli.api_key.as_deref())
         && cli.provider.is_none()
         && cli.model.is_none()
     {
-        let allow_unresolved_scope = initial_has_extensions && !scoped_patterns.is_empty();
+        let allow_unresolved_scope = has_extensions && !scoped_patterns.is_empty();
         if scoped_models.is_empty() && !allow_unresolved_scope {
             bail!("--api-key requires a model to be specified via --provider/--model or --models");
         }
@@ -1414,7 +1536,7 @@ async fn run(
         Ok(Some(result)) => result,
         Ok(None) => return Ok(()),
         Err(err) => {
-            if should_retry_selection_after_extensions(&cli, &err, initial_has_extensions) {
+            if should_retry_selection_after_extensions(&cli, &err, has_extensions) {
                 (
                     build_extension_bootstrap_selection(&config, &model_registry, &models_path)?,
                     None,
@@ -1425,46 +1547,26 @@ async fn run(
         }
     };
 
-    // Model profiles may opt into a dedicated extension. Resolve it only after
-    // model selection, so unrelated models never load model-specific behavior.
-    if !cli.no_extensions {
-        if let Err(err) = resources.extend_with_model_extensions(&cwd, &selection.model_entry) {
-            tracing::warn!(
-                event = "pi.resources.model_extensions_failed",
-                error = %err,
-                "Failed to load model-specific extensions"
-            );
-        }
-    }
-    let has_extensions = !resources.extensions().is_empty();
-
     let enabled_tools = cli.enabled_tools();
-    // 硬限制: 如果当前 model entry 的 toolUseProfile 声明了 `tools` allowlist,
-    // 就用它过滤 enabled_tools. profile.tools 决定 ToolRegistry 实际注册的工具,
-    // 与 OpenAI schema 过滤独立. 即使 model 在 schema 之外 emit tool_call,
-    // pi 客户端的 ToolRegistry 也找不到该 tool, 工具调用会被 reject.
-    let enabled_tools: Vec<&str> = match selection
-        .model_entry
-        .tool_use_profile
-        .as_ref()
-        .and_then(|p| p.tools.as_ref())
-    {
-        Some(allowed) => enabled_tools
-            .into_iter()
-            .filter(|name| allowed.iter().any(|a| a == name))
-            .collect(),
-        None => enabled_tools,
+    let skills_prompt = if enabled_tools.contains(&"read") {
+        resources.format_skills_for_prompt()
+    } else {
+        String::new()
     };
     let test_mode = std::env::var_os("PI_TEST_MODE").is_some();
-    let system_prompt = build_session_system_prompt(
+    let system_prompt = pi::app::build_system_prompt(
         &cli,
         &cwd,
         &enabled_tools,
-        &resources,
-        &selection.model_entry,
+        if skills_prompt.is_empty() {
+            None
+        } else {
+            Some(skills_prompt.as_str())
+        },
         &global_dir,
         &package_dir,
         test_mode,
+        !cli.hide_cwd_in_prompt,
     )?;
     let provider =
         providers::create_provider(&selection.model_entry, None).map_err(anyhow::Error::new)?;
@@ -1484,7 +1586,6 @@ async fn run(
         stream_options,
         block_images: config.image_block_images(),
         fail_closed_hooks: config.fail_closed_hooks(),
-        tool_use_profile: selection.model_entry.tool_use_profile.clone(),
         tool_approval: None,
     };
 
@@ -1623,15 +1724,24 @@ async fn run(
                         "Failed to apply extension-discovered resource paths"
                     );
                 } else {
-                    let system_prompt = build_session_system_prompt(
+                    let skills_prompt = if enabled_tools.contains(&"read") {
+                        resources.format_skills_for_prompt()
+                    } else {
+                        String::new()
+                    };
+                    let system_prompt = pi::app::build_system_prompt(
                         &cli,
                         &cwd,
                         &enabled_tools,
-                        &resources,
-                        &selection.model_entry,
+                        if skills_prompt.is_empty() {
+                            None
+                        } else {
+                            Some(skills_prompt.as_str())
+                        },
                         &global_dir,
                         &package_dir,
                         test_mode,
+                        !cli.hide_cwd_in_prompt,
                     )?;
                     agent_session.agent.set_system_prompt(Some(system_prompt));
                 }
@@ -1648,28 +1758,6 @@ async fn run(
             flags = %rendered,
             "Extension flags provided but no extensions are loaded; ignoring."
         );
-    }
-
-    if !cli.no_skills {
-        if let Err(err) = resources.extend_with_model_skills(&cwd, &selection.model_entry) {
-            tracing::warn!(
-                event = "pi.resources.model_skills_failed",
-                error = %err,
-                "Failed to load model-specific skills"
-            );
-        } else {
-            let system_prompt = build_session_system_prompt(
-                &cli,
-                &cwd,
-                &enabled_tools,
-                &resources,
-                &selection.model_entry,
-                &global_dir,
-                &package_dir,
-                test_mode,
-            )?;
-            agent_session.agent.set_system_prompt(Some(system_prompt));
-        }
     }
 
     if has_extensions {
@@ -1711,9 +1799,6 @@ async fn run(
         )
         .map_err(anyhow::Error::new)?;
         agent_session.agent.set_provider(provider);
-        agent_session
-            .agent
-            .set_tool_use_profile(selection.model_entry.tool_use_profile.clone());
         {
             let stream_options = agent_session.agent.stream_options_mut();
             stream_options.api_key.clone_from(&resolved_key);
@@ -1832,10 +1917,10 @@ async fn run(
     // (clippy::future_not_send).
     if !cli.no_session {
         let cx = pi::agent_cx::AgentCx::for_request();
-        if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx).await {
-            if let Err(e) = guard.flush_autosave_on_shutdown().await {
-                eprintln!("Warning: Failed to flush session autosave: {e}");
-            }
+        if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx).await
+            && let Err(e) = guard.flush_autosave_on_shutdown().await
+        {
+            eprintln!("Warning: Failed to flush session autosave: {e}");
         }
     }
 
@@ -3704,7 +3789,7 @@ fn normalize_display_path(path: &Path) -> String {
 }
 
 fn spawn_session_index_maintenance() {
-    const MAX_INDEX_AGE: Duration = Duration::from_secs(60 * 30);
+    const MAX_INDEX_AGE: Duration = Duration::from_mins(30);
     let index = SessionIndex::new();
 
     // Always spawn the background thread to handle cleanup, regardless of reindexing needs.
@@ -3713,10 +3798,10 @@ fn spawn_session_index_maintenance() {
         // Clean up old bash tool logs in background
         pi::tools::cleanup_temp_files();
 
-        if index.should_reindex(MAX_INDEX_AGE) {
-            if let Err(err) = index.reindex_all() {
-                eprintln!("Warning: failed to reindex session index: {err}");
-            }
+        if index.should_reindex(MAX_INDEX_AGE)
+            && let Err(err) = index.reindex_all()
+        {
+            eprintln!("Warning: failed to reindex session index: {err}");
         }
     });
 }
@@ -4380,18 +4465,13 @@ fn extension_safety_for_source(
     source: &str,
     index: Option<&ExtensionIndex>,
 ) -> ExtensionSafetyProvenance {
-    if let Some(index) = index {
-        if let Some(entry) = index
+    if let Some(index) = index
+        && let Some(entry) = index
             .entries
             .iter()
             .find(|entry| entry.install_source.as_deref() == Some(source))
-        {
-            return ExtensionSafetyProvenance::from_index_entry(
-                entry,
-                index,
-                DEFAULT_INDEX_MAX_AGE,
-            );
-        }
+    {
+        return ExtensionSafetyProvenance::from_index_entry(entry, index, DEFAULT_INDEX_MAX_AGE);
     }
     ExtensionSafetyProvenance::from_install_source(source)
 }
@@ -4663,14 +4743,13 @@ impl ConfigUiApp {
     }
 
     fn toggle_selected(&mut self) {
-        if let Some((pkg_idx, res_idx)) = self.selected_coords() {
-            if let Some(resource) = self
+        if let Some((pkg_idx, res_idx)) = self.selected_coords()
+            && let Some(resource) = self
                 .packages
                 .get_mut(pkg_idx)
                 .and_then(|pkg| pkg.resources.get_mut(res_idx))
-            {
-                resource.enabled = !resource.enabled;
-            }
+        {
+            resource.enabled = !resource.enabled;
         }
     }
 
@@ -5581,20 +5660,106 @@ fn should_fingerprint_model_env_var(key: &str) -> bool {
         .any(|meta| meta.auth_env_keys.contains(&key))
 }
 
-fn append_file_fingerprint(hasher: &mut Sha256, path: &Path) {
-    hasher.update(path.to_string_lossy().as_bytes());
-    match fs::metadata(path) {
+const LIST_MODELS_CACHE_FINGERPRINT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+#[cfg(unix)]
+fn open_fingerprint_file(path: &Path) -> io::Result<fs::File> {
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    Ok(fs::File::from(descriptor))
+}
+
+#[cfg(not(unix))]
+fn open_fingerprint_file(path: &Path) -> io::Result<fs::File> {
+    fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    true
+}
+
+fn append_file_fingerprint(hasher: &mut Sha256, path: &Path) -> bool {
+    let path_bytes = path.as_os_str().as_encoded_bytes();
+    hasher.update((path_bytes.len() as u64).to_le_bytes());
+    hasher.update(path_bytes);
+    match fs::symlink_metadata(path) {
         Ok(meta) => {
             hasher.update([1]);
-            hasher.update(meta.len().to_le_bytes());
-            if let Ok(modified) = meta.modified() {
-                if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
-                    hasher.update(duration.as_secs().to_le_bytes());
-                    hasher.update(duration.subsec_nanos().to_le_bytes());
-                }
+            if !meta.file_type().is_file() || meta.len() > LIST_MODELS_CACHE_FINGERPRINT_MAX_BYTES {
+                hasher.update([5]);
+                return false;
             }
+            hasher.update(meta.len().to_le_bytes());
+            let modified = meta.modified().ok();
+            if let Some(modified) = modified
+                && let Ok(duration) = modified.duration_since(UNIX_EPOCH)
+            {
+                hasher.update(duration.as_secs().to_le_bytes());
+                hasher.update(duration.subsec_nanos().to_le_bytes());
+            }
+            let Ok(file) = open_fingerprint_file(path) else {
+                hasher.update([3]);
+                return false;
+            };
+            let Ok(capacity) = usize::try_from(meta.len()) else {
+                hasher.update([4]);
+                return false;
+            };
+            let mut contents = Vec::with_capacity(capacity);
+            let mut limited = file.take(LIST_MODELS_CACHE_FINGERPRINT_MAX_BYTES + 1);
+            if limited.read_to_end(&mut contents).is_err()
+                || contents.len() as u64 != meta.len()
+                || contents.len() as u64 > LIST_MODELS_CACHE_FINGERPRINT_MAX_BYTES
+            {
+                hasher.update([4]);
+                return false;
+            }
+            let Ok(opened_after) = limited.get_ref().metadata() else {
+                hasher.update([6]);
+                return false;
+            };
+            let Ok(after) = fs::symlink_metadata(path) else {
+                hasher.update([6]);
+                return false;
+            };
+            if !opened_after.file_type().is_file()
+                || !same_file_identity(&meta, &opened_after)
+                || opened_after.len() != meta.len()
+                || opened_after.modified().ok() != modified
+                || !after.file_type().is_file()
+                || !same_file_identity(&opened_after, &after)
+                || after.len() != meta.len()
+                || after.modified().ok() != modified
+            {
+                hasher.update([7]);
+                return false;
+            }
+            hasher.update([2]);
+            hasher.update(contents);
+            true
         }
-        Err(_) => hasher.update([0]),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            hasher.update([0]);
+            true
+        }
+        Err(_) => {
+            hasher.update([8]);
+            false
+        }
     }
 }
 
@@ -5602,17 +5767,26 @@ fn list_models_cache_path(models_path: &Path) -> Option<PathBuf> {
     let mut hasher = Sha256::new();
     hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
     hasher.update(pi::models::model_catalog_cache_fingerprint().to_le_bytes());
-    append_file_fingerprint(&mut hasher, &Config::auth_path());
-    append_file_fingerprint(&mut hasher, models_path);
+    if !append_file_fingerprint(&mut hasher, &Config::auth_path())
+        || !append_file_fingerprint(&mut hasher, models_path)
+        || !append_file_fingerprint(&mut hasher, &fetched_models_path(models_path))
+    {
+        return None;
+    }
 
-    let mut env_vars = std::env::vars()
-        .filter(|(key, _)| should_fingerprint_model_env_var(key))
+    let mut env_vars = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            should_fingerprint_model_env_var(&key).then_some((key, value))
+        })
         .collect::<Vec<_>>();
     env_vars.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     for (key, value) in env_vars {
         hasher.update(key.as_bytes());
         hasher.update([0xff]);
-        hasher.update(value.as_bytes());
+        let value = value.as_os_str().as_encoded_bytes();
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value);
         hasher.update([0x00]);
     }
 
@@ -5658,62 +5832,212 @@ fn save_list_models_cache(models_path: &Path, payload: &ListModelsCachePayload) 
     }
 }
 
-async fn handle_fetch_models(provider: &str, refresh: bool) -> Result<()> {
-    // Resolve the API key: prefer the user's auth.json credential for the
-    // provider, then fall back to environment variables advertised in the
-    // canonical metadata.  An empty key triggers the static-registry path
-    // inside `fetch_provider_models` itself.
-    let api_key = resolve_provider_api_key(provider);
-
-    let models = if refresh {
-        pi::providers::refresh_provider_models(provider, &api_key).await
-    } else {
-        pi::providers::fetch_provider_models(provider, &api_key).await
-    };
-
-    let models = match models {
-        Ok(models) => models,
-        Err(err) => {
-            // `fetch_provider_models` only returns Err for inputs that can
-            // never produce a useful list (unknown provider, etc.); surface
-            // those clearly rather than dumping the empty static fallback.
-            eprintln!("Failed to list models for {provider:?}: {err}");
-            return Err(anyhow::anyhow!(err.to_string()));
-        }
-    };
-
-    if models.is_empty() {
-        eprintln!(
-            "No models available for {provider:?} (static registry is empty and live fetch failed). \
-             Run with RUST_LOG=warn for fallback diagnostics."
+async fn handle_fetch_models(
+    provider: &str,
+    api_key_override: Option<&str>,
+    refresh: bool,
+    persist: bool,
+) -> Result<()> {
+    // SAP service-key resolution performs a token exchange. Establish that a
+    // usable live-catalog route exists first so an unsupported native adapter
+    // cannot trigger an unnecessary credential network request. Explicit
+    // models.json SAP routes continue through the normal exchange path.
+    if pi::provider_metadata::canonical_provider_id(provider)
+        .is_some_and(|canonical| canonical == "sap-ai-core")
+        && !pi::providers::model_fetch::provider_model_catalog_route_is_configured(provider)?
+    {
+        bail!(
+            "provider {provider:?} has no built-in or models.json routing configuration for live model discovery"
         );
-    } else {
-        let stdout = io::stdout();
-        let mut out = io::BufWriter::new(stdout.lock());
-        for id in &models {
-            let _ = writeln!(out, "{id}");
-        }
-        let _ = out.flush();
     }
+
+    // Resolve the route before auth storage so keyless routes and routes with a
+    // complete custom Authorization header cannot be delayed or rejected by an
+    // unrelated auth.json lock. The plan keeps configured fallback credentials
+    // lazy and reuses the already-resolved route headers for the actual request.
+    let fetch_plan = pi::providers::prepare_provider_model_catalog_fetch(provider)?;
+    let api_key = if fetch_plan.requires_runtime_api_key() {
+        // Use the normal credential resolver: an explicit CLI override wins,
+        // then stored OAuth/Bearer credentials, provider environment variables,
+        // stored API keys, and supported external-CLI credentials.
+        resolve_provider_api_key(provider, api_key_override).await?
+    } else {
+        String::new()
+    };
+
+    let catalog = fetch_plan.fetch(&api_key, refresh).await;
+
+    let catalog = catalog.map_err(anyhow::Error::new)?;
+
+    let used_static_fallback = matches!(
+        catalog.source(),
+        pi::providers::ModelCatalogSource::StaticFallback
+    );
+
+    if persist {
+        if used_static_fallback {
+            bail!(
+                "Refusing to persist the static fallback for {provider:?}; \
+                 configure provider credentials and retry a successful live fetch"
+            );
+        }
+        let models_path = default_models_path(&Config::global_dir());
+        let fetched_path = pi::providers::persist_provider_model_catalog(&models_path, &catalog)?;
+        eprintln!(
+            "Persisted {} models for {provider:?} to {}",
+            catalog.models().len(),
+            fetched_path.display()
+        );
+    }
+
+    if catalog.models().is_empty() {
+        bail!(
+            "No models available for {provider:?}: live discovery failed and the static registry \
+             has no matching entries. Check the provider name and credentials."
+        );
+    }
+
+    if used_static_fallback {
+        eprintln!(
+            "Warning: live model discovery for {provider:?} was unavailable; \
+             showing the static registry instead. Use --refresh-models to require a live result."
+        );
+    }
+
+    let stdout = io::stdout();
+    let mut out = io::BufWriter::new(stdout.lock());
+    for id in catalog.models() {
+        writeln!(out, "{id}")?;
+    }
+    out.flush()?;
     Ok(())
 }
 
-fn resolve_provider_api_key(provider: &str) -> String {
-    if let Ok(auth) = AuthStorage::load(Config::auth_path()) {
-        if let Some(key) = auth.api_key(provider) {
-            if !key.trim().is_empty() {
-                return key;
+async fn resolve_provider_api_key(provider: &str, override_key: Option<&str>) -> Result<String> {
+    resolve_provider_api_key_with_auth_path_and_env(
+        provider,
+        override_key,
+        Config::auth_path(),
+        |name| std::env::var(name).ok(),
+    )
+    .await
+}
+
+fn resolve_ambient_provider_api_key_with_env<F>(provider: &str, mut env: F) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let canonical_provider =
+        pi::provider_metadata::canonical_provider_id(provider).unwrap_or(provider);
+    let env_keys: &[&str] = match canonical_provider {
+        // The remaining AWS variables are structured credential-chain inputs,
+        // not standalone bearer tokens. Preserve AuthStorage's normal rule.
+        "amazon-bedrock" => &["AWS_BEARER_TOKEN_BEDROCK"],
+        // SAP's structured environment is exchanged by its provider-owned path.
+        "sap-ai-core" => &[],
+        _ => provider_metadata::provider_auth_env_keys(canonical_provider),
+    };
+    env_keys.iter().find_map(|name| {
+        env(name).and_then(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
+    })
+}
+
+async fn resolve_provider_api_key_with_auth_path_and_env<F>(
+    provider: &str,
+    override_key: Option<&str>,
+    auth_path: PathBuf,
+    ambient_env: F,
+) -> Result<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if let Some(key) = override_key.map(str::trim).filter(|key| !key.is_empty()) {
+        if pi::provider_metadata::canonical_provider_id(provider)
+            .is_some_and(|canonical| canonical == "sap-ai-core")
+        {
+            return Ok(pi::auth::resolve_sap_auth_candidate(key)
+                .await?
+                .unwrap_or_default());
+        }
+        return Ok(key.to_string());
+    }
+    match AuthStorage::load_with_lock_timeout_classified(
+        auth_path,
+        pi::auth::AUTH_RESOLUTION_LOCK_TIMEOUT,
+    ) {
+        Ok(mut auth) => {
+            let requested_oauth_expired = matches!(
+                auth.credential_status(provider),
+                pi::auth::CredentialStatus::OAuthExpired { .. }
+            );
+            let refresh_error = if requested_oauth_expired {
+                auth.refresh_expired_oauth_tokens().await.err()
+            } else {
+                None
+            };
+            let resolved = resolve_provider_api_key_from_auth(provider, &auth).await?;
+            if resolved.trim().is_empty() {
+                if let Some(error) = refresh_error {
+                    return Err(anyhow::Error::new(error));
+                }
+            } else if refresh_error.is_some() {
+                // Refresh processes all expiring stored OAuth entries. The requested provider may
+                // still have refreshed successfully (or resolved through its next normal source)
+                // even when an unrelated provider failed. Do not expose the aggregate refresh
+                // diagnostic here because provider error bodies can contain credential material.
+                tracing::warn!(
+                    provider,
+                    "one or more stored OAuth refreshes failed, but the requested model-catalog provider resolved successfully"
+                );
+            }
+            Ok(resolved)
+        }
+        Err(failure @ pi::auth::AuthStorageLoadFailure::LockTimeout(_)) => {
+            Err(anyhow::Error::new(failure.into_error()))
+        }
+        Err(pi::auth::AuthStorageLoadFailure::Other(error)) => {
+            tracing::warn!(
+                provider,
+                error = %error,
+                "stored provider credentials are unavailable; continuing model discovery without them"
+            );
+            if pi::provider_metadata::canonical_provider_id(provider)
+                .is_some_and(|canonical| canonical == "sap-ai-core")
+            {
+                Ok(pi::auth::resolve_ambient_sap_auth_token()
+                    .await?
+                    .unwrap_or_default())
+            } else {
+                Ok(
+                    resolve_ambient_provider_api_key_with_env(provider, ambient_env)
+                        .unwrap_or_default(),
+                )
             }
         }
     }
-    for env_key in provider_metadata::provider_auth_env_keys(provider) {
-        if let Ok(value) = std::env::var(env_key) {
-            if !value.trim().is_empty() {
-                return value;
-            }
-        }
+}
+
+async fn resolve_provider_api_key_from_auth(provider: &str, auth: &AuthStorage) -> Result<String> {
+    if pi::provider_metadata::canonical_provider_id(provider)
+        .is_some_and(|canonical| canonical == "sap-ai-core")
+    {
+        return Ok(pi::auth::resolve_sap_auth_token(auth, None)
+            .await?
+            .unwrap_or_default());
     }
-    String::new()
+
+    if let Some(key) = auth
+        .resolve_api_key(provider, None)
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+    {
+        return Ok(key);
+    }
+
+    Ok(String::new())
 }
 
 fn list_providers() {
@@ -6488,10 +6812,10 @@ async fn export_session(input_path: &str, output_path: Option<&str>) -> Result<P
     let html = pi::app::render_session_html(&session);
     let output_path = output_path.map_or_else(|| default_export_path(input), PathBuf::from);
 
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            asupersync::fs::create_dir_all(parent).await?;
-        }
+    if let Some(parent) = output_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        asupersync::fs::create_dir_all(parent).await?;
     }
     asupersync::fs::write(&output_path, html).await?;
     Ok(output_path)
@@ -6769,7 +7093,7 @@ impl PrintTextStreamState {
     }
 }
 
-fn streamed_text_delta(event: &AgentEvent) -> Option<&str> {
+const fn streamed_text_delta(event: &AgentEvent) -> Option<&str> {
     match event {
         AgentEvent::MessageUpdate {
             assistant_message_event: pi::model::AssistantMessageEvent::TextDelta { delta, .. },
@@ -7201,6 +7525,28 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    fn spawn_auth_response_server(status: u16, body: &str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind auth fixture");
+        let address = listener.local_addr().expect("auth fixture address");
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept auth request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("bound auth request read");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            let reason = if status == 200 { "OK" } else { "Unauthorized" };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write auth response");
+        });
+        format!("http://{address}/token")
+    }
+
     fn render_model_table_for_test<R: ModelTableRow>(rows: &[R]) -> String {
         let mut buf = Vec::new();
         write_model_table(&mut buf, rows).expect("render model table");
@@ -7220,6 +7566,311 @@ mod tests {
     fn exit_code_classifier_defaults_to_general_failure() {
         let runtime_err = anyhow::Error::new(pi::error::Error::auth("missing key"));
         assert_eq!(exit_code_for_error(&runtime_err), EXIT_CODE_FAILURE);
+    }
+
+    #[test]
+    fn fetch_models_api_key_override_has_highest_precedence() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let resolved = runtime
+            .block_on(resolve_provider_api_key(
+                "openai",
+                Some("  explicit-cli-key  "),
+            ))
+            .expect("explicit key resolution");
+        assert_eq!(resolved, "explicit-cli-key");
+    }
+
+    #[test]
+    fn fetch_models_auth_load_failures_preserve_only_ambient_provider_keys() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let directory = TempDir::new().expect("tempdir");
+        let invalid_utf8 = directory.path().join("invalid-auth.json");
+        fs::write(&invalid_utf8, [0xff]).expect("write invalid UTF-8 auth fixture");
+        let oversized = directory.path().join("oversized-auth.json");
+        fs::write(&oversized, vec![b' '; 2 * 1024 * 1024]).expect("write oversized auth fixture");
+        let nonregular = directory.path().join("directory-auth.json");
+        fs::create_dir(&nonregular).expect("create non-regular auth fixture");
+
+        for auth_path in [&invalid_utf8, &oversized, &nonregular] {
+            let resolved = runtime
+                .block_on(resolve_provider_api_key_with_auth_path_and_env(
+                    "openai",
+                    None,
+                    (*auth_path).clone(),
+                    |name| {
+                        (name == "OPENAI_API_KEY").then(|| "  ambient-provider-value  ".to_string())
+                    },
+                ))
+                .expect("ambient key remains usable after non-lock auth load failure");
+            assert_eq!(resolved, "ambient-provider-value");
+        }
+
+        let absent = runtime
+            .block_on(resolve_provider_api_key_with_auth_path_and_env(
+                "openai",
+                None,
+                invalid_utf8,
+                |_| None,
+            ))
+            .expect("missing ambient key remains an explicit empty result");
+        assert!(absent.is_empty());
+    }
+
+    #[test]
+    fn fetch_models_refreshes_expired_oauth_for_requested_provider() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let directory = TempDir::new().expect("tempdir");
+        let auth_path = directory.path().join("auth.json");
+        let token_url = spawn_auth_response_server(
+            200,
+            r#"{"access_token":"refreshed-catalog-token","refresh_token":"next-refresh-token","expires_in":3600}"#,
+        );
+        let mut auth = AuthStorage::load(auth_path.clone()).expect("load auth");
+        auth.set(
+            "custom-openai",
+            AuthCredential::OAuth {
+                extra: std::collections::HashMap::new(),
+                access_token: "expired-catalog-token".to_string(),
+                refresh_token: "catalog-refresh-token".to_string(),
+                expires: 0,
+                token_url: Some(token_url),
+                client_id: Some("catalog-client".to_string()),
+            },
+        );
+        auth.save().expect("save expired OAuth fixture");
+
+        let resolved = runtime
+            .block_on(resolve_provider_api_key_with_auth_path_and_env(
+                "custom-openai",
+                None,
+                auth_path.clone(),
+                |_| None,
+            ))
+            .expect("refresh requested provider OAuth");
+
+        assert_eq!(resolved, "refreshed-catalog-token");
+        let reloaded = AuthStorage::load(auth_path).expect("reload refreshed auth");
+        assert_eq!(
+            reloaded.api_key("custom-openai").as_deref(),
+            Some("refreshed-catalog-token"),
+            "the normal OAuth lifecycle must durably retain the refreshed credential"
+        );
+    }
+
+    #[test]
+    fn fetch_models_returns_requested_provider_oauth_refresh_failure() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let directory = TempDir::new().expect("tempdir");
+        let auth_path = directory.path().join("auth.json");
+        let token_url = spawn_auth_response_server(401, r#"{"error":"invalid_grant"}"#);
+        let mut auth = AuthStorage::load(auth_path.clone()).expect("load auth");
+        auth.set(
+            "custom-openai",
+            AuthCredential::OAuth {
+                extra: std::collections::HashMap::new(),
+                access_token: "expired-catalog-token".to_string(),
+                refresh_token: "rejected-refresh-token".to_string(),
+                expires: 0,
+                token_url: Some(token_url),
+                client_id: Some("catalog-client".to_string()),
+            },
+        );
+        auth.save().expect("save expired OAuth fixture");
+
+        let error = runtime
+            .block_on(resolve_provider_api_key_with_auth_path_and_env(
+                "custom-openai",
+                None,
+                auth_path,
+                |_| None,
+            ))
+            .expect_err("the requested provider refresh failure must be surfaced");
+
+        let message = error.to_string();
+        assert!(message.contains("custom-openai"), "{message}");
+        assert!(message.contains("token refresh failed"), "{message}");
+    }
+
+    #[test]
+    fn fetch_models_sap_auth_uses_stored_bearer_or_exchanges_service_key() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let directory = TempDir::new().expect("tempdir");
+        let auth_path = directory.path().join("auth.json");
+        let mut auth = AuthStorage::load(auth_path).expect("load auth");
+
+        auth.set(
+            "sap-ai-core",
+            AuthCredential::BearerToken {
+                token: "stored-sap-bearer".to_string(),
+            },
+        );
+        let bearer = runtime
+            .block_on(resolve_provider_api_key_from_auth("sap", &auth))
+            .expect("resolve stored SAP bearer");
+        assert_eq!(bearer, "stored-sap-bearer");
+
+        let token_url =
+            spawn_auth_response_server(200, r#"{"access_token":"exchanged-sap-token"}"#);
+        auth.set(
+            "sap-ai-core",
+            AuthCredential::ServiceKey {
+                client_id: Some("sap-client".to_string()),
+                // ubs:ignore test fixture credential, not live secret.
+                client_secret: Some("sap-secret".to_string()),
+                token_url: Some(token_url),
+                service_url: Some("https://api.ai.sap.example.com".to_string()),
+            },
+        );
+        let exchanged = runtime
+            .block_on(resolve_provider_api_key_from_auth("sap-ai-core", &auth))
+            .expect("exchange SAP service credentials");
+        assert_eq!(exchanged, "exchanged-sap-token");
+
+        let explicit_token_url =
+            spawn_auth_response_server(200, r#"{"access_token":"explicit-sap-token"}"#);
+        let explicit_service_key = serde_json::json!({
+            "clientid": "explicit-client",
+            // ubs:ignore test fixture credential, not live secret.
+            "clientsecret": "explicit-secret",
+            "url": explicit_token_url,
+            "serviceurls": {"AI_API_URL": "https://api.ai.sap.example.com"}
+        })
+        .to_string();
+        let explicit = runtime
+            .block_on(resolve_provider_api_key("sap", Some(&explicit_service_key)))
+            .expect("exchange explicit SAP service key");
+        assert_eq!(explicit, "explicit-sap-token");
+    }
+
+    #[test]
+    fn fetch_models_option_scan_stops_at_positional_separator() {
+        let raw_args = [
+            "pi",
+            "--fetch-models",
+            "openai",
+            "--",
+            "--hide-cwd-in-prompt",
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+        let (cli, extension_flags) = parse_cli_args(raw_args.clone())
+            .expect("parse result")
+            .expect("parsed CLI");
+        assert_eq!(cli.args, vec!["--hide-cwd-in-prompt"]);
+
+        let error = validate_fetch_models_is_standalone(&cli, &extension_flags, &raw_args)
+            .expect_err("positional prompt remains incompatible with standalone fetch");
+        let message = error.to_string();
+        assert!(message.contains("prompt or file arguments"), "{message}");
+        assert!(
+            !message.contains("prompt or file arguments, --hide-cwd-in-prompt"),
+            "the positional token must not be misclassified as an explicit flag: {message}"
+        );
+    }
+
+    #[test]
+    fn fetch_models_accepts_text_output_but_rejects_non_text_and_startup_resource_flags() {
+        let text_args = [
+            "pi",
+            "--fetch-models",
+            "openai",
+            "--print",
+            "--mode",
+            "text",
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+        let (cli, extension_flags) = parse_cli_args(text_args.clone())
+            .expect("parse result")
+            .expect("parsed CLI");
+        validate_fetch_models_is_standalone(&cli, &extension_flags, &text_args)
+            .expect("redundant text output flags remain valid for standalone fetch");
+
+        let conflicting_args = [
+            "pi",
+            "--fetch-models",
+            "openai",
+            "--mode",
+            "json",
+            "--no-migrations",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+        ]
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+        let (cli, extension_flags) = parse_cli_args(conflicting_args.clone())
+            .expect("parse result")
+            .expect("parsed CLI");
+
+        let error = validate_fetch_models_is_standalone(&cli, &extension_flags, &conflicting_args)
+            .expect_err("standalone fetch must reject silently ignored flags");
+        let message = error.to_string();
+        for expected in [
+            "output-mode arguments",
+            "--no-migrations",
+            "resource-discovery disable arguments",
+        ] {
+            assert!(
+                message.contains(expected),
+                "missing {expected:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn file_fingerprint_binds_content_even_when_size_and_mtime_match() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("models.fetched.json");
+        fs::write(&path, b"first").expect("write first bytes");
+        let original_mtime = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .expect("first mtime");
+        let digest = |path: &Path| {
+            let mut hasher = Sha256::new();
+            assert!(append_file_fingerprint(&mut hasher, path));
+            format!("{:x}", hasher.finalize())
+        };
+        let first = digest(&path);
+
+        fs::write(&path, b"other").expect("replace with same-length bytes");
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(original_mtime))
+            .expect("restore exact mtime");
+        assert_eq!(fs::metadata(&path).expect("metadata").len(), 5);
+        assert_ne!(
+            first,
+            digest(&path),
+            "same-size, same-mtime replacements must invalidate the list-models cache"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_fingerprint_rejects_symlink_to_non_regular_input_without_opening_it() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("models.fetched.json");
+        symlink("/dev/zero", &path).expect("create device symlink");
+        let mut hasher = Sha256::new();
+        assert!(
+            !append_file_fingerprint(&mut hasher, &path),
+            "non-regular or symlinked cache inputs must disable the fast-path cache"
+        );
     }
 
     #[test]
@@ -7357,10 +8008,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let auth_path = temp.path().join("auth.json");
         let auth = AuthStorage::load(auth_path).expect("auth load");
-        // 隔离环境变量: 否则本机 OPENAI_API_KEY 会让 openai 模型误判为"已配置"
-        let registry = ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
-            auth.resolve_api_key_with_env(provider, None, |_| None)
-        });
+        let registry = ModelRegistry::load(&auth, None);
 
         let without_cli_key = rpc_available_models(&registry, None);
         assert!(
@@ -7384,9 +8032,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let auth_path = temp.path().join("auth.json");
         let auth = AuthStorage::load(auth_path).expect("auth load");
-        let registry = ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
-            auth.resolve_api_key_with_env(provider, None, |_| None)
-        });
+        let registry = ModelRegistry::load(&auth, None);
 
         let available_models = rpc_available_models(&registry, Some("   "));
         assert!(
@@ -8175,6 +8821,7 @@ mod tests {
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Error,
+            stop_details: None,
             error_message: Some("429 rate limit exceeded".to_string()),
             timestamp: 0,
         };
@@ -8182,12 +8829,14 @@ mod tests {
 
         let not_retryable = AssistantMessage {
             error_message: Some("invalid api key".to_string()),
+            stop_details: None,
             ..retryable.clone()
         };
         assert!(!is_retryable_prompt_result(&not_retryable));
 
         let success = AssistantMessage {
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             ..retryable
         };
@@ -8214,6 +8863,7 @@ mod tests {
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Error,
+            stop_details: None,
             error_message: Some(flattened),
             timestamp: 0,
         };
@@ -8284,6 +8934,7 @@ mod tests {
             model: "test-model".to_string(),
             usage: pi::model::Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         });
@@ -8305,6 +8956,7 @@ mod tests {
                 model: "test-model".to_string(),
                 usage: pi::model::Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             }),

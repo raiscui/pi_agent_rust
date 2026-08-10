@@ -208,7 +208,7 @@ cargo test conformance
 ```
 CLI (clap) → main/app/config/resources → Agent Session
                          ↓
-Provider Layer (10 native provider implementation modules + extension providers)
+Provider Layer (11 native provider implementation modules + extension providers)
                          ↓
 Tool Registry (built-ins + extension tools) ↔ Extension Runtime (QuickJS + capability policy)
                          ↓
@@ -231,10 +231,11 @@ Session persistence + index (JSONL, default-enabled SQLite backend support)
 | `src/providers/cohere.rs` | Cohere API implementation |
 | `src/providers/azure.rs` | Azure OpenAI API implementation |
 | `src/providers/mod.rs` | Provider factory and extension stream-simple bridge |
-| `src/tools.rs` | 8 built-in tools |
+| `src/tools.rs` | 9 built-in tools (`subagent` is opt-in) |
 | `src/interactive.rs` | Interactive TUI application state and event loop |
 | `src/rpc.rs` | RPC/stdin server mode |
-| `src/extensions.rs` | Extension protocol, policy, and host integration |
+| `src/extensions.rs` | Stable extension facade, public contracts, manager state, and shared entry points |
+| `src/extensions/` | Focused manager, protocol, policy, connector, runtime, and behavior-domain test modules |
 | `src/extensions_js.rs` | QuickJS runtime bridge and hostcalls |
 | `src/resources.rs` | Skills/prompt/theme/extension resource loading |
 | `src/models.rs` | Built-in and `models.json` registry resolution |
@@ -267,6 +268,7 @@ Session persistence + index (JSONL, default-enabled SQLite backend support)
 - `find` - File discovery with glob patterns
 - `ls` - Directory listing
 - `hashline_edit` - Precise edits using `LINE#HASH` tags from `read`/`grep` with `hashline=true`
+- `subagent` - Native isolated Rust Pi child-agent delegation (opt-in via `--tools ...subagent`)
 
 **Session Management:**
 - JSONL format (version 3)
@@ -294,7 +296,7 @@ This port uses two key libraries from sibling projects:
 **Current Status:**
 - asupersync powers runtime + HTTP/TLS + cancellation + optional SQLite integration
 - rich_rust/charmed_rust stack powers the interactive terminal UI
-- Provider layer has 10 native provider implementation modules in `src/providers/`: Anthropic, OpenAI Chat, OpenAI Responses/Codex Responses, Gemini, Cohere, Azure OpenAI, Bedrock, Vertex AI, GitHub Copilot, and GitLab Duo
+- Provider layer has 11 native provider implementation modules in `src/providers/`: Anthropic, OpenAI Chat, OpenAI Responses/Codex Responses, Gemini, Cohere, Azure OpenAI, Bedrock, Vertex AI, GitHub Copilot, GitLab Duo, and Cursor
 - Extension runtime, capability policy, and conformance harness are integrated
 
 ### Performance Targets

@@ -267,14 +267,14 @@ impl Provider for AzureOpenAIProvider {
         }
 
         // Apply provider-specific custom headers from compat config.
-        if let Some(compat) = &self.compat {
-            if let Some(custom_headers) = &compat.custom_headers {
-                request = super::apply_headers_ignoring_blank_auth_overrides(
-                    request,
-                    custom_headers,
-                    &["authorization", "api-key"],
-                );
-            }
+        if let Some(compat) = &self.compat
+            && let Some(custom_headers) = &compat.custom_headers
+        {
+            request = super::apply_headers_ignoring_blank_auth_overrides(
+                request,
+                custom_headers,
+                &["authorization", "api-key"],
+            );
         }
 
         request = super::apply_headers_ignoring_blank_auth_overrides(
@@ -420,6 +420,7 @@ where
                 model,
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },
@@ -1041,6 +1042,7 @@ mod tests {
                     model: "gpt-4o".to_string(),
                     usage: Usage::default(),
                     stop_reason: StopReason::ToolUse,
+                    stop_details: None,
                     error_message: None,
                     timestamp: 0,
                 }),
@@ -1607,6 +1609,8 @@ mod tests {
             StopReason::Stop => "stop",
             StopReason::Length => "length",
             StopReason::ToolUse => "tool_use",
+            StopReason::PauseTurn => "pause_turn",
+            StopReason::Refusal => "refusal",
             StopReason::Error => "error",
             StopReason::Aborted => "aborted",
         }

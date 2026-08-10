@@ -140,10 +140,10 @@ pub async fn collect_extension_tool_wrappers(
 
         wasm_defs.sort_by(|a, b| a.0.name.cmp(&b.0.name));
         for (def, handle) in wasm_defs {
-            if let Some(active) = active.as_ref() {
-                if !active.contains(&def.name) {
-                    continue;
-                }
+            if let Some(active) = active.as_ref()
+                && !active.contains(&def.name)
+            {
+                continue;
             }
             if !seen.insert(def.name.clone()) {
                 tracing::warn!(tool = %def.name, "Duplicate extension tool name; ignoring");
@@ -536,6 +536,7 @@ mod tests {
                     model: "test-model".to_string(),
                     usage: Usage::default(),
                     stop_reason: StopReason::Stop,
+                    stop_details: None,
                     error_message: None,
                     timestamp: 0,
                 }

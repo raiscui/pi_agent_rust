@@ -1634,12 +1634,11 @@ pub async fn run(
                             };
 
                             // Persist session outside the guard scope
-                            if should_persist {
-                                if let Ok(mut guard) =
+                            if should_persist
+                                && let Ok(mut guard) =
                                     OwnedMutexGuard::lock(Arc::clone(&session), &bash_cx).await
-                                {
-                                    let _ = guard.persist_session().await;
-                                }
+                            {
+                                let _ = guard.persist_session().await;
                             }
 
                             response_ok(
@@ -1658,10 +1657,10 @@ pub async fn run(
                     };
 
                     let _ = out_tx.send(response);
-                    if let Ok(mut running) = bash_state.lock(&bash_cx).await {
-                        if running.as_ref().is_some_and(|r| r.id == run_id) {
-                            *running = None;
-                        }
+                    if let Ok(mut running) = bash_state.lock(&bash_cx).await
+                        && running.as_ref().is_some_and(|r| r.id == run_id)
+                    {
+                        *running = None;
                     }
                 });
             }
@@ -3161,6 +3160,7 @@ mod retry_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             };
@@ -3232,6 +3232,7 @@ mod retry_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Error,
+                stop_details: None,
                 error_message: Some("server error".to_string()),
                 timestamp: 0,
             };
@@ -4594,16 +4595,15 @@ fn abandon_bash_rpc_spill_file(
 ) {
     *spill_failed = true;
     *temp_file = None;
-    if let Some(path) = temp_file_path.take() {
-        if let Err(e) = std::fs::remove_file(&path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::debug!(
-                "Failed to remove incomplete RPC bash spill file {}: {}",
-                path.display(),
-                e
-            );
-        }
+    if let Some(path) = temp_file_path.take()
+        && let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(
+            "Failed to remove incomplete RPC bash spill file {}: {}",
+            path.display(),
+            e
+        );
     }
 }
 
@@ -5561,6 +5561,7 @@ mod tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             };
@@ -5595,6 +5596,7 @@ mod tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             }
@@ -5677,6 +5679,7 @@ mod tests {
             model: "test-model".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         })
@@ -7654,6 +7657,7 @@ export default function init(pi) {
                         ..Usage::default()
                     },
                     stop_reason: StopReason::Stop,
+                    stop_details: None,
                     error_message: None,
                     timestamp: 0,
                 },
@@ -7673,6 +7677,7 @@ export default function init(pi) {
                         ..Usage::default()
                     },
                     stop_reason: StopReason::Stop,
+                    stop_details: None,
                     error_message: None,
                     timestamp: 0,
                 },

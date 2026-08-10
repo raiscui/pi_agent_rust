@@ -29,10 +29,8 @@ fn test_built_in_models_without_api_keys() {
     let auth = AuthStorage::load(auth_path).expect("load auth");
 
     harness.section("Load registry");
-    // 隔离环境变量: 避免本机 OPENAI_API_KEY 等污染 "无 key" 断言
-    let registry = ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
-        auth.resolve_api_key_with_env(provider, None, |_| None)
-    });
+    let registry =
+        ModelRegistry::load_with_credential_resolver(None, |provider| auth.api_key(provider));
 
     harness.section("Verify");
     harness
@@ -60,18 +58,11 @@ fn test_built_in_models_without_api_keys() {
         "Should have Google built-in models"
     );
 
-    // 没有 API key 时, 需要凭据的模型不可用 (内置表含 keyless 模型,
-    // 所以不能断言 available 为空, 改为断言代表性"要 key"模型不在其中)
+    // No models should be available (no API keys)
     let available = registry.get_available();
     assert!(
-        !available
-            .iter()
-            .any(|m| m.model.provider == "openai" && m.model.id == "gpt-4o"),
-        "gpt-4o should not be available without API keys"
-    );
-    assert!(
-        !available.iter().any(|m| m.model.provider == "anthropic"),
-        "Anthropic models should not be available without API keys"
+        available.is_empty(),
+        "No models should be available without API keys"
     );
 
     // No errors should be reported
@@ -89,10 +80,8 @@ fn test_built_in_models_with_anthropic_key() {
     let auth = AuthStorage::load(auth_path).expect("load auth");
 
     harness.section("Load registry");
-    // 隔离环境变量: 只信任 auth.json 内容
-    let registry = ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
-        auth.resolve_api_key_with_env(provider, None, |_| None)
-    });
+    let registry =
+        ModelRegistry::load_with_credential_resolver(None, |provider| auth.api_key(provider));
 
     harness.section("Verify");
     // Anthropic models should have API keys
@@ -117,19 +106,12 @@ fn test_built_in_models_with_anthropic_key() {
         "OpenAI models should not have API key"
     );
 
-    // Anthropic 模型应全部可用; OpenAI 的 gpt-4o 需要 OpenAI key, 不可用
+    // Available models should only be Anthropic
     let available = registry.get_available();
-    assert!(
-        available
-            .iter()
-            .any(|m| m.model.provider == "anthropic" && m.model.id == "claude-sonnet-4-20250514"),
-        "Anthropic models should be available with an Anthropic key"
-    );
-    assert!(
-        !available
-            .iter()
-            .any(|m| m.model.provider == "openai" && m.model.id == "gpt-4o"),
-        "OpenAI gpt-4o should not be available without an OpenAI key"
+    assert_eq!(
+        available.len(),
+        anthropic_models.len(),
+        "Only Anthropic models should be available"
     );
 }
 
@@ -672,10 +654,8 @@ fn test_get_available_filters_by_api_key() {
     let auth_content = r#"{"openai": {"type": "api_key", "key": "sk-test-key"}}"#;
     let auth_path = harness.create_file("auth.json", auth_content);
     let auth = AuthStorage::load(auth_path).expect("load auth");
-    // 隔离环境变量: 只信任 auth.json 内容
-    let registry = ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
-        auth.resolve_api_key_with_env(provider, None, |_| None)
-    });
+    let registry =
+        ModelRegistry::load_with_credential_resolver(None, |provider| auth.api_key(provider));
 
     harness.section("Verify");
     let available = registry.get_available();
@@ -690,16 +670,10 @@ fn test_get_available_filters_by_api_key() {
         }
     });
 
-    // OpenAI 的 gpt-4o 应可用; Anthropic 模型需要 Anthropic key, 不可用
+    // Only OpenAI models should be available
     assert!(
-        available
-            .iter()
-            .any(|m| m.model.provider == "openai" && m.model.id == "gpt-4o"),
-        "gpt-4o should be available with an OpenAI key"
-    );
-    assert!(
-        !available.iter().any(|m| m.model.provider == "anthropic"),
-        "Anthropic models should not be available without an Anthropic key"
+        available.iter().all(|m| m.model.provider == "openai"),
+        "Only OpenAI models should be available"
     );
     assert!(!available.is_empty(), "Should have available models");
 }
@@ -887,7 +861,8 @@ fn test_multiple_providers_with_keys() {
     }"#;
     let auth_path = harness.create_file("auth.json", auth_content);
     let auth = AuthStorage::load(auth_path).expect("load auth");
-    let registry = ModelRegistry::load(&auth, None);
+    let registry =
+        ModelRegistry::load_with_credential_resolver(None, |provider| auth.api_key(provider));
 
     harness.section("Verify");
     let available = registry.get_available();

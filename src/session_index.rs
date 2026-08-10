@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_JSONL_LINE_BYTES: usize = 100 * 1024 * 1024;
+// Directory locks become reclaimable after the proper-lockfile-compatible
+// 10-second stale horizon. Waiting longer than that is required for immediate
+// recovery when a process is killed while updating the session index.
+const SESSION_INDEX_LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct SessionMeta {
@@ -355,10 +359,7 @@ impl SessionIndex {
         // `self.lock_path` is `<sessions>/session-index.lock` — the same path
         // upstream TS pi locks with `proper-lockfile`. Use the directory-based
         // protocol (see `crate::file_lock`) so the two interoperate.
-        // 锁超时必须大于 DirLock 的 stale 阈值 (10s): 崩溃后残留的 fresh
-        // 锁目录要等 mtime 过期才能 reclaim, 5s 超时永远等不到 stale 锁,
-        // 导致崩溃恢复场景 (SIGINT/SIGHUP/kill) 无法重建索引
-        let _lock = crate::file_lock::DirLock::acquire(&self.lock_path, Duration::from_secs(15))
+        let _lock = crate::file_lock::DirLock::acquire(&self.lock_path, SESSION_INDEX_LOCK_TIMEOUT)
             .map_err(|e| Error::session(format!("session index lock: {e}")))?;
 
         let config = SqliteConfig::file(self.db_path.to_string_lossy())
@@ -808,10 +809,10 @@ pub(crate) fn session_file_stats(path: &Path) -> Result<(i64, u64)> {
 }
 
 pub(crate) fn is_session_file_path(path: &Path) -> bool {
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name.starts_with("session-index.") {
-            return false;
-        }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str())
+        && name.starts_with("session-index.")
+    {
+        return false;
     }
     match path.extension().and_then(|ext| ext.to_str()) {
         Some("jsonl") => true,
@@ -865,10 +866,11 @@ pub(crate) fn walk_sessions(root: &Path) -> Vec<std::io::Result<PathBuf>> {
                     stack.push(path);
                 } else if file_type.is_symlink() {
                     // Allow symlinks to files, but skip symlinked directories to avoid cycles
-                    if let Ok(meta) = fs::metadata(&path) {
-                        if meta.is_file() && is_session_file_path(&path) {
-                            out.push(Ok(path));
-                        }
+                    if let Ok(meta) = fs::metadata(&path)
+                        && meta.is_file()
+                        && is_session_file_path(&path)
+                    {
+                        out.push(Ok(path));
                     }
                 } else if is_session_file_path(&path) {
                     out.push(Ok(path));

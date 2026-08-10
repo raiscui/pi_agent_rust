@@ -172,6 +172,45 @@ fn bedrock_converse_json() -> serde_json::Value {
     })
 }
 
+fn cursor_connect_response() -> MockHttpResponse {
+    fn len_delimited(field: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(field < 16, "single-byte protobuf field required");
+        assert!(payload.len() < 128, "single-byte protobuf length required");
+        let mut encoded = Vec::with_capacity(payload.len() + 2);
+        encoded.push((field << 3) | 2);
+        encoded.push(u8::try_from(payload.len()).expect("payload length checked above"));
+        encoded.extend_from_slice(payload);
+        encoded
+    }
+
+    fn connect_frame(flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(payload.len() + 5);
+        frame.push(flags);
+        frame.extend_from_slice(
+            &u32::try_from(payload.len())
+                .expect("smoke payload fits in u32")
+                .to_be_bytes(),
+        );
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    let text_delta = len_delimited(1, b"pong");
+    let interaction_update = len_delimited(1, &text_delta);
+    let server_message = len_delimited(1, &interaction_update);
+    let mut body = connect_frame(0, &server_message);
+    body.extend(connect_frame(0b0000_0010, b"{}"));
+
+    MockHttpResponse {
+        status: 200,
+        headers: vec![(
+            "Content-Type".to_string(),
+            "application/connect+proto".to_string(),
+        )],
+        body,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Providers requiring special skip treatment
 // ═══════════════════════════════════════════════════════════════════════
@@ -1080,6 +1119,11 @@ fn run_smoke_stream(
             );
             (server.base_url(), path)
         }
+        "cursor-agent" => {
+            let path = "/agent.v1.AgentService/Run".to_string();
+            server.add_route("POST", &path, cursor_connect_response());
+            (server.base_url(), path)
+        }
         other => {
             harness
                 .log()
@@ -1177,23 +1221,23 @@ fn smoke_credentialed_openai_completions_presets_use_bearer_auth() {
         if meta.onboarding != ProviderOnboardingMode::OpenAICompatiblePreset {
             continue;
         }
-        if let Some(defaults) = meta.routing_defaults {
-            if defaults.api == "openai-completions" {
-                if meta.auth_env_keys.is_empty() {
-                    assert!(
-                        !defaults.auth_header,
-                        "local/no-auth preset {} should not require bearer auth",
-                        meta.canonical_id
-                    );
-                    continue;
-                }
+        if let Some(defaults) = meta.routing_defaults
+            && defaults.api == "openai-completions"
+        {
+            if meta.auth_env_keys.is_empty() {
                 assert!(
-                    defaults.auth_header,
-                    "openai-completions preset {} should have auth_header=true",
+                    !defaults.auth_header,
+                    "local/no-auth preset {} should not require bearer auth",
                     meta.canonical_id
                 );
-                checked += 1;
+                continue;
             }
+            assert!(
+                defaults.auth_header,
+                "openai-completions preset {} should have auth_header=true",
+                meta.canonical_id
+            );
+            checked += 1;
         }
     }
 

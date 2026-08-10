@@ -60,6 +60,7 @@ const VCR_BASIC_CHAT_TEST_NAME: &str = "e2e_tui_basic_chat";
 const VCR_MULTI_TOOL_CHAIN_TEST_NAME: &str = "e2e_tui_multi_tool_chain";
 const VCR_SCROLL_FINALIZE_TEST_NAME: &str = "e2e_tui_scroll_finalize";
 const VCR_MODEL: &str = "claude-sonnet-4-20250514";
+const VCR_MODEL_MAX_TOKENS: u32 = 64_000;
 const VCR_PROMPT: &str = "Read sample.txt";
 const VCR_BASIC_CHAT_PROMPT: &str = "Say hello";
 const VCR_BASIC_CHAT_RESPONSE: &str = "Hello! How can I help you today?";
@@ -292,7 +293,7 @@ fn write_vcr_basic_chat_cassette(dir: &Path, system_prompt: &str) -> PathBuf {
             { "role": "user", "content": [ { "type": "text", "text": VCR_BASIC_CHAT_PROMPT } ] }
         ],
         "system": system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
     });
 
@@ -382,7 +383,7 @@ fn write_vcr_scroll_finalize_cassette(dir: &Path, system_prompt: &str) -> PathBu
             { "role": "user", "content": [ { "type": "text", "text": VCR_SCROLL_FINALIZE_PROMPT } ] }
         ],
         "system": system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
     });
 
@@ -542,7 +543,7 @@ fn write_vcr_cassette_for_read(
             { "role": "user", "content": [ { "type": "text", "text": prompt } ] }
         ],
         "system": system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
         "tools": [tool_schema],
     });
@@ -575,7 +576,7 @@ fn write_vcr_cassette_for_read(
             }
         ],
         "system": system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
         "tools": [tool_schema],
     });
@@ -1740,7 +1741,7 @@ fn e2e_tui_basic_chat_vcr() {
             { "role": "user", "content": [ { "type": "text", "text": VCR_BASIC_CHAT_PROMPT } ] }
         ],
         "system": &system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
     });
     std::fs::write(
@@ -2701,22 +2702,22 @@ fn e2e_scenario_slash_command_workflow() {
         .artifacts
         .iter()
         .find(|a| a.name == "scenario-transcript.jsonl");
-    if let Some(artifact) = transcript_artifact {
-        if let Ok(actual_content) = std::fs::read_to_string(&artifact.path) {
-            let expected_lines = parse_transcript(&expected_jsonl);
-            let actual_lines = parse_transcript(&actual_content);
-            let diff = TranscriptDiff::compare(&expected_lines, &actual_lines);
+    if let Some(artifact) = transcript_artifact
+        && let Ok(actual_content) = std::fs::read_to_string(&artifact.path)
+    {
+        let expected_lines = parse_transcript(&expected_jsonl);
+        let actual_lines = parse_transcript(&actual_content);
+        let diff = TranscriptDiff::compare(&expected_lines, &actual_lines);
 
-            // Label and success should match; action format may differ slightly
-            assert!(
-                !diff
-                    .diffs
-                    .iter()
-                    .any(|d| d.field == "label" || d.field == "success"),
-                "Unexpected label/success diffs:\n{}",
-                diff.human_summary()
-            );
-        }
+        // Label and success should match; action format may differ slightly
+        assert!(
+            !diff
+                .diffs
+                .iter()
+                .any(|d| d.field == "label" || d.field == "success"),
+            "Unexpected label/success diffs:\n{}",
+            diff.human_summary()
+        );
     }
 }
 
@@ -2859,7 +2860,7 @@ fn e2e_scenario_error_api_failure() {
             { "role": "user", "content": [ { "type": "text", "text": error_prompt } ] }
         ],
         "system": &system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
     });
 
@@ -3088,46 +3089,45 @@ fn e2e_scenario_session_persistence_and_tree() {
         .artifacts
         .iter()
         .find(|a| a.name == "scenario-transcript.jsonl")
+        && let Ok(content) = std::fs::read_to_string(&transcript_artifact.path)
     {
-        if let Ok(content) = std::fs::read_to_string(&transcript_artifact.path) {
-            let lines = parse_transcript(&content);
+        let lines = parse_transcript(&content);
 
-            // Must have header
-            let headers: Vec<_> = lines
-                .iter()
-                .filter(|l| l.event_type.as_deref() == Some(EVENT_TYPE_HEADER))
-                .collect();
-            assert_eq!(headers.len(), 1, "transcript must have exactly 1 header");
-            assert_eq!(headers[0].value["scenario_name"].as_str(), Some(test_name));
+        // Must have header
+        let headers: Vec<_> = lines
+            .iter()
+            .filter(|l| l.event_type.as_deref() == Some(EVENT_TYPE_HEADER))
+            .collect();
+        assert_eq!(headers.len(), 1, "transcript must have exactly 1 header");
+        assert_eq!(headers[0].value["scenario_name"].as_str(), Some(test_name));
 
-            // Must have step results
-            let step_count = lines
-                .iter()
-                .filter(|l| l.event_type.as_deref() == Some(EVENT_TYPE_STEP))
-                .count();
-            assert_eq!(step_count, 2, "transcript must have 2 step results");
+        // Must have step results
+        let step_count = lines
+            .iter()
+            .filter(|l| l.event_type.as_deref() == Some(EVENT_TYPE_STEP))
+            .count();
+        assert_eq!(step_count, 2, "transcript must have 2 step results");
 
-            // Must have event boundaries
-            let boundary_count = lines
-                .iter()
-                .filter(|l| l.event_type.as_deref() == Some(EVENT_TYPE_BOUNDARY))
-                .count();
-            assert!(
-                boundary_count >= 6,
-                "transcript must have >= 6 boundaries (3 per step), got {boundary_count}"
-            );
-        }
+        // Must have event boundaries
+        let boundary_count = lines
+            .iter()
+            .filter(|l| l.event_type.as_deref() == Some(EVENT_TYPE_BOUNDARY))
+            .count();
+        assert!(
+            boundary_count >= 6,
+            "transcript must have >= 6 boundaries (3 per step), got {boundary_count}"
+        );
     }
 
     // If the session artifact exists, verify tree structure
-    if let Some(sess) = session_artifact {
-        if let Ok(content) = std::fs::read_to_string(&sess.path) {
-            let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-            if lines.len() >= 2 {
-                let header: Value = serde_json::from_str(lines[0]).expect("parse header");
-                assert_eq!(header["type"].as_str(), Some("session"));
-                assert_eq!(header["version"].as_u64(), Some(u64::from(SESSION_VERSION)));
-            }
+    if let Some(sess) = session_artifact
+        && let Ok(content) = std::fs::read_to_string(&sess.path)
+    {
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.len() >= 2 {
+            let header: Value = serde_json::from_str(lines[0]).expect("parse header");
+            assert_eq!(header["type"].as_str(), Some("session"));
+            assert_eq!(header["version"].as_u64(), Some(u64::from(SESSION_VERSION)));
         }
     }
 }
@@ -3463,7 +3463,7 @@ fn e2e_scenario_prompt_loop_multi_round() {
             { "role": "user", "content": [ { "type": "text", "text": prompt_1 } ] }
         ],
         "system": &system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
     });
 
@@ -3478,7 +3478,7 @@ fn e2e_scenario_prompt_loop_multi_round() {
             { "role": "user", "content": [ { "type": "text", "text": prompt_2 } ] }
         ],
         "system": &system_prompt,
-        "max_tokens": 64000,
+        "max_tokens": VCR_MODEL_MAX_TOKENS,
         "stream": true,
     });
 

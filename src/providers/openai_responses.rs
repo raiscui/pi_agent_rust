@@ -42,6 +42,7 @@ pub struct OpenAIResponsesProvider {
     api: String,
     codex_mode: bool,
     compat: Option<CompatConfig>,
+    auth_header: bool,
 }
 
 impl OpenAIResponsesProvider {
@@ -55,6 +56,7 @@ impl OpenAIResponsesProvider {
             api: "openai-responses".to_string(),
             codex_mode: false,
             compat: None,
+            auth_header: true,
         }
     }
 
@@ -97,6 +99,14 @@ impl OpenAIResponsesProvider {
     #[must_use]
     pub fn with_compat(mut self, compat: Option<CompatConfig>) -> Self {
         self.compat = compat;
+        self
+    }
+
+    /// Control whether this route generates a Bearer Authorization header.
+    /// Custom Authorization headers remain authoritative regardless of this flag.
+    #[must_use]
+    pub const fn with_auth_header(mut self, enabled: bool) -> Self {
+        self.auth_header = enabled;
         self
     }
 
@@ -218,7 +228,7 @@ impl Provider for OpenAIResponsesProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         let authorization_header_value = authorization_override(options, self.compat.as_ref());
 
-        let auth_value = if authorization_header_value.is_some() {
+        let auth_value = if authorization_header_value.is_some() || !self.auth_header {
             None
         } else {
             let resolved = options
@@ -281,14 +291,14 @@ impl Provider for OpenAIResponsesProvider {
         }
 
         // Apply provider-specific custom headers from compat config.
-        if let Some(compat) = &self.compat {
-            if let Some(custom_headers) = &compat.custom_headers {
-                request = super::apply_headers_ignoring_blank_auth_overrides(
-                    request,
-                    custom_headers,
-                    &["authorization"],
-                );
-            }
+        if let Some(compat) = &self.compat
+            && let Some(custom_headers) = &compat.custom_headers
+        {
+            request = super::apply_headers_ignoring_blank_auth_overrides(
+                request,
+                custom_headers,
+                &["authorization"],
+            );
         }
 
         // Per-request headers from StreamOptions (highest priority).
@@ -673,6 +683,7 @@ where
                 model,
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },
@@ -2503,6 +2514,45 @@ mod tests {
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
     }
 
+    #[test]
+    fn auth_header_false_sends_custom_responses_request_without_authorization() {
+        let (base_url, rx) = spawn_test_server(200, "text/event-stream", &success_sse_body());
+        let provider = OpenAIResponsesProvider::new("custom-model")
+            .with_provider_name("custom-openai-responses")
+            .with_auth_header(false)
+            .with_base_url(base_url);
+        let context = Context::owned(
+            None,
+            vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })],
+            Vec::new(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider
+                .stream(&context, &StreamOptions::default())
+                .await
+                .expect("keyless stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let captured = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured keyless custom request");
+        assert!(
+            !captured.headers.contains_key("authorization"),
+            "authHeader:false must not synthesize Authorization"
+        );
+    }
+
     fn build_test_jwt(account_id: &str) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(br#"{"alg":"none","typ":"JWT"}"#);
@@ -3098,6 +3148,8 @@ mod tests {
             StopReason::Stop => "stop".to_string(),
             StopReason::ToolUse => "tool_use".to_string(),
             StopReason::Length => "length".to_string(),
+            StopReason::PauseTurn => "pause_turn".to_string(),
+            StopReason::Refusal => "refusal".to_string(),
             StopReason::Error => "error".to_string(),
             StopReason::Aborted => "aborted".to_string(),
         }

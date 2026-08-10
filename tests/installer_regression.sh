@@ -203,6 +203,9 @@ if [ "$is_head" -eq 1 ]; then
 fi
 
 url="${args[${#args[@]}-1]}"
+if [[ "$url" == *.sigstore.json ]]; then
+  exit 22
+fi
 if [ -n "$output" ] && [ -n "${STUB_ARTIFACT_SOURCE:-}" ]; then
   cp "${STUB_ARTIFACT_SOURCE}" "$output"
   exit 0
@@ -448,7 +451,21 @@ assert_file_contains() {
 
 run_test() {
   local name="$1"
-  if "$name"; then
+  local status
+
+  # A function invoked directly as an `if` condition inherits Bash's disabled
+  # errexit state, so an early failed assertion could previously be hidden by
+  # a later successful assertion. Run each case in its own strict subshell and
+  # inspect the captured status only after the case has finished.
+  set +e
+  (
+    set -e
+    "$name"
+  )
+  status=$?
+  set -e
+
+  if [ "$status" -eq 0 ]; then
     PASS_COUNT=$((PASS_COUNT + 1))
     echo "[PASS] ${name}"
   else
@@ -470,14 +487,135 @@ test_help_lists_installer_flags() {
   assert_output_contains "$dir" "--no-agent-skills"
 }
 
-test_release_workflows_do_not_use_no_verify() {
-  local matches
-  matches="$(grep -RIn -- '--no-verify' "${ROOT}/.github/workflows" 2>/dev/null || true)"
-  if [ -n "$matches" ]; then
-    echo "release/workflow install commands must not use --no-verify" >&2
-    echo "$matches" >&2
+test_release_publish_no_verify_is_secret_scoped() {
+  local workflow_matches workflow_count runbook_count
+  workflow_matches="$(grep -RIl -- '--no-verify' "${ROOT}/.github/workflows" || true)"
+  if [ "$workflow_matches" != "${ROOT}/.github/workflows/release.yml" ]; then
+    echo "only the reviewed release workflow may use cargo publish --no-verify" >&2
+    printf '%s\n' "$workflow_matches" >&2
     return 1
   fi
+  workflow_count="$(grep -Fc -- '--no-verify' "${ROOT}/.github/workflows/release.yml")"
+  runbook_count="$(grep -Fc -- '--no-verify' "${ROOT}/docs/releasing.md")"
+  [ "$workflow_count" -eq 2 ] || {
+    echo "reviewed release workflow --no-verify surface changed" >&2
+    return 1
+  }
+  [ "$runbook_count" -eq 4 ] || {
+    echo "reviewed manual release --no-verify surface changed" >&2
+    return 1
+  }
+  grep -Fq "would expose the credential environment to package/dependency build scripts" \
+    "${ROOT}/.github/workflows/release.yml"
+  grep -Fq "Every build and dry-run happens before the real token" \
+    "${ROOT}/docs/releasing.md"
+}
+
+test_installer_retain_temp_mode_preserves_owned_scratch() {
+  local dir artifact checksum retained_tmp lock_dir installed retained_count
+  dir="$(case_dir "retain-temp-mode")"
+  write_existing_pi_stub "$dir"
+
+  artifact="${dir}/fixtures/pi-fixture"
+  write_artifact_binary "$artifact" "unsupported"
+  checksum="$(sha256_file "$artifact")"
+  retained_tmp="${dir}/retained-tmp"
+  lock_dir="${dir}/retained-install.lock.d"
+  mkdir -p "$retained_tmp"
+
+  PI_INSTALLER_RETAIN_TEMP=1 \
+  PI_INSTALLER_LOCK_DIR="$lock_dir" \
+  TMPDIR="$retained_tmp" \
+  run_installer "$dir" \
+    --yes --no-gum --offline \
+    --version v9.9.9 \
+    --dest "${dir}/dest" \
+    --artifact-url "file://${artifact}" \
+    --checksum "$checksum" \
+    --no-completions \
+    --no-agent-skills
+
+  installed="${dir}/dest/pi"
+  assert_exit_code "$dir" 0
+  [ -x "$installed" ] || {
+    echo "retain-temp install did not produce the requested binary" >&2
+    return 1
+  }
+  if ! { [ -d "$lock_dir" ] && [ -f "$lock_dir/pid" ]; }; then
+    echo "retain-temp mode must preserve its isolated lock and pid receipt" >&2
+    return 1
+  fi
+  retained_count="$(find "$retained_tmp" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d '[:space:]')"
+  [ "$retained_count" -ge 1 ] || {
+    echo "retain-temp mode must preserve its installer scratch directory" >&2
+    return 1
+  }
+  assert_output_contains "$dir" "Retaining installer temporary directory:"
+  assert_output_contains "$dir" "Retaining installer lock directory: $lock_dir"
+}
+
+test_stale_lock_recovery_preserves_the_old_lock_receipt() {
+  local dir artifact checksum retained_tmp lock_dir stale_count stale_lock
+  dir="$(case_dir "stale-lock-preservation")"
+  write_existing_pi_stub "$dir"
+
+  artifact="${dir}/fixtures/pi-fixture"
+  write_artifact_binary "$artifact" "unsupported"
+  checksum="$(sha256_file "$artifact")"
+  retained_tmp="${dir}/retained-tmp"
+  lock_dir="${dir}/install.lock.d"
+  mkdir -p "$retained_tmp" "$lock_dir"
+  printf '99999999\n' > "$lock_dir/pid"
+
+  PI_INSTALLER_RETAIN_TEMP=1 \
+  PI_INSTALLER_LOCK_DIR="$lock_dir" \
+  TMPDIR="$retained_tmp" \
+  run_installer "$dir" \
+    --yes --no-gum --offline \
+    --version v9.9.9 \
+    --dest "${dir}/dest" \
+    --artifact-url "file://${artifact}" \
+    --checksum "$checksum" \
+    --no-completions \
+    --no-agent-skills
+
+  assert_exit_code "$dir" 0
+  if ! { [ -d "$lock_dir" ] && [ -f "$lock_dir/pid" ]; }; then
+    echo "stale-lock recovery did not acquire and retain a fresh lock" >&2
+    return 1
+  fi
+  stale_count="$(find "$dir" -mindepth 1 -maxdepth 1 -type d \
+    -name 'install.lock.d.stale.*' | wc -l | tr -d '[:space:]')"
+  [ "$stale_count" -eq 1 ] || {
+    echo "expected exactly one preserved stale lock, found ${stale_count}" >&2
+    return 1
+  }
+  stale_lock="$(find "$dir" -mindepth 1 -maxdepth 1 -type d \
+    -name 'install.lock.d.stale.*' | head -1)"
+  [ "$(cat "$stale_lock/pid")" = 99999999 ] || {
+    echo "preserved stale lock lost its original pid receipt" >&2
+    return 1
+  }
+  assert_output_contains "$dir" "Preserved stale installer lock: $stale_lock"
+}
+
+test_lock_override_rejects_ambiguous_lexical_paths() {
+  local dir unsafe_lock
+  dir="$(case_dir "lock-trailing-separator")"
+  write_existing_pi_stub "$dir"
+
+  for unsafe_lock in \
+    "${dir}/install.lock.d/" \
+    "${dir}/install.lock.d/." \
+    "${dir}/install.lock.d/.." \
+    "${dir}//install.lock.d" \
+    "${dir}/install.lock.d/../other.lock.d"; do
+    PI_INSTALLER_LOCK_DIR="$unsafe_lock" \
+    run_installer "$dir" --yes --no-gum
+
+    assert_exit_code "$dir" 1
+    assert_output_contains "$dir" "PI_INSTALLER_LOCK_DIR is unsafe"
+  done
 }
 
 test_skill_smoke_script_passes() {
@@ -660,7 +798,7 @@ test_proxy_args_are_applied_to_curl_downloads() {
 
 test_linux_target_uses_supported_linux_artifact_naming() {
   local dir artifact checksum curl_log
-  dir="$(case_dir "linux-target-musl")"
+  dir="$(case_dir "linux-target-gnu")"
   write_existing_pi_stub "$dir"
   write_uname_stub "$dir" "Linux" "x86_64"
   write_curl_artifact_stub "$dir"
@@ -681,8 +819,8 @@ test_linux_target_uses_supported_linux_artifact_naming() {
     --no-agent-skills
 
   assert_exit_code "$dir" 0
-  if ! grep -Eq "pi_linux_amd64|x86_64-unknown-linux-musl" "$curl_log"; then
-    echo "expected linux-amd64 or musl artifact URL candidate" >&2
+  if ! grep -Eq "pi_linux_amd64|x86_64-unknown-linux-gnu" "$curl_log"; then
+    echo "expected linux-amd64 or GNU artifact URL candidate" >&2
     cat "$curl_log" >&2
     return 1
   fi
@@ -1831,7 +1969,10 @@ main() {
   fi
 
   run_test test_help_lists_installer_flags
-  run_test test_release_workflows_do_not_use_no_verify
+  run_test test_release_publish_no_verify_is_secret_scoped
+  run_test test_installer_retain_temp_mode_preserves_owned_scratch
+  run_test test_stale_lock_recovery_preserves_the_old_lock_receipt
+  run_test test_lock_override_rejects_ambiguous_lexical_paths
   run_test test_skill_smoke_script_passes
   run_test test_invalid_completions_value_fails
   run_test test_unknown_option_fails

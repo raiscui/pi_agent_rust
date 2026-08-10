@@ -7,10 +7,13 @@ use crate::provider_metadata::{
     ProviderRoutingDefaults, canonical_provider_id, provider_routing_defaults,
 };
 use regex::Regex;
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -21,12 +24,6 @@ pub struct ModelEntry {
     pub headers: HashMap<String, String>,
     pub auth_header: bool,
     pub compat: Option<CompatConfig>,
-    /// 已经从 models.json 解析完成的工具调用行为 profile。
-    ///
-    /// 这里保存的是"解析后的结果", 而不是 profile 名称。
-    /// 后续 prompt / provider / agent 层只消费这个单一真相源,
-    /// 避免各层重复用 provider/model 字符串做硬编码判断。
-    pub tool_use_profile: Option<ToolUseProfile>,
     /// OAuth config for extension-registered providers that require browser-based auth.
     pub oauth_config: Option<OAuthConfig>,
 }
@@ -39,6 +36,10 @@ impl ModelEntry {
             "gpt-5.1-codex-max"
                 | "gpt-5.2"
                 | "gpt-5.5"
+                | "gpt-5.6"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-luna"
                 | "gpt-5.4"
                 | "gpt-5.2-codex"
                 | "gpt-5.3-codex"
@@ -91,12 +92,16 @@ impl ModelEntry {
     /// - DeepSeek reasoning models document `reasoning_effort: "max"` as
     ///   their top thinking tier (previously reachable only by pi's `xhigh`).
     ///
-    /// OpenAI-family models are deliberately excluded: their transports have
-    /// no `max` wire value above what `xhigh` already emits, so `Max` clamps
-    /// down to `XHigh` there. A catalog `thinkingLevelMap` override can still
-    /// re-map levels per model.
+    /// OpenAI-family models are excluded unless their API metadata explicitly
+    /// advertises a distinct `max` effort tier. GPT-5.6 is the first such
+    /// family; older OpenAI models continue to clamp `Max` down to `XHigh`.
+    /// A catalog `thinkingLevelMap` override can still re-map levels per model.
     pub fn supports_max(&self) -> bool {
-        self.is_deepseek_reasoning_model() || self.is_anthropic_max_effort_model()
+        matches!(
+            self.model.id.as_str(),
+            "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+        ) || self.is_deepseek_reasoning_model()
+            || self.is_anthropic_max_effort_model()
     }
 
     /// Whether this is an Anthropic adaptive-thinking model whose
@@ -217,9 +222,418 @@ pub struct OAuthConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsConfig {
-    #[serde(default)]
-    pub tool_use_profiles: HashMap<String, ToolUseProfileConfig>,
+    #[serde(deserialize_with = "deserialize_model_providers")]
     pub providers: HashMap<String, ProviderConfig>,
+}
+
+fn deserialize_model_providers<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, ProviderConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ProvidersVisitor;
+
+    impl<'de> Visitor<'de> for ProvidersVisitor {
+        type Value = HashMap<String, ProviderConfig>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of model-provider configurations with unique keys")
+        }
+
+        fn visit_map<A>(self, mut entries: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut providers = HashMap::with_capacity(
+                entries
+                    .size_hint()
+                    .unwrap_or_default()
+                    .min(MAX_FETCHED_PROVIDERS),
+            );
+            while let Some(provider) = entries.next_key::<String>()? {
+                if providers.contains_key(&provider) {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate JSON object key {provider:?} in models.json providers"
+                    )));
+                }
+                let config = entries.next_value::<ProviderConfig>()?;
+                providers.insert(provider, config);
+            }
+            Ok(providers)
+        }
+    }
+
+    deserializer.deserialize_map(ProvidersVisitor)
+}
+
+pub(crate) const FETCHED_MODELS_SCHEMA: &str = "pi.models.fetched.v2";
+pub(crate) const MAX_FETCHED_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_FETCHED_PROVIDERS: usize = 128;
+pub(crate) const MAX_FETCHED_PROVIDER_ID_BYTES: usize = 256;
+pub(crate) const MAX_FETCHED_MODELS_PER_PROVIDER: usize = 4_096;
+pub(crate) const MAX_FETCHED_MODEL_ID_BYTES: usize = 512;
+pub(crate) const MAX_FETCHED_MODEL_BYTES_PER_PROVIDER: usize = 2 * 1024 * 1024;
+
+pub(crate) fn is_safe_model_catalog_identifier(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Strict on-disk shape for the generated catalog.
+///
+/// Keeping this separate from [`ModelsConfig`] prevents a generated file from
+/// silently acquiring routing, credential, or compatibility fields that only
+/// belong in user-authored `models.json`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedFetchedCatalog {
+    pub(crate) schema: String,
+    #[serde(deserialize_with = "deserialize_fetched_providers")]
+    pub(crate) providers: BTreeMap<String, PersistedFetchedProvider>,
+}
+
+impl Default for PersistedFetchedCatalog {
+    fn default() -> Self {
+        Self {
+            schema: FETCHED_MODELS_SCHEMA.to_string(),
+            providers: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedFetchedProvider {
+    #[serde(rename = "routeFingerprint")]
+    pub(crate) route_fingerprint: String,
+    #[serde(rename = "fetchedAtUnixMs")]
+    pub(crate) fetched_at_unix_ms: u64,
+    #[serde(deserialize_with = "deserialize_fetched_models")]
+    pub(crate) models: Vec<PersistedFetchedModel>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedFetchedModel {
+    pub(crate) id: String,
+}
+
+fn deserialize_fetched_providers<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, PersistedFetchedProvider>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ProvidersVisitor;
+
+    impl<'de> Visitor<'de> for ProvidersVisitor {
+        type Value = BTreeMap<String, PersistedFetchedProvider>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded map of generated model providers")
+        }
+
+        fn visit_map<A>(self, mut entries: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut providers = BTreeMap::new();
+            let mut canonical_providers = HashSet::new();
+            while let Some(provider) = entries.next_key::<String>()? {
+                if providers.len() >= MAX_FETCHED_PROVIDERS {
+                    return Err(serde::de::Error::custom(format!(
+                        "generated model catalog exceeds {MAX_FETCHED_PROVIDERS} providers"
+                    )));
+                }
+                if !is_safe_model_catalog_identifier(&provider, MAX_FETCHED_PROVIDER_ID_BYTES) {
+                    return Err(serde::de::Error::custom(
+                        "generated model catalog contains an invalid provider ID",
+                    ));
+                }
+                if providers.contains_key(&provider) {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate JSON object key {provider:?}"
+                    )));
+                }
+                let canonical = canonical_provider_key(&provider);
+                if !canonical_providers.insert(canonical.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "generated model catalog contains duplicate aliases for provider {canonical:?}"
+                    )));
+                }
+                let config = entries.next_value::<PersistedFetchedProvider>()?;
+                providers.insert(provider, config);
+            }
+            Ok(providers)
+        }
+    }
+
+    deserializer.deserialize_map(ProvidersVisitor)
+}
+
+fn deserialize_fetched_models<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<PersistedFetchedModel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ModelsVisitor;
+
+    impl<'de> Visitor<'de> for ModelsVisitor {
+        type Value = Vec<PersistedFetchedModel>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded sequence of generated model IDs")
+        }
+
+        fn visit_seq<A>(self, mut rows: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut models = Vec::with_capacity(
+                rows.size_hint()
+                    .unwrap_or_default()
+                    .min(MAX_FETCHED_MODELS_PER_PROVIDER),
+            );
+            let mut total_bytes = 0usize;
+            while let Some(model) = rows.next_element::<PersistedFetchedModel>()? {
+                if models.len() >= MAX_FETCHED_MODELS_PER_PROVIDER {
+                    return Err(serde::de::Error::custom(format!(
+                        "generated provider exceeds {MAX_FETCHED_MODELS_PER_PROVIDER} models"
+                    )));
+                }
+                if !is_safe_model_catalog_identifier(&model.id, MAX_FETCHED_MODEL_ID_BYTES) {
+                    return Err(serde::de::Error::custom(
+                        "generated model catalog contains an invalid model ID",
+                    ));
+                }
+                total_bytes = total_bytes.checked_add(model.id.len()).ok_or_else(|| {
+                    serde::de::Error::custom("generated model catalog model-ID size overflow")
+                })?;
+                if total_bytes > MAX_FETCHED_MODEL_BYTES_PER_PROVIDER {
+                    return Err(serde::de::Error::custom(format!(
+                        "generated provider exceeds {MAX_FETCHED_MODEL_BYTES_PER_PROVIDER} model-ID bytes"
+                    )));
+                }
+                models.push(model);
+            }
+            Ok(models)
+        }
+    }
+
+    deserializer.deserialize_seq(ModelsVisitor)
+}
+
+/// Effective provider settings used by OpenAI-compatible model discovery.
+///
+/// This mirrors the provider-level merge performed for normal inference so a
+/// `models.json` endpoint, credential, header, or auth-header override cannot
+/// silently diverge from `--fetch-models`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelCatalogProviderConfig {
+    pub(crate) base_url: String,
+    pub(crate) api: String,
+    pub(crate) api_key: Option<String>,
+    pub(crate) headers: HashMap<String, String>,
+    pub(crate) auth_header: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedModelCatalogProviderConfig {
+    route: ModelCatalogProviderConfig,
+    fallback_api_key: Option<String>,
+    deferred_headers: HashMap<String, String>,
+    base_dir: Option<PathBuf>,
+}
+
+impl PreparedModelCatalogProviderConfig {
+    pub(crate) fn requires_runtime_api_key(&self) -> bool {
+        self.route.auth_header && !has_complete_custom_authorization_header(&self.route.headers)
+    }
+
+    pub(crate) fn into_route(
+        mut self,
+        resolve_fallback_api_key: bool,
+    ) -> ModelCatalogProviderConfig {
+        self.route.headers.extend(resolve_headers_with_base(
+            Some(&self.deferred_headers),
+            self.base_dir.as_deref(),
+        ));
+        if resolve_fallback_api_key && self.requires_runtime_api_key() {
+            self.route.api_key = self
+                .fallback_api_key
+                .as_deref()
+                .and_then(|value| resolve_value_with_base(value, self.base_dir.as_deref()));
+        }
+        self.route
+    }
+}
+
+/// Resolve the credential that a model-catalog request actually uses.
+///
+/// The caller-supplied credential represents normal runtime resolution
+/// (explicit override, ambient/provider auth, and stored auth). A models.json
+/// `apiKey` is only the fallback when that runtime credential is empty and the
+/// route needs Pi to generate an Authorization header.
+pub(crate) fn effective_model_catalog_api_key(
+    caller_api_key: &str,
+    route: &ModelCatalogProviderConfig,
+) -> String {
+    let caller_api_key = caller_api_key.trim();
+    if caller_api_key.is_empty() {
+        route
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|api_key| !api_key.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        caller_api_key.to_string()
+    }
+}
+
+fn update_catalog_fingerprint_component(hasher: &mut Sha256, label: &str, value: &[u8]) {
+    hasher.update((label.len() as u64).to_le_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn model_catalog_credential_query_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "access-token" | "access_token" | "api-key" | "api_key" | "apikey" | "key" | "token"
+    )
+}
+
+fn model_catalog_credential_header_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "api-key"
+            | "apikey"
+            | "authorization"
+            | "ocp-apim-subscription-key"
+            | "proxy-authorization"
+            | "x-api-key"
+            | "x-auth-token"
+            | "x-goog-api-key"
+    )
+}
+
+fn parsed_model_catalog_route_url(base_url: &str) -> Option<url::Url> {
+    let parsed = url::Url::parse(base_url.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Whether persisted membership can be rebound without storing or hashing secret values.
+///
+/// Known credential query/header channels are rotation-tolerant: query names are classified
+/// case-insensitively, but their exact decoded spelling, order, multiplicity, and empty/non-empty
+/// shape are bound, while their values remain excluded. Header names remain case-insensitive by
+/// HTTP semantics. Any non-empty value in an unclassified query/header channel may be tenant or
+/// deployment routing, so persistence fails closed rather than reusing membership across an
+/// unverifiable route.
+pub(crate) fn model_catalog_route_is_persistable(route: &ModelCatalogProviderConfig) -> bool {
+    let Some(parsed) = parsed_model_catalog_route_url(&route.base_url) else {
+        return false;
+    };
+    let query_is_bindable = parsed.query_pairs().all(|(name, value)| {
+        value.is_empty() || model_catalog_credential_query_name(name.as_ref())
+    });
+    query_is_bindable
+        && route.headers.iter().all(|(name, value)| {
+            value.trim().is_empty() || model_catalog_credential_header_name(name)
+        })
+}
+
+/// Produce the non-secret endpoint/transport binding stored with fetched model
+/// membership.
+///
+/// Credential values, URL query values, fragments, and header values are deliberately excluded.
+/// Known credential query names and their ordered, case-sensitive multiplicity/presence shape are
+/// bound alongside case-insensitive header names/presence. A plain SHA-256 digest of a credential
+/// would still be an offline credential verifier, not harmless provenance. The process-local
+/// fetch cache uses a separate credential-sensitive key.
+pub(crate) fn model_catalog_route_fingerprint(
+    provider: &str,
+    route: &ModelCatalogProviderConfig,
+) -> String {
+    let mut hasher = Sha256::new();
+    update_catalog_fingerprint_component(
+        &mut hasher,
+        "domain",
+        b"pi.models.fetched.route-binding.v1",
+    );
+    update_catalog_fingerprint_component(
+        &mut hasher,
+        "provider",
+        canonical_provider_key(provider).as_bytes(),
+    );
+    update_catalog_fingerprint_component(&mut hasher, "api", route.api.as_bytes());
+    let parsed_route = parsed_model_catalog_route_url(&route.base_url);
+    let normalized_base_url = parsed_route.clone().map_or_else(
+        || "invalid-route-url".to_string(),
+        |mut parsed| {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        },
+    );
+    update_catalog_fingerprint_component(&mut hasher, "base-url", normalized_base_url.as_bytes());
+    if let Some(parsed) = parsed_route {
+        for (name, value) in parsed.query_pairs() {
+            update_catalog_fingerprint_component(&mut hasher, "query-name", name.as_bytes());
+            update_catalog_fingerprint_component(
+                &mut hasher,
+                "query-value-present",
+                &[u8::from(!value.is_empty())],
+            );
+        }
+    }
+    update_catalog_fingerprint_component(
+        &mut hasher,
+        "auth-header",
+        &[u8::from(route.auth_header)],
+    );
+
+    let mut headers = route.headers.iter().collect::<Vec<_>>();
+    headers.sort_unstable_by(|(left_name, _), (right_name, _)| {
+        left_name
+            .to_ascii_lowercase()
+            .cmp(&right_name.to_ascii_lowercase())
+            .then_with(|| left_name.cmp(right_name))
+    });
+    for (name, value) in headers {
+        update_catalog_fingerprint_component(
+            &mut hasher,
+            "header-name",
+            name.to_ascii_lowercase().as_bytes(),
+        );
+        update_catalog_fingerprint_component(
+            &mut hasher,
+            "header-present",
+            &[u8::from(!value.trim().is_empty())],
+        );
+    }
+
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn is_valid_model_catalog_route_fingerprint(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -231,8 +645,6 @@ pub struct ProviderConfig {
     pub headers: Option<HashMap<String, String>>,
     pub auth_header: Option<bool>,
     pub compat: Option<CompatConfig>,
-    pub tool_use_profile: Option<String>,
-    pub generation: Option<GenerationConfig>,
     pub models: Option<Vec<ModelConfig>>,
 }
 
@@ -249,116 +661,6 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     pub headers: Option<HashMap<String, String>>,
     pub compat: Option<CompatConfig>,
-    pub tool_use_profile: Option<String>,
-    pub generation: Option<GenerationConfig>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GenerationConfig {
-    /// Stop sequences forwarded to compatible text-generation providers.
-    ///
-    /// 这里表达的是采样和终止策略,不是 provider API 形状兼容性。
-    /// 第一阶段只由 OpenAI Chat Completions provider 消费。
-    pub stop: Option<Vec<String>>,
-    /// Sampling temperature forwarded as `temperature` for compatible providers.
-    pub temperature: Option<f32>,
-    /// Nucleus sampling threshold forwarded as `top_p` for compatible providers.
-    pub top_p: Option<f32>,
-    /// Minimum probability threshold forwarded as `min_p` for compatible providers.
-    pub min_p: Option<f32>,
-    /// Repetition penalty forwarded as `repetition_penalty` for compatible providers.
-    pub repetition_penalty: Option<f32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolUseProfile {
-    /// profile 的配置名, 用于生成 idempotence marker 和诊断信息。
-    pub name: String,
-    /// 可追加到 system prompt 的 profile 文本。
-    pub append_system_prompt: Option<String>,
-    /// OpenAI-compatible tools schema 的 path 字段收窄配置。
-    pub path_schema: Option<ToolUsePathSchemaConfig>,
-    /// 模型输出 tool arguments 后的保守修复开关。
-    pub argument_repair: Option<ToolUseArgumentRepairConfig>,
-    /// 工具返回后的重复调用 / 文本收束保护开关。
-    pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
-    /// profile 级工具白名单。
-    ///
-    /// `None` 表示不过滤, profile 行为与历史保持一致。
-    /// `Some(vec)` 会同时收窄 Pi 的 ToolRegistry 和 OpenAI schema,
-    /// 让弱 OpenAI-compatible 模型只能看到并调用少数专用工具。
-    /// 例如 rdog-control skill 只暴露 `bash`, 可以减少 schema token,
-    /// 也可以拒绝 schema 外模型幻觉出来的 `write` / `grep` 调用。
-    /// `Some(vec![])` 表示 profile 显式禁用全部工具。
-    /// 它不同于 `supportsTools=false`: 后者表达 provider/model 能力缺失。
-    pub tools: Option<Vec<String>>,
-    /// profile 引用的 skill 名字列表, 用于 system prompt 装配时自动加载对应 skill。
-    ///
-    /// `None` 表示不自动加载额外 skill, 与历史行为一致。
-    /// `Some(vec)` 表示模型启动时把列表内每个 skill 名字对应的
-    /// `~/.pi/agent/skills/<skill_name>/SKILL.md` 注入 system prompt。
-    /// 与 `tools` 字段类似, 这一类 profile-level 行为扩展不增加 ModelEntry 并行真相源。
-    pub skills: Option<Vec<String>>,
-    /// profile 绑定的 extension 名称, 解析为全局 agent 目录下的入口文件。
-    pub extensions: Option<Vec<String>>,
-}
-
-impl ToolUseProfile {
-    fn from_config(name: &str, config: &ToolUseProfileConfig) -> Self {
-        Self {
-            name: name.to_string(),
-            append_system_prompt: config.append_system_prompt.clone(),
-            path_schema: config.path_schema.clone(),
-            argument_repair: config.argument_repair.clone(),
-            post_tool_guard: config.post_tool_guard.clone(),
-            tools: config.tools.clone(),
-            skills: config.skills.clone(),
-            extensions: config.extensions.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolUseProfileConfig {
-    pub append_system_prompt: Option<String>,
-    pub path_schema: Option<ToolUsePathSchemaConfig>,
-    pub argument_repair: Option<ToolUseArgumentRepairConfig>,
-    pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
-    /// 工具白名单 (与 `ToolUseProfile.tools` 同义, 解析时搬迁到结构体字段)。
-    pub tools: Option<Vec<String>>,
-    /// profile 引用的 skill 名字列表 (与 `ToolUseProfile.skills` 同义, 解析时搬迁到结构体字段)。
-    ///
-    /// JSON 字段名 `skills`, 因为 `#[serde(rename_all = "camelCase")]` 不影响单词字段。
-    pub skills: Option<Vec<String>>,
-    /// profile 绑定的 extension 名称, 从 `~/.pi/agent/extensions/` 解析入口。
-    pub extensions: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolUsePathSchemaConfig {
-    pub file_tools: Option<Vec<String>>,
-    pub optional_path_tools: Option<Vec<String>>,
-    pub file_path_description: Option<String>,
-    pub optional_path_description: Option<String>,
-    pub generic_path_description: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolUseArgumentRepairConfig {
-    pub repair_degenerate_path_from_user_text: Option<bool>,
-    pub repair_grep_degenerate_glob: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolUsePostToolGuardConfig {
-    pub rewrite_repeated_successful_tool_call: Option<bool>,
-    pub strip_read_line_prefixes: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -380,26 +682,6 @@ pub struct CompatConfig {
     pub system_role_name: Option<String>,
     /// Override the stop-reason field name in responses.
     pub stop_reason_field: Option<String>,
-
-    // ── Resolved generation defaults ────────────────────────────────────
-    /// Stop sequences resolved from `generation.stop` in `models.json`.
-    ///
-    /// 外部配置仍使用 `generation`,这里是 provider factory 之间的内部承载点,
-    /// 避免给 `ModelEntry` 再增加一条并行真相源。
-    #[serde(skip)]
-    pub stop: Option<Vec<String>>,
-    /// Temperature resolved from `generation.temperature`.
-    #[serde(skip)]
-    pub temperature: Option<f32>,
-    /// Top-p resolved from `generation.topP`.
-    #[serde(skip)]
-    pub top_p: Option<f32>,
-    /// Min-p resolved from `generation.minP`.
-    #[serde(skip)]
-    pub min_p: Option<f32>,
-    /// Repetition penalty resolved from `generation.repetitionPenalty`.
-    #[serde(skip)]
-    pub repetition_penalty: Option<f32>,
 
     // ── Per-provider request headers ────────────────────────────────────
     /// Extra HTTP headers injected into every request for this provider.
@@ -471,10 +753,6 @@ struct LegacyGeneratedModel {
     compat: Option<CompatConfig>,
 }
 
-const LEGACY_MODELS_GENERATED_TS: &str =
-    include_str!("../legacy_pi_mono_code/pi-mono/packages/ai/src/models.generated.ts");
-const UPSTREAM_PROVIDER_MODEL_IDS_JSON: &str =
-    include_str!("../docs/provider-upstream-model-ids-snapshot.json");
 const CODEX_RESPONSES_API_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const GOOGLE_GEMINI_CLI_API_URL: &str = "https://cloudcode-pa.googleapis.com";
 const GOOGLE_ANTIGRAVITY_API_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -499,14 +777,14 @@ fn canonicalize_openrouter_model_id(model_id: &str) -> String {
     }
 }
 
-fn canonicalize_model_id_for_provider(provider: &str, model_id: &str) -> String {
+pub(crate) fn canonicalize_model_id_for_provider(provider: &str, model_id: &str) -> String {
     if canonical_provider_id(provider).is_some_and(|canonical| canonical == "openrouter") {
         return canonicalize_openrouter_model_id(model_id);
     }
     model_id.trim().to_string()
 }
 
-fn normalized_registry_key(provider: &str, model_id: &str) -> (String, String) {
+pub(crate) fn normalized_registry_key(provider: &str, model_id: &str) -> (String, String) {
     let provider = provider.trim();
     let canonical_provider = canonical_provider_id(provider).unwrap_or(provider);
     let canonical_model_id = canonicalize_model_id_for_provider(canonical_provider, model_id);
@@ -547,7 +825,7 @@ fn parse_input_types(input: &[String]) -> Vec<InputType> {
 }
 
 fn legacy_generated_models_cache_path() -> Option<PathBuf> {
-    let checksum = crc32c::crc32c(LEGACY_MODELS_GENERATED_TS.as_bytes());
+    let checksum = crate::embedded_assets::legacy_models_generated_ts_crc32c();
     dirs::cache_dir().map(|dir| {
         dir.join("pi")
             .join("models-cache")
@@ -596,23 +874,23 @@ fn parse_legacy_generated_models() -> Vec<LegacyGeneratedModel> {
         return cached;
     }
 
-    let Some(models_decl_start) = LEGACY_MODELS_GENERATED_TS.find("export const MODELS =") else {
+    let source = crate::embedded_assets::legacy_models_generated_ts();
+    let Some(models_decl_start) = source.find("export const MODELS =") else {
         tracing::warn!("Legacy model catalog missing MODELS declaration");
         return Vec::new();
     };
-    let Some(object_start_rel) = LEGACY_MODELS_GENERATED_TS[models_decl_start..].find('{') else {
+    let Some(object_start_rel) = source[models_decl_start..].find('{') else {
         tracing::warn!("Legacy model catalog missing object start after MODELS declaration");
         return Vec::new();
     };
     let object_start = models_decl_start + object_start_rel;
-    let Some(end_marker_rel) = LEGACY_MODELS_GENERATED_TS[object_start..].rfind("} as const;")
-    else {
+    let Some(end_marker_rel) = source[object_start..].rfind("} as const;") else {
         tracing::warn!("Legacy model catalog missing end marker");
         return Vec::new();
     };
     let end_marker = object_start + end_marker_rel;
 
-    let mut object_source = LEGACY_MODELS_GENERATED_TS[object_start..=end_marker]
+    let mut object_source = source[object_start..=end_marker]
         .trim_end_matches(" as const;")
         .to_string();
     let satisfies_re = SATISFIES_RE.get_or_init(|| {
@@ -651,7 +929,7 @@ fn legacy_generated_models() -> &'static [LegacyGeneratedModel] {
 
 fn parse_upstream_provider_model_ids() -> HashMap<String, Vec<String>> {
     let parsed: HashMap<String, Vec<String>> =
-        match serde_json::from_str(UPSTREAM_PROVIDER_MODEL_IDS_JSON) {
+        match serde_json::from_str(&crate::embedded_assets::provider_upstream_model_ids_json()) {
             Ok(value) => value,
             Err(err) => {
                 tracing::warn!(error = %err, "Failed to parse upstream provider model snapshot");
@@ -662,6 +940,11 @@ fn parse_upstream_provider_model_ids() -> HashMap<String, Vec<String>> {
     let mut by_provider: HashMap<String, Vec<String>> = HashMap::new();
     merge_provider_model_ids(&mut by_provider, parsed);
     merge_provider_model_ids(&mut by_provider, parse_user_model_overrides());
+
+    // GitHub Models was retired on 2026-07-30. Keep the captured upstream
+    // artifact unchanged for historical reproducibility, but do not surface
+    // its dead provider/model slugs through runtime autocomplete or fallback.
+    by_provider.retain(|provider, _| !provider.eq_ignore_ascii_case("github-models"));
 
     for ids in by_provider.values_mut() {
         ids.sort_unstable();
@@ -808,6 +1091,36 @@ pub fn model_autocomplete_candidates() -> &'static [ModelAutocompleteCandidate] 
                 description: Some("Claude Sonnet 4.6".to_string()),
             });
             candidates.push(ModelAutocompleteCandidate {
+                slug: "openai/gpt-5.6".to_string(),
+                description: Some("GPT-5.6 (Sol alias)".to_string()),
+            });
+            candidates.extend([
+                ModelAutocompleteCandidate {
+                    slug: "openai/gpt-5.6-sol".to_string(),
+                    description: Some("GPT-5.6 Sol".to_string()),
+                },
+                ModelAutocompleteCandidate {
+                    slug: "openai-codex/gpt-5.6-sol".to_string(),
+                    description: Some("GPT-5.6 Sol Codex".to_string()),
+                },
+                ModelAutocompleteCandidate {
+                    slug: "openai/gpt-5.6-terra".to_string(),
+                    description: Some("GPT-5.6 Terra".to_string()),
+                },
+                ModelAutocompleteCandidate {
+                    slug: "openai-codex/gpt-5.6-terra".to_string(),
+                    description: Some("GPT-5.6 Terra Codex".to_string()),
+                },
+                ModelAutocompleteCandidate {
+                    slug: "openai/gpt-5.6-luna".to_string(),
+                    description: Some("GPT-5.6 Luna".to_string()),
+                },
+                ModelAutocompleteCandidate {
+                    slug: "openai-codex/gpt-5.6-luna".to_string(),
+                    description: Some("GPT-5.6 Luna Codex".to_string()),
+                },
+            ]);
+            candidates.push(ModelAutocompleteCandidate {
                 slug: "openai/gpt-5.5".to_string(),
                 description: Some("GPT-5.5".to_string()),
             });
@@ -844,69 +1157,14 @@ pub fn model_autocomplete_candidates() -> &'static [ModelAutocompleteCandidate] 
 
 pub fn model_catalog_cache_fingerprint() -> u64 {
     *MODEL_CATALOG_CACHE_FINGERPRINT.get_or_init(|| {
-        let legacy = u64::from(crc32c::crc32c(LEGACY_MODELS_GENERATED_TS.as_bytes()));
-        let upstream = u64::from(crc32c::crc32c(UPSTREAM_PROVIDER_MODEL_IDS_JSON.as_bytes()));
+        let legacy = u64::from(crate::embedded_assets::legacy_models_generated_ts_crc32c());
+        let upstream = u64::from(crate::embedded_assets::provider_upstream_model_ids_json_crc32c());
         let user_override = u64::from(user_model_overrides_fingerprint());
         // Mix the override CRC into both halves so any change forces cache
         // invalidation regardless of whether the snapshot or the override
         // moved.
         (legacy ^ user_override) << 32 | (upstream ^ user_override)
     })
-}
-
-fn validate_tool_use_profile_references(config: &ModelsConfig) -> Result<(), Error> {
-    for (provider_id, provider_cfg) in &config.providers {
-        validate_tool_use_profile_name(
-            &config.tool_use_profiles,
-            provider_cfg.tool_use_profile.as_deref(),
-            || format!("provider `{provider_id}`"),
-        )?;
-
-        for model_cfg in provider_cfg.models.iter().flatten() {
-            validate_tool_use_profile_name(
-                &config.tool_use_profiles,
-                model_cfg.tool_use_profile.as_deref(),
-                || format!("model `{}` under provider `{provider_id}`", model_cfg.id),
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_tool_use_profile_name(
-    profiles: &HashMap<String, ToolUseProfileConfig>,
-    profile_name: Option<&str>,
-    describe_owner: impl FnOnce() -> String,
-) -> Result<(), Error> {
-    let Some(profile_name) = profile_name else {
-        return Ok(());
-    };
-    let trimmed = profile_name.trim();
-    if trimmed.is_empty() {
-        return Err(Error::config(format!(
-            "Empty toolUseProfile reference for {}",
-            describe_owner()
-        )));
-    }
-    if !profiles.contains_key(trimmed) {
-        return Err(Error::config(format!(
-            "Unknown toolUseProfile `{trimmed}` referenced by {}",
-            describe_owner()
-        )));
-    }
-
-    Ok(())
-}
-
-fn resolve_tool_use_profile(
-    profiles: &HashMap<String, ToolUseProfileConfig>,
-    profile_name: Option<&str>,
-) -> Option<ToolUseProfile> {
-    let profile_name = profile_name?.trim();
-    profiles
-        .get(profile_name)
-        .map(|config| ToolUseProfile::from_config(profile_name, config))
 }
 
 pub(crate) fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
@@ -918,6 +1176,15 @@ pub(crate) fn normalize_api_key_opt(api_key: Option<String>) -> Option<String> {
 
 pub(crate) fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
     let provider = entry.model.provider.as_str();
+    let canonical_provider = canonical_provider_id(provider).unwrap_or(provider);
+
+    // These native adapters resolve structured credentials at request time. Requiring a generic
+    // `api_key` here would either reject valid AWS/SAP credential chains before the provider can
+    // consume them or tempt callers to flatten one component into a bogus bearer token.
+    if matches!(canonical_provider, "amazon-bedrock" | "sap-ai-core") {
+        return false;
+    }
+
     entry.auth_header
         || crate::provider_metadata::provider_metadata(provider)
             .is_some_and(|meta| !meta.auth_env_keys.is_empty())
@@ -938,6 +1205,27 @@ enum ModelRegistryLoadMode {
     ListingLite,
 }
 
+trait ModelCredentialResolver {
+    fn resolve_api_key(&self, provider: &str, override_key: Option<&str>) -> Option<String>;
+}
+
+type ProviderHeadersSnapshot = HashMap<String, HashMap<String, String>>;
+
+impl ModelCredentialResolver for AuthStorage {
+    fn resolve_api_key(&self, provider: &str, override_key: Option<&str>) -> Option<String> {
+        Self::resolve_api_key(self, provider, override_key)
+    }
+}
+
+impl<F> ModelCredentialResolver for F
+where
+    F: Fn(&str) -> Option<String>,
+{
+    fn resolve_api_key(&self, provider: &str, _override_key: Option<&str>) -> Option<String> {
+        self(provider)
+    }
+}
+
 impl ModelRegistry {
     #[cfg(test)]
     pub(crate) fn from_entries_for_tests(entries: Vec<ModelEntry>) -> Self {
@@ -948,77 +1236,159 @@ impl ModelRegistry {
     }
 
     pub fn load(auth: &AuthStorage, models_path: Option<PathBuf>) -> Self {
-        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::Full, |auth, provider| {
-            auth.resolve_api_key(provider, None)
-        })
+        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::Full)
     }
 
-    pub fn load_for_listing(auth: &AuthStorage, models_path: Option<PathBuf>) -> Self {
-        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::ListingLite, |auth, provider| {
-            auth.resolve_api_key(provider, None)
-        })
-    }
-
-    /// 测试专用: 与 [`Self::load`] 同语义, 但 key 解析隔离外部环境变量。
-    #[cfg(test)]
-    pub(crate) fn load_isolated(auth: &AuthStorage, models_path: Option<PathBuf>) -> Self {
-        Self::load_with_mode(
-            auth,
+    /// Load models with caller-controlled provider credential resolution.
+    ///
+    /// This keeps deterministic harnesses and embedders independent of ambient
+    /// process credentials while leaving normal [`Self::load`] behavior intact.
+    pub fn load_with_credential_resolver<F>(
+        models_path: Option<PathBuf>,
+        resolve_api_key: F,
+    ) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        Self::load_with_mode_and_credential_resolver(
             models_path,
             ModelRegistryLoadMode::Full,
-            |auth, provider| auth.resolve_api_key_isolated(provider, None),
+            &resolve_api_key,
         )
     }
 
-    /// 以自定义 key 解析函数加载注册表。
-    ///
-    /// 主要供集成测试隔离开发者本机环境变量 (如 `OPENAI_API_KEY`);
-    /// 生产代码应使用 [`Self::load`]。
-    pub fn load_with_key_resolver<F>(
-        auth: &AuthStorage,
+    pub fn load_for_listing(auth: &AuthStorage, models_path: Option<PathBuf>) -> Self {
+        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::ListingLite)
+    }
+
+    pub(crate) fn load_for_listing_with_credential_resolver<F>(
         models_path: Option<PathBuf>,
-        resolve_key: F,
+        resolve_api_key: F,
     ) -> Self
     where
-        F: Fn(&AuthStorage, &str) -> Option<String>,
+        F: Fn(&str) -> Option<String>,
     {
-        Self::load_with_mode(auth, models_path, ModelRegistryLoadMode::Full, resolve_key)
+        Self::load_with_mode_and_credential_resolver(
+            models_path,
+            ModelRegistryLoadMode::ListingLite,
+            &resolve_api_key,
+        )
     }
 
     fn load_with_mode(
         auth: &AuthStorage,
         models_path: Option<PathBuf>,
         mode: ModelRegistryLoadMode,
-        resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
     ) -> Self {
-        let mut models = built_in_models_with_key_resolver(auth, mode, &resolve_key);
-        let mut error = None;
+        Self::load_with_mode_and_credential_resolver(models_path, mode, &|provider| {
+            auth.resolve_api_key(provider, None)
+        })
+    }
+
+    fn load_with_mode_and_credential_resolver<F>(
+        models_path: Option<PathBuf>,
+        mode: ModelRegistryLoadMode,
+        resolve_api_key: &F,
+    ) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        // Credential lookup can involve mutable external state (credential
+        // helpers, files, or an embedding callback). Resolve each canonical
+        // provider once so built-in, fetched, and hand-authored entries cannot
+        // observe different credentials during one registry load.
+        let credential_snapshot = RefCell::new(HashMap::<String, Option<String>>::new());
+        let stable_resolve_api_key = |provider: &str| {
+            let key = canonical_provider_key(provider);
+            let cached = credential_snapshot.borrow().get(&key).cloned();
+            if let Some(value) = cached {
+                return value;
+            }
+            let value = resolve_api_key(provider);
+            credential_snapshot.borrow_mut().insert(key, value.clone());
+            value
+        };
+
+        let mut models = built_in_models(&stable_resolve_api_key, mode);
+        let mut errors = Vec::new();
 
         if let Some(path) = models_path {
-            if path.exists() {
-                match std::fs::read_to_string(&path)
-                    .map_err(|e| Error::config(format!("Failed to read models.json: {e}")))
-                    .and_then(|s| serde_json::from_str::<ModelsConfig>(&s).map_err(Error::from))
-                    .and_then(|config| {
-                        validate_tool_use_profile_references(&config).map(|()| config)
-                    }) {
-                    Ok(config) => {
-                        apply_custom_models_with_key_resolver(
-                            auth,
+            let fetched_path = fetched_models_path(&path);
+            let mut manual_config_load_failed = false;
+            let manual_config = match fs::symlink_metadata(&path) {
+                Ok(_) => match load_models_config(&path) {
+                    Ok(config) => Some(config),
+                    Err(error) => {
+                        manual_config_load_failed = true;
+                        errors.push(format!("{error}\n\nFile: {}", path.display()));
+                        None
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    manual_config_load_failed = true;
+                    errors.push(format!(
+                        "Failed to inspect model catalog {}: {error}",
+                        path.display()
+                    ));
+                    None
+                }
+            };
+            let manual_provider_headers = manual_config
+                .as_ref()
+                .map(|config| resolve_provider_headers_snapshot(config, path.parent()));
+
+            match fs::symlink_metadata(&fetched_path) {
+                Ok(_) if manual_config_load_failed => errors.push(format!(
+                    "Ignoring generated model catalog {} because the current models.json route configuration could not be loaded; repair {} before refreshing persisted membership",
+                    fetched_path.display(),
+                    path.display()
+                )),
+                Ok(_) => match load_fetched_models_config(
+                    &fetched_path,
+                    &path,
+                    manual_config.as_ref(),
+                    manual_provider_headers.as_ref(),
+                ) {
+                    Ok((config, binding_errors)) => {
+                        errors.extend(binding_errors);
+                        apply_fetched_models(
+                            &stable_resolve_api_key,
                             &mut models,
                             &config,
-                            path.parent(),
-                            &resolve_key,
+                            manual_config.as_ref(),
+                            fetched_path.parent(),
                         );
                     }
-                    Err(e) => {
-                        error = Some(format!("{e}\n\nFile: {}", path.display()));
+                    Err(error) => {
+                        errors.push(format!("{error}\n\nFile: {}", fetched_path.display()));
                     }
-                }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => errors.push(format!(
+                    "Failed to inspect generated model catalog {}: {error}",
+                    fetched_path.display()
+                )),
+            }
+
+            if let Some(config) = manual_config {
+                // User-authored models.json is intentionally applied last so
+                // every manual provider/model override keeps final authority
+                // over the generated catalog.
+                apply_custom_models_with_provider_headers(
+                    &stable_resolve_api_key,
+                    &mut models,
+                    &config,
+                    path.parent(),
+                    manual_provider_headers.as_ref(),
+                );
             }
         }
 
-        Self { models, error }
+        Self {
+            models,
+            error: (!errors.is_empty()).then(|| errors.join("\n\n")),
+        }
     }
 
     pub fn models(&self) -> &[ModelEntry] {
@@ -1333,6 +1703,48 @@ fn custom_provider_defaults(provider: &str) -> Option<AdHocProviderDefaults> {
         .or_else(|| native_adapter_seed_defaults(canonical_provider))
 }
 
+fn provider_has_catalog_route(provider: &str, config: &ProviderConfig) -> bool {
+    config
+        .base_url
+        .as_deref()
+        .is_some_and(|base_url| !base_url.trim().is_empty())
+        || custom_provider_defaults(provider)
+            .is_some_and(|defaults| !defaults.base_url.trim().is_empty())
+}
+
+fn resolved_provider_transport(
+    provider: &str,
+    config: &ProviderConfig,
+) -> (Option<AdHocProviderDefaults>, String, String, bool) {
+    let defaults = custom_provider_defaults(provider);
+    let default_api = defaults.map_or("openai-completions", |value| value.api);
+    let requested_api = config.api.as_deref().unwrap_or(default_api);
+    let api = requested_api
+        .parse::<Api>()
+        .unwrap_or_else(|_| Api::Custom(requested_api.to_string()))
+        .to_string();
+    let base_url = config.base_url.clone().unwrap_or_else(|| {
+        defaults.map_or_else(
+            || {
+                api_fallback_base_url(&api)
+                    .unwrap_or("https://api.openai.com/v1")
+                    .to_string()
+            },
+            |value| {
+                if value.base_url.is_empty() {
+                    api_fallback_base_url(&api).unwrap_or_default().to_string()
+                } else {
+                    value.base_url.to_string()
+                }
+            },
+        )
+    });
+    let auth_header = config
+        .auth_header
+        .unwrap_or_else(|| defaults.is_some_and(|value| value.auth_header));
+    (defaults, api, base_url, auth_header)
+}
+
 fn legacy_provider_ids() -> HashSet<String> {
     legacy_generated_models()
         .iter()
@@ -1346,36 +1758,16 @@ fn legacy_provider_ids() -> HashSet<String> {
 }
 
 fn resolve_provider_api_key_cached(
-    auth: &AuthStorage,
+    auth: &impl ModelCredentialResolver,
     canonical_provider: &str,
     provider: &str,
     canonical_cache: &mut HashMap<String, Option<String>>,
     provider_cache: &mut HashMap<String, Option<String>>,
-) -> Option<String> {
-    resolve_provider_api_key_cached_with(
-        auth,
-        canonical_provider,
-        provider,
-        canonical_cache,
-        provider_cache,
-        |auth, provider| auth.resolve_api_key(provider, None),
-    )
-}
-
-/// 与 [`resolve_provider_api_key_cached`] 同语义, 但 key 解析函数可注入
-/// (测试用 `resolve_api_key_isolated` 屏蔽开发者本机环境变量)。
-fn resolve_provider_api_key_cached_with(
-    auth: &AuthStorage,
-    canonical_provider: &str,
-    provider: &str,
-    canonical_cache: &mut HashMap<String, Option<String>>,
-    provider_cache: &mut HashMap<String, Option<String>>,
-    resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
 ) -> Option<String> {
     let canonical_key = canonical_provider.to_ascii_lowercase();
     let canonical_result = canonical_cache
         .entry(canonical_key)
-        .or_insert_with(|| resolve_key(auth, canonical_provider))
+        .or_insert_with(|| auth.resolve_api_key(canonical_provider, None))
         .clone();
 
     if canonical_result.is_some() || canonical_provider.eq_ignore_ascii_case(provider) {
@@ -1384,7 +1776,7 @@ fn resolve_provider_api_key_cached_with(
 
     provider_cache
         .entry(provider.to_ascii_lowercase())
-        .or_insert_with(|| resolve_key(auth, provider))
+        .or_insert_with(|| auth.resolve_api_key(provider, None))
         .clone()
 }
 
@@ -1405,7 +1797,7 @@ fn provider_self_routes_without_base_url(canonical_provider: &str) -> bool {
 }
 
 fn append_upstream_nonlegacy_models(
-    auth: &AuthStorage,
+    auth: &impl ModelCredentialResolver,
     models: &mut Vec<ModelEntry>,
     seen: &mut HashSet<String>,
     canonical_api_key_cache: &mut HashMap<String, Option<String>>,
@@ -1493,7 +1885,6 @@ fn append_upstream_nonlegacy_models(
                 headers: HashMap::new(),
                 auth_header: defaults.auth_header,
                 compat: None,
-                tool_use_profile: None,
                 oauth_config: None,
             });
         }
@@ -1501,24 +1892,9 @@ fn append_upstream_nonlegacy_models(
 }
 
 #[allow(clippy::too_many_lines)]
-fn built_in_models(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<ModelEntry> {
-    built_in_models_with_key_resolver(auth, mode, |auth, provider| {
-        auth.resolve_api_key(provider, None)
-    })
-}
-
-/// 测试专用: 与 [`built_in_models`] 同语义, 但隔离外部环境变量。
-#[cfg(test)]
-fn built_in_models_isolated(auth: &AuthStorage, mode: ModelRegistryLoadMode) -> Vec<ModelEntry> {
-    built_in_models_with_key_resolver(auth, mode, |auth, provider| {
-        auth.resolve_api_key_isolated(provider, None)
-    })
-}
-
-fn built_in_models_with_key_resolver(
-    auth: &AuthStorage,
+fn built_in_models(
+    auth: &impl ModelCredentialResolver,
     mode: ModelRegistryLoadMode,
-    resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
 ) -> Vec<ModelEntry> {
     let mut models = Vec::with_capacity(legacy_generated_models().len() + 8);
     let mut seen = HashSet::new();
@@ -1587,13 +1963,12 @@ fn built_in_models_with_key_resolver(
         };
 
         let canonical_provider = canonical_provider_id(provider).unwrap_or(provider);
-        let api_key = resolve_provider_api_key_cached_with(
+        let api_key = resolve_provider_api_key_cached(
             auth,
             canonical_provider,
             provider,
             &mut canonical_api_key_cache,
             &mut provider_api_key_cache,
-            &resolve_key,
         );
 
         let default_cost = ModelCost {
@@ -1656,7 +2031,6 @@ fn built_in_models_with_key_resolver(
             } else {
                 None
             },
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1712,9 +2086,99 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
+    }
+
+    // Seed the GPT-5.6 family (Sol / Terra / Luna, released 2026-07-09) for
+    // direct OpenAI API-key routing and ChatGPT/Codex OAuth routing. The bare
+    // `gpt-5.6` API alias resolves to Sol. These IDs post-date the bundled
+    // upstream catalog snapshot, so without explicit seeds they are missing
+    // from listing, lookup, and autocomplete. Costs and the 1.05M context
+    // window follow the current OpenAI model catalog; Codex entries keep the
+    // existing zero cache-write convention. See pi_agent_rust#135.
+    for (id, name, input, output, cache_read, cache_write, include_codex) in [
+        ("gpt-5.6", "GPT-5.6", 5.0, 30.0, 0.5, 6.25, false),
+        ("gpt-5.6-sol", "GPT-5.6 Sol", 5.0, 30.0, 0.5, 6.25, true),
+        ("gpt-5.6-terra", "GPT-5.6 Terra", 2.0, 12.0, 0.2, 2.5, true),
+        ("gpt-5.6-luna", "GPT-5.6 Luna", 0.2, 1.2, 0.02, 0.25, true),
+    ] {
+        let providers: &[&str] = if include_codex {
+            &["openai", "openai-codex"]
+        } else {
+            &["openai"]
+        };
+        for &provider in providers {
+            if models
+                .iter()
+                .any(|entry| entry.model.provider == provider && entry.model.id == id)
+            {
+                continue;
+            }
+
+            let is_codex = provider == "openai-codex";
+            let (api, base_url, display_name) = if is_codex {
+                (
+                    if mode == ModelRegistryLoadMode::Full {
+                        Api::OpenAICodexResponses.to_string()
+                    } else {
+                        "openai-codex-responses".to_string()
+                    },
+                    if mode == ModelRegistryLoadMode::Full {
+                        "https://chatgpt.com/backend-api".to_string()
+                    } else {
+                        String::new()
+                    },
+                    format!("{name} Codex"),
+                )
+            } else {
+                (
+                    if mode == ModelRegistryLoadMode::Full {
+                        Api::OpenAIResponses.to_string()
+                    } else {
+                        "openai-responses".to_string()
+                    },
+                    if mode == ModelRegistryLoadMode::Full {
+                        "https://api.openai.com/v1".to_string()
+                    } else {
+                        String::new()
+                    },
+                    name.to_string(),
+                )
+            };
+
+            models.push(ModelEntry {
+                model: Model {
+                    id: id.to_string(),
+                    name: display_name,
+                    api,
+                    provider: provider.to_string(),
+                    base_url,
+                    reasoning: true,
+                    input: vec![InputType::Text, InputType::Image],
+                    cost: ModelCost {
+                        input,
+                        output,
+                        cache_read,
+                        cache_write: if is_codex { 0.0 } else { cache_write },
+                    },
+                    context_window: 1_050_000,
+                    max_tokens: 128_000,
+                    headers: HashMap::new(),
+                },
+                api_key: resolve_provider_api_key_cached(
+                    auth,
+                    provider,
+                    provider,
+                    &mut canonical_api_key_cache,
+                    &mut provider_api_key_cache,
+                ),
+                headers: HashMap::new(),
+                auth_header: true,
+                compat: None,
+                oauth_config: None,
+            });
+        }
     }
 
     // Ensure the latest GPT-5 default exists for OpenAI routing.
@@ -1762,7 +2226,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1808,7 +2271,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1858,7 +2320,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1904,7 +2365,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1950,7 +2410,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -1997,7 +2456,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2043,7 +2501,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2084,7 +2541,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2125,7 +2581,6 @@ fn built_in_models_with_key_resolver(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2154,55 +2609,115 @@ fn built_in_models_with_key_resolver(
     models
 }
 
-#[allow(clippy::too_many_lines)]
+fn canonical_provider_key(provider: &str) -> String {
+    canonical_provider_id(provider)
+        .unwrap_or(provider)
+        .to_ascii_lowercase()
+}
+
+fn fetched_model_key(provider: &str, model_id: &str) -> (String, String) {
+    let canonical_provider = canonical_provider_key(provider);
+    let canonical_model = canonicalize_model_id_for_provider(&canonical_provider, model_id);
+    (canonical_provider, canonical_model.to_ascii_lowercase())
+}
+
+/// Apply the exact membership returned by live discovery while retaining rich
+/// built-in metadata for model IDs Pi already knows.
+///
+/// Newly discovered IDs use provider defaults; disappeared IDs stay absent.
+/// This avoids turning a persisted catalog refresh into a silent
+/// capability/context-window downgrade for every known model in that provider.
+fn apply_fetched_models(
+    auth: &impl ModelCredentialResolver,
+    models: &mut Vec<ModelEntry>,
+    config: &ModelsConfig,
+    manual_config: Option<&ModelsConfig>,
+    base_dir: Option<&Path>,
+) {
+    let config = ModelsConfig {
+        providers: config
+            .providers
+            .iter()
+            .filter_map(|(provider, config)| {
+                let canonical = canonical_provider_key(provider);
+                let has_builtin_route = custom_provider_defaults(provider).is_some()
+                    || models.iter().any(|entry| {
+                        canonical_provider_key(&entry.model.provider) == canonical
+                    });
+                let has_manual_route = manual_config.is_some_and(|manual| {
+                    manual.providers.iter().any(|(candidate, candidate_config)| {
+                        canonical_provider_key(candidate) == canonical
+                            && provider_has_catalog_route(candidate, candidate_config)
+                    })
+                });
+                if has_builtin_route || has_manual_route {
+                    Some((provider.clone(), config.clone()))
+                } else {
+                    tracing::warn!(
+                        provider = %provider,
+                        "Ignoring generated model membership without a built-in or models.json provider route"
+                    );
+                    None
+                }
+            })
+            .collect(),
+    };
+    let fetched_providers = config
+        .providers
+        .keys()
+        .map(|provider| canonical_provider_key(provider))
+        .collect::<HashSet<_>>();
+    let preserved = models
+        .iter()
+        .filter(|entry| fetched_providers.contains(&canonical_provider_key(&entry.model.provider)))
+        .map(|entry| {
+            (
+                fetched_model_key(&entry.model.provider, &entry.model.id),
+                entry.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    apply_custom_models(auth, models, &config, base_dir);
+
+    for entry in models
+        .iter_mut()
+        .filter(|entry| fetched_providers.contains(&canonical_provider_key(&entry.model.provider)))
+    {
+        if let Some(existing) =
+            preserved.get(&fetched_model_key(&entry.model.provider, &entry.model.id))
+        {
+            entry.clone_from(existing);
+        }
+    }
+}
+
 fn apply_custom_models(
-    auth: &AuthStorage,
+    auth: &impl ModelCredentialResolver,
     models: &mut Vec<ModelEntry>,
     config: &ModelsConfig,
     base_dir: Option<&Path>,
 ) {
-    apply_custom_models_with_key_resolver(auth, models, config, base_dir, |auth, provider| {
-        auth.resolve_api_key(provider, None)
-    })
+    apply_custom_models_with_provider_headers(auth, models, config, base_dir, None);
 }
 
-/// 与 [`apply_custom_models`] 同语义, 但 key 解析函数可注入 (测试隔离环境变量)。
-fn apply_custom_models_with_key_resolver(
-    auth: &AuthStorage,
+#[allow(clippy::too_many_lines)]
+fn apply_custom_models_with_provider_headers(
+    auth: &impl ModelCredentialResolver,
     models: &mut Vec<ModelEntry>,
     config: &ModelsConfig,
     base_dir: Option<&Path>,
-    resolve_key: impl Fn(&AuthStorage, &str) -> Option<String>,
+    provider_headers_snapshot: Option<&ProviderHeadersSnapshot>,
 ) {
     for (provider_id, provider_cfg) in &config.providers {
         let provider_id_str = provider_id.as_str();
-        let provider_defaults = custom_provider_defaults(provider_id);
-        let default_api = provider_defaults.map_or("openai-completions", |defaults| defaults.api);
-        let provider_api = provider_cfg.api.as_deref().unwrap_or(default_api);
-        let provider_api_parsed: Api = provider_api
-            .parse()
-            .unwrap_or_else(|_| Api::Custom(provider_api.to_string()));
-        let provider_api_string = provider_api_parsed.to_string();
-        let provider_base = provider_cfg.base_url.clone().unwrap_or_else(|| {
-            provider_defaults.map_or_else(
-                || {
-                    api_fallback_base_url(provider_api_string.as_str())
-                        .unwrap_or("https://api.openai.com/v1")
-                        .to_string()
-                },
-                |defaults| {
-                    if defaults.base_url.is_empty() {
-                        api_fallback_base_url(provider_api_string.as_str())
-                            .unwrap_or_default()
-                            .to_string()
-                    } else {
-                        defaults.base_url.to_string()
-                    }
-                },
-            )
-        });
+        let (provider_defaults, provider_api_string, provider_base, auth_header) =
+            resolved_provider_transport(provider_id, provider_cfg);
 
-        let provider_headers = resolve_headers_with_base(provider_cfg.headers.as_ref(), base_dir);
+        let provider_headers = provider_headers_snapshot.map_or_else(
+            || resolve_headers_with_base(provider_cfg.headers.as_ref(), base_dir),
+            |snapshot| snapshot.get(provider_id).cloned().unwrap_or_default(),
+        );
         let canonical_provider = canonical_provider_id(provider_id).unwrap_or(provider_id_str);
         let provider_matches = |candidate_provider: &str| {
             let candidate_canonical =
@@ -2212,19 +2727,13 @@ fn apply_custom_models_with_key_resolver(
                 || candidate_canonical.eq_ignore_ascii_case(provider_id_str)
                 || candidate_canonical.eq_ignore_ascii_case(canonical_provider)
         };
-        let provider_key = provider_cfg
-            .api_key
-            .as_deref()
-            .and_then(|value| resolve_value_with_base(value, base_dir))
-            .or_else(|| resolve_key(auth, canonical_provider));
-
-        let auth_header = provider_cfg
-            .auth_header
-            .unwrap_or_else(|| provider_defaults.is_some_and(|defaults| defaults.auth_header));
-        let provider_tool_use_profile = resolve_tool_use_profile(
-            &config.tool_use_profiles,
-            provider_cfg.tool_use_profile.as_deref(),
-        );
+        let provider_key = normalize_api_key_opt(auth.resolve_api_key(canonical_provider, None))
+            .or_else(|| {
+                provider_cfg
+                    .api_key
+                    .as_deref()
+                    .and_then(|value| resolve_value_with_base(value, base_dir))
+            });
 
         if provider_defaults.is_some() {
             tracing::debug!(
@@ -2261,22 +2770,10 @@ fn apply_custom_models_with_key_resolver(
                     entry.api_key.clone_from(&provider_key);
                 }
                 if provider_cfg.compat.is_some() {
-                    entry.compat = merge_compat_and_generation(
-                        provider_cfg.compat.as_ref(),
-                        None,
-                        provider_cfg.generation.as_ref(),
-                        None,
-                    );
-                } else if provider_cfg.generation.is_some() {
-                    apply_generation_config(&mut entry.compat, provider_cfg.generation.as_ref());
+                    entry.compat.clone_from(&provider_cfg.compat);
                 }
                 if provider_cfg.auth_header.is_some() {
                     entry.auth_header = auth_header;
-                }
-                if provider_cfg.tool_use_profile.is_some() {
-                    entry
-                        .tool_use_profile
-                        .clone_from(&provider_tool_use_profile);
                 }
             }
             continue;
@@ -2309,7 +2806,10 @@ fn apply_custom_models_with_key_resolver(
                 continue;
             }
 
-            let model_api = model_cfg.api.as_deref().unwrap_or(provider_api);
+            let model_api = model_cfg
+                .api
+                .as_deref()
+                .unwrap_or(provider_api_string.as_str());
             let model_api_parsed: Api = model_api
                 .parse()
                 .unwrap_or_else(|_| Api::Custom(model_api.to_string()));
@@ -2342,12 +2842,6 @@ fn apply_custom_models_with_key_resolver(
                 provider_defaults.map_or(128_000, |defaults| defaults.context_window);
             let default_max_tokens =
                 provider_defaults.map_or(16_384, |defaults| defaults.max_tokens);
-            let tool_use_profile = model_cfg.tool_use_profile.as_deref().map_or_else(
-                || provider_tool_use_profile.clone(),
-                |profile_name| {
-                    resolve_tool_use_profile(&config.tool_use_profiles, Some(profile_name))
-                },
-            );
 
             let model = Model {
                 id: normalized_model_id.clone(),
@@ -2378,26 +2872,18 @@ fn apply_custom_models_with_key_resolver(
                 api_key: provider_key.clone(),
                 headers: model_headers,
                 auth_header,
-                compat: merge_compat_and_generation(
-                    provider_cfg.compat.as_ref(),
-                    model_cfg.compat.as_ref(),
-                    provider_cfg.generation.as_ref(),
-                    model_cfg.generation.as_ref(),
-                ),
-                tool_use_profile,
+                compat: merge_compat(provider_cfg.compat.as_ref(), model_cfg.compat.as_ref()),
                 oauth_config: None,
             });
         }
     }
 }
 
-fn merge_compat_and_generation(
+fn merge_compat(
     provider_compat: Option<&CompatConfig>,
     model_compat: Option<&CompatConfig>,
-    provider_generation: Option<&GenerationConfig>,
-    model_generation: Option<&GenerationConfig>,
 ) -> Option<CompatConfig> {
-    let mut compat = match (provider_compat, model_compat) {
+    match (provider_compat, model_compat) {
         (None, None) => None,
         (Some(provider), None) => Some(provider.clone()),
         (None, Some(model)) => Some(model.clone()),
@@ -2442,11 +2928,6 @@ fn merge_compat_and_generation(
                     .stop_reason_field
                     .clone()
                     .or_else(|| provider.stop_reason_field.clone()),
-                stop: model.stop.clone().or_else(|| provider.stop.clone()),
-                temperature: model.temperature.or(provider.temperature),
-                top_p: model.top_p.or(provider.top_p),
-                min_p: model.min_p.or(provider.min_p),
-                repetition_penalty: model.repetition_penalty.or(provider.repetition_penalty),
                 custom_headers,
                 open_router_routing: model
                     .open_router_routing
@@ -2469,36 +2950,6 @@ fn merge_compat_and_generation(
                     .or_else(|| provider.thinking_format.clone()),
             })
         }
-    };
-
-    apply_generation_config(&mut compat, provider_generation);
-    apply_generation_config(&mut compat, model_generation);
-    compat
-}
-
-fn apply_generation_config(
-    compat: &mut Option<CompatConfig>,
-    generation: Option<&GenerationConfig>,
-) {
-    let Some(generation) = generation else {
-        return;
-    };
-
-    let compat = compat.get_or_insert_with(CompatConfig::default);
-    if generation.stop.is_some() {
-        compat.stop.clone_from(&generation.stop);
-    }
-    if generation.temperature.is_some() {
-        compat.temperature = generation.temperature;
-    }
-    if generation.top_p.is_some() {
-        compat.top_p = generation.top_p;
-    }
-    if generation.min_p.is_some() {
-        compat.min_p = generation.min_p;
-    }
-    if generation.repetition_penalty.is_some() {
-        compat.repetition_penalty = generation.repetition_penalty;
     }
 }
 
@@ -2538,6 +2989,57 @@ fn resolve_headers_with_base(
         }
     }
     resolved
+}
+
+fn has_complete_custom_authorization_header(headers: &HashMap<String, String>) -> bool {
+    let mut authorization_headers = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
+    let Some((_, value)) = authorization_headers.next() else {
+        return false;
+    };
+
+    !value.trim().is_empty() && authorization_headers.next().is_none()
+}
+
+fn prepare_model_catalog_headers(
+    headers: Option<&HashMap<String, String>>,
+    base_dir: Option<&Path>,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut deferred = headers.cloned().unwrap_or_default();
+    let mut authorization_names = deferred
+        .keys()
+        .filter(|name| name.eq_ignore_ascii_case("Authorization"));
+    let Some(authorization_name) = authorization_names.next().cloned() else {
+        return (HashMap::new(), deferred);
+    };
+    if authorization_names.next().is_some() {
+        return (HashMap::new(), deferred);
+    }
+
+    let Some(unresolved_value) = deferred.remove(&authorization_name) else {
+        return (HashMap::new(), deferred);
+    };
+    let resolved = resolve_value_with_base(&unresolved_value, base_dir)
+        .map(|value| HashMap::from([(authorization_name, value)]))
+        .unwrap_or_default();
+    (resolved, deferred)
+}
+
+fn resolve_provider_headers_snapshot(
+    config: &ModelsConfig,
+    base_dir: Option<&Path>,
+) -> ProviderHeadersSnapshot {
+    config
+        .providers
+        .iter()
+        .map(|(provider, provider_config)| {
+            (
+                provider.clone(),
+                resolve_headers_with_base(provider_config.headers.as_ref(), base_dir),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2685,6 +3187,794 @@ pub fn default_models_path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("models.json")
 }
 
+/// Path for the generated, opt-in provider catalog stored beside
+/// `models.json`.
+///
+/// The generated file is loaded before `models.json`, ensuring
+/// that user-authored configuration always wins without either file being
+/// merged or rewritten on disk.
+pub fn fetched_models_path(models_path: &Path) -> PathBuf {
+    models_path.with_file_name("models.fetched.json")
+}
+
+#[cfg(windows)]
+fn windows_metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+const fn windows_metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn open_regular_file_for_read(path: &Path, allow_final_symlink: bool) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    let access_context = crate::platform::EffectiveModeAccessContext::current()?;
+    #[cfg(unix)]
+    ensure_model_catalog_ancestors_searchable(path, &access_context)?;
+
+    let initial_metadata = fs::symlink_metadata(path)?;
+    let initial_is_symlink = initial_metadata.file_type().is_symlink();
+    if windows_metadata_is_reparse_point(&initial_metadata) && !initial_is_symlink {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "model catalog path must not be a Windows reparse point",
+        ));
+    }
+    let resolved_path = if initial_is_symlink && allow_final_symlink {
+        fs::canonicalize(path)?
+    } else {
+        path.to_path_buf()
+    };
+    let metadata = fs::symlink_metadata(&resolved_path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_file()
+        || (initial_is_symlink && !allow_final_symlink)
+        || windows_metadata_is_reparse_point(&metadata)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "model catalog path must be a regular, non-symlink file",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        ensure_model_catalog_ancestors_searchable(&resolved_path, &access_context)?;
+        access_context.ensure(
+            &metadata,
+            &resolved_path,
+            crate::platform::UNIX_ACCESS_READ,
+            "model catalog read access",
+        )?;
+    }
+
+    #[cfg(unix)]
+    let file = {
+        let descriptor = rustix::fs::open(
+            &resolved_path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?;
+        fs::File::from(descriptor)
+    };
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&resolved_path)?
+    };
+    #[cfg(not(any(unix, windows)))]
+    let file = fs::File::open(&resolved_path)?;
+
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() || windows_metadata_is_reparse_point(&opened_metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "model catalog path changed to a non-regular file while opening it",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        if metadata.dev() != opened_metadata.dev() || metadata.ino() != opened_metadata.ino() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "model catalog path changed while opening it",
+            ));
+        }
+        access_context.ensure(
+            &opened_metadata,
+            &resolved_path,
+            crate::platform::UNIX_ACCESS_READ,
+            "model catalog read access",
+        )?;
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn absolute_model_catalog_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+#[cfg(unix)]
+fn ensure_model_catalog_lexical_ancestors_searchable(
+    path: &Path,
+    access_context: &crate::platform::EffectiveModeAccessContext,
+) -> std::io::Result<Option<PathBuf>> {
+    let absolute = absolute_model_catalog_path(path)?;
+    let mut nearest_existing = None;
+    let mut ancestor = absolute.parent();
+    while let Some(directory) = ancestor {
+        if directory.as_os_str().is_empty() {
+            break;
+        }
+
+        match fs::symlink_metadata(directory) {
+            Ok(lexical_metadata) => {
+                let metadata = if lexical_metadata.file_type().is_symlink() {
+                    fs::metadata(directory).map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::NotFound {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "model catalog path contains a dangling symlink ancestor: {}",
+                                    directory.display()
+                                ),
+                            )
+                        } else {
+                            error
+                        }
+                    })?
+                } else {
+                    lexical_metadata
+                };
+                if nearest_existing.is_none() {
+                    nearest_existing = Some(directory.to_path_buf());
+                }
+                if !metadata.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        format!(
+                            "model catalog path ancestor is not a directory: {}",
+                            directory.display()
+                        ),
+                    ));
+                }
+                access_context.ensure(
+                    &metadata,
+                    directory,
+                    crate::platform::UNIX_ACCESS_SEARCH,
+                    "model catalog path traversal",
+                )?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        ancestor = directory.parent();
+    }
+
+    Ok(nearest_existing)
+}
+
+#[cfg(unix)]
+fn ensure_model_catalog_ancestors_searchable(
+    path: &Path,
+    access_context: &crate::platform::EffectiveModeAccessContext,
+) -> std::io::Result<Option<PathBuf>> {
+    let nearest_existing = ensure_model_catalog_lexical_ancestors_searchable(path, access_context)?;
+
+    // The lexical walk covers components named by the caller. The resolved
+    // walk additionally covers directories reached through symlinked parents
+    // or through an allowed final symlink (models.json only).
+    let canonical_target = match fs::canonicalize(path) {
+        Ok(target) => Some(target),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => nearest_existing
+            .as_deref()
+            .map(fs::canonicalize)
+            .transpose()?,
+        Err(error) => return Err(error),
+    };
+    if let Some(target) = canonical_target {
+        ensure_model_catalog_lexical_ancestors_searchable(&target, access_context)?;
+    }
+
+    Ok(nearest_existing)
+}
+
+#[cfg(unix)]
+fn ensure_existing_model_catalog_target_access(
+    path: &Path,
+    initial_metadata: &fs::Metadata,
+    access_context: &crate::platform::EffectiveModeAccessContext,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let resolved = fs::canonicalize(path)?;
+    ensure_model_catalog_ancestors_searchable(&resolved, access_context)?;
+    access_context.ensure(
+        initial_metadata,
+        path,
+        crate::platform::UNIX_ACCESS_READ | crate::platform::UNIX_ACCESS_WRITE,
+        "generated model catalog read-write access",
+    )?;
+
+    // Open through the caller's original path with NOFOLLOW, then compare
+    // against the first metadata snapshot. Opening the canonicalized target
+    // would let a final-component swap to a symlink escape the explicit
+    // no-symlink policy during this preflight window.
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDWR
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let opened = fs::File::from(descriptor);
+    let opened_metadata = opened.metadata()?;
+    if !opened_metadata.is_file()
+        || initial_metadata.dev() != opened_metadata.dev()
+        || initial_metadata.ino() != opened_metadata.ino()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "generated model catalog target changed during persistence preflight",
+        ));
+    }
+    access_context.ensure(
+        &opened_metadata,
+        path,
+        crate::platform::UNIX_ACCESS_READ | crate::platform::UNIX_ACCESS_WRITE,
+        "generated model catalog read-write access",
+    )
+}
+
+#[cfg(unix)]
+fn ensure_model_catalog_creation_boundary_access(
+    path: &Path,
+    target_exists: bool,
+    nearest_existing: Option<PathBuf>,
+    access_context: &crate::platform::EffectiveModeAccessContext,
+) -> std::io::Result<()> {
+    let creation_directory = if target_exists {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    } else {
+        nearest_existing.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "no existing ancestor for generated model catalog {}",
+                    path.display()
+                ),
+            )
+        })?
+    };
+    let resolved_directory = fs::canonicalize(&creation_directory)?;
+    ensure_model_catalog_ancestors_searchable(&resolved_directory, access_context)?;
+    let directory_metadata = fs::metadata(&resolved_directory)?;
+    if !directory_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!(
+                "generated model catalog creation boundary is not a directory: {}",
+                creation_directory.display()
+            ),
+        ));
+    }
+    access_context.ensure(
+        &directory_metadata,
+        &resolved_directory,
+        crate::platform::UNIX_ACCESS_READ
+            | crate::platform::UNIX_ACCESS_WRITE
+            | crate::platform::UNIX_ACCESS_SEARCH,
+        "generated model catalog creation, replacement, and directory sync",
+    )
+}
+
+#[cfg(unix)]
+fn ensure_model_catalog_persistence_access_for_platform(
+    path: &Path,
+    target_metadata: Option<&fs::Metadata>,
+) -> std::io::Result<()> {
+    let access_context = crate::platform::EffectiveModeAccessContext::current()?;
+    let nearest_existing = ensure_model_catalog_ancestors_searchable(path, &access_context)?;
+    if let Some(initial_metadata) = target_metadata {
+        ensure_existing_model_catalog_target_access(path, initial_metadata, &access_context)?;
+    }
+    ensure_model_catalog_creation_boundary_access(
+        path,
+        target_metadata.is_some(),
+        nearest_existing,
+        &access_context,
+    )
+}
+
+#[cfg(windows)]
+fn ensure_model_catalog_persistence_access_for_platform(
+    path: &Path,
+    target_metadata: Option<&fs::Metadata>,
+) -> std::io::Result<()> {
+    if target_metadata.is_none() {
+        return Ok(());
+    }
+
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() || windows_metadata_is_reparse_point(&opened_metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "generated model catalog target changed or became a reparse point during persistence preflight: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn ensure_model_catalog_persistence_access_for_platform(
+    _path: &Path,
+    _target_metadata: Option<&fs::Metadata>,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Validate every permission needed for an atomic generated-catalog update
+/// before the caller creates directories, lock entries, or temporary files.
+///
+/// Existing targets must be regular non-symlink files and grant the effective
+/// Unix owner/group/other class both read and write access. Missing targets use
+/// the closest existing directory as the creation boundary. In either case the
+/// effective class must grant read + write + search on the directory that will
+/// be mutated: atomic replacement needs write/search, and the final durability
+/// sync opens that directory for reading. UID 0 intentionally receives no
+/// policy bypass.
+pub(crate) fn ensure_model_catalog_persistence_access(path: &Path) -> std::io::Result<()> {
+    let target_metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if target_metadata.as_ref().is_some_and(|metadata| {
+        metadata.file_type().is_symlink() || windows_metadata_is_reparse_point(metadata)
+    }) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "generated model catalog target must not be a symlink: {}",
+                path.display()
+            ),
+        ));
+    }
+    if target_metadata
+        .as_ref()
+        .is_some_and(|metadata| !metadata.is_file())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "generated model catalog target must be a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    ensure_model_catalog_persistence_access_for_platform(path, target_metadata.as_ref())
+}
+
+fn read_bounded_model_catalog(
+    path: &Path,
+    max_bytes: usize,
+    description: &str,
+    allow_final_symlink: bool,
+) -> std::io::Result<String> {
+    let file = open_regular_file_for_read(path, allow_final_symlink)?;
+    if file.metadata()?.len() > max_bytes as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{description} exceeds {max_bytes} bytes"),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take((max_bytes + 1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{description} exceeds {max_bytes} bytes"),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{description} is not valid UTF-8: {error}"),
+        )
+    })
+}
+
+fn load_models_config(path: &Path) -> std::result::Result<ModelsConfig, Error> {
+    read_bounded_model_catalog(path, MAX_FETCHED_CATALOG_BYTES, "model catalog", true)
+        .map_err(|error| {
+            Error::config(format!(
+                "Failed to read model catalog {}: {error}",
+                path.display()
+            ))
+        })
+        .and_then(|contents| serde_json::from_str::<ModelsConfig>(&contents).map_err(Error::from))
+}
+
+pub(crate) fn resolve_model_catalog_provider_config(
+    provider: &str,
+    models_path: &Path,
+) -> std::result::Result<Option<ModelCatalogProviderConfig>, Error> {
+    resolve_model_catalog_provider_config_with_api_key(provider, models_path, "")
+}
+
+/// Resolve the non-secret shape of a live model-discovery route without
+/// resolving any credential or configured header values.
+pub(crate) fn model_catalog_provider_route_shape(
+    provider: &str,
+    models_path: &Path,
+) -> std::result::Result<Option<(String, String)>, Error> {
+    let config = match fs::symlink_metadata(models_path) {
+        Ok(_) => Some(load_models_config(models_path)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(Error::config(format!(
+                "Failed to inspect model catalog {}: {error}",
+                models_path.display()
+            )));
+        }
+    };
+
+    let target_provider = canonical_provider_key(provider);
+    let mut matching_configs = config.as_ref().into_iter().flat_map(|config| {
+        config
+            .providers
+            .iter()
+            .filter(|(configured, _)| canonical_provider_key(configured) == target_provider)
+    });
+    let configured = matching_configs.next();
+    if matching_configs.next().is_some() {
+        return Err(Error::config(format!(
+            "models.json contains multiple provider aliases matching {provider:?}; keep one canonical provider entry"
+        )));
+    }
+
+    if configured.is_none() && custom_provider_defaults(provider).is_none() {
+        return Ok(None);
+    }
+
+    let empty_config = ProviderConfig::default();
+    let (configured_provider, provider_config) = configured
+        .map_or((provider, &empty_config), |(configured, config)| {
+            (configured.as_str(), config)
+        });
+    if !provider_has_catalog_route(configured_provider, provider_config) {
+        return Ok(None);
+    }
+    let (_, api, base_url, _) = resolved_provider_transport(configured_provider, provider_config);
+    Ok(Some((base_url, api)))
+}
+
+/// Resolve a model-catalog route without evaluating its configured fallback
+/// credential unless the route needs Pi to generate an Authorization header.
+///
+/// Apart from preserving the documented precedence, the lazy resolution is
+/// important for `apiKey` values backed by files or shell commands: an unused
+/// fallback must not produce side effects or failures merely because the route
+/// itself is being inspected.
+pub(crate) fn resolve_model_catalog_provider_config_with_api_key(
+    provider: &str,
+    models_path: &Path,
+    caller_api_key: &str,
+) -> std::result::Result<Option<ModelCatalogProviderConfig>, Error> {
+    Ok(
+        prepare_model_catalog_provider_config(provider, models_path)?
+            .map(|prepared| prepared.into_route(caller_api_key.trim().is_empty())),
+    )
+}
+
+pub(crate) fn prepare_model_catalog_provider_config(
+    provider: &str,
+    models_path: &Path,
+) -> std::result::Result<Option<PreparedModelCatalogProviderConfig>, Error> {
+    let config = match fs::symlink_metadata(models_path) {
+        Ok(_) => Some(load_models_config(models_path)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(Error::config(format!(
+                "Failed to inspect model catalog {}: {error}",
+                models_path.display()
+            )));
+        }
+    };
+
+    prepare_model_catalog_provider_config_from_loaded(provider, models_path, config.as_ref(), None)
+}
+
+fn resolve_model_catalog_provider_config_from_loaded(
+    provider: &str,
+    models_path: &Path,
+    config: Option<&ModelsConfig>,
+    resolve_fallback_api_key: bool,
+    provider_headers_snapshot: Option<&ProviderHeadersSnapshot>,
+) -> std::result::Result<Option<ModelCatalogProviderConfig>, Error> {
+    Ok(prepare_model_catalog_provider_config_from_loaded(
+        provider,
+        models_path,
+        config,
+        provider_headers_snapshot,
+    )?
+    .map(|prepared| prepared.into_route(resolve_fallback_api_key)))
+}
+
+fn prepare_model_catalog_provider_config_from_loaded(
+    provider: &str,
+    models_path: &Path,
+    config: Option<&ModelsConfig>,
+    provider_headers_snapshot: Option<&ProviderHeadersSnapshot>,
+) -> std::result::Result<Option<PreparedModelCatalogProviderConfig>, Error> {
+    let target_provider = canonical_provider_key(provider);
+    let mut matching_configs = config.into_iter().flat_map(|config| {
+        config
+            .providers
+            .iter()
+            .filter(|(configured, _)| canonical_provider_key(configured) == target_provider)
+    });
+    let configured = matching_configs.next();
+    if matching_configs.next().is_some() {
+        return Err(Error::config(format!(
+            "models.json contains multiple provider aliases matching {provider:?}; keep one canonical provider entry"
+        )));
+    }
+
+    if configured.is_none() && custom_provider_defaults(provider).is_none() {
+        return Ok(None);
+    }
+
+    let empty_config = ProviderConfig::default();
+    let (configured_provider, provider_config) = configured
+        .map_or((provider, &empty_config), |(configured, config)| {
+            (configured.as_str(), config)
+        });
+    if !provider_has_catalog_route(configured_provider, provider_config) {
+        return Err(Error::config(format!(
+            "models.json provider {configured_provider:?} requires a non-empty baseUrl before live model discovery"
+        )));
+    }
+    let (_, api, base_url, auth_header) =
+        resolved_provider_transport(configured_provider, provider_config);
+    let base_dir = models_path.parent();
+    let (headers, deferred_headers) = provider_headers_snapshot.map_or_else(
+        || prepare_model_catalog_headers(provider_config.headers.as_ref(), base_dir),
+        |snapshot| {
+            (
+                snapshot
+                    .get(configured_provider)
+                    .cloned()
+                    .unwrap_or_default(),
+                HashMap::new(),
+            )
+        },
+    );
+    Ok(Some(PreparedModelCatalogProviderConfig {
+        route: ModelCatalogProviderConfig {
+            base_url,
+            api,
+            api_key: None,
+            headers,
+            auth_header,
+        },
+        fallback_api_key: provider_config.api_key.clone(),
+        deferred_headers,
+        base_dir: base_dir.map(Path::to_path_buf),
+    }))
+}
+
+fn load_fetched_models_config(
+    path: &Path,
+    models_path: &Path,
+    manual_config: Option<&ModelsConfig>,
+    provider_headers_snapshot: Option<&ProviderHeadersSnapshot>,
+) -> std::result::Result<(ModelsConfig, Vec<String>), Error> {
+    let contents = read_generated_catalog(path).map_err(|error| {
+        Error::config(format!(
+            "Failed to read generated model catalog {}: {error}",
+            path.display()
+        ))
+    })?;
+    let catalog = parse_persisted_fetched_catalog(&contents).map_err(|error| {
+        Error::config(format!(
+            "Invalid generated model catalog {}: {error}",
+            path.display()
+        ))
+    })?;
+
+    let mut binding_errors = Vec::new();
+    let providers = catalog.providers.into_iter().filter_map(|(provider, fetched)| {
+        let route = match resolve_model_catalog_provider_config_from_loaded(
+            &provider,
+            models_path,
+            manual_config,
+            false,
+            provider_headers_snapshot,
+        ) {
+            Ok(Some(route)) => route,
+            Ok(None) => {
+                binding_errors.push(format!(
+                    "Ignoring generated model membership for provider {provider:?}: no current built-in or models.json route exists; refresh and persist the catalog after configuring a route"
+                ));
+                return None;
+            }
+            Err(error) => {
+                binding_errors.push(format!(
+                    "Ignoring generated model membership for provider {provider:?}: current route could not be resolved: {error}"
+                ));
+                return None;
+            }
+        };
+        if !model_catalog_route_is_persistable(&route) {
+            binding_errors.push(format!(
+                "Ignoring generated model membership for provider {provider:?}: the current route contains a non-empty query/header value outside a recognized credential channel, so tenant or deployment identity cannot be verified; refresh live without persistence or configure a bindable route"
+            ));
+            return None;
+        }
+        let current_fingerprint = model_catalog_route_fingerprint(&provider, &route);
+        if current_fingerprint != fetched.route_fingerprint {
+            binding_errors.push(format!(
+                "Ignoring generated model membership for provider {provider:?}: the saved endpoint/transport binding no longer matches the current route; run --fetch-models {provider} --refresh-models --persist-models to replace it"
+            ));
+            return None;
+        }
+
+        let models = fetched
+            .models
+            .into_iter()
+            .map(|model| ModelConfig {
+                id: model.id,
+                ..ModelConfig::default()
+            })
+            .collect();
+        Some((
+            provider,
+            ProviderConfig {
+                models: Some(models),
+                ..ProviderConfig::default()
+            },
+        ))
+    })
+    .collect();
+    Ok((ModelsConfig { providers }, binding_errors))
+}
+
+pub(crate) fn parse_persisted_fetched_catalog(
+    contents: &str,
+) -> std::result::Result<PersistedFetchedCatalog, Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(contents);
+    let catalog = PersistedFetchedCatalog::deserialize(&mut deserializer).map_err(Error::from)?;
+    deserializer.end().map_err(Error::from)?;
+    validate_persisted_fetched_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+pub(crate) fn validate_persisted_fetched_catalog(
+    catalog: &PersistedFetchedCatalog,
+) -> std::result::Result<(), Error> {
+    if catalog.schema != FETCHED_MODELS_SCHEMA {
+        return Err(Error::config(format!(
+            "Unsupported generated model catalog schema {:?}; expected {FETCHED_MODELS_SCHEMA:?}",
+            catalog.schema
+        )));
+    }
+
+    if catalog.providers.len() > MAX_FETCHED_PROVIDERS {
+        return Err(Error::config(format!(
+            "Generated model catalog contains {} providers; maximum is {MAX_FETCHED_PROVIDERS}",
+            catalog.providers.len()
+        )));
+    }
+
+    let mut canonical_providers = HashSet::new();
+    for (provider, fetched) in &catalog.providers {
+        if !is_safe_model_catalog_identifier(provider, MAX_FETCHED_PROVIDER_ID_BYTES) {
+            return Err(Error::config(
+                "Generated model catalog contains an invalid provider ID",
+            ));
+        }
+        let canonical = canonical_provider_key(provider);
+        if !canonical_providers.insert(canonical.clone()) {
+            return Err(Error::config(format!(
+                "Generated model catalog contains duplicate aliases for provider {canonical:?}"
+            )));
+        }
+        if !is_valid_model_catalog_route_fingerprint(&fetched.route_fingerprint) {
+            return Err(Error::config(format!(
+                "Generated model catalog contains an invalid route fingerprint for provider {provider:?}"
+            )));
+        }
+        if fetched.fetched_at_unix_ms == 0 {
+            return Err(Error::config(format!(
+                "Generated model catalog contains an invalid fetched timestamp for provider {provider:?}"
+            )));
+        }
+        let mut seen_model_ids = HashSet::new();
+        if fetched.models.is_empty() {
+            return Err(Error::config(format!(
+                "Generated model catalog contains an empty model list for provider {provider:?}"
+            )));
+        }
+        if fetched.models.len() > MAX_FETCHED_MODELS_PER_PROVIDER {
+            return Err(Error::config(format!(
+                "Generated model catalog contains {} models for provider {provider:?}; maximum is {MAX_FETCHED_MODELS_PER_PROVIDER}",
+                fetched.models.len()
+            )));
+        }
+        let total_model_id_bytes = fetched
+            .models
+            .iter()
+            .try_fold(0usize, |total, model| total.checked_add(model.id.len()))
+            .ok_or_else(|| Error::config("Generated model catalog model-ID size overflow"))?;
+        if total_model_id_bytes > MAX_FETCHED_MODEL_BYTES_PER_PROVIDER {
+            return Err(Error::config(format!(
+                "Generated model catalog contains {total_model_id_bytes} model-ID bytes for provider {provider:?}; maximum is {MAX_FETCHED_MODEL_BYTES_PER_PROVIDER}"
+            )));
+        }
+        for model in &fetched.models {
+            if !is_safe_model_catalog_identifier(&model.id, MAX_FETCHED_MODEL_ID_BYTES) {
+                return Err(Error::config(format!(
+                    "Generated model catalog contains an invalid model ID for provider {provider:?}"
+                )));
+            }
+            if !seen_model_ids.insert(normalized_registry_key(provider, &model.id)) {
+                return Err(Error::config(format!(
+                    "Generated model catalog contains duplicate registry identity for model ID {:?} and provider {provider:?}",
+                    model.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn read_generated_catalog(path: &Path) -> std::io::Result<String> {
+    read_bounded_model_catalog(
+        path,
+        MAX_FETCHED_CATALOG_BYTES,
+        "generated model catalog",
+        false,
+    )
+}
+
 // === Ad-hoc model support ===
 
 #[derive(Debug, Clone, Copy)]
@@ -2761,7 +4051,6 @@ where
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2795,7 +4084,6 @@ where
         headers: HashMap::new(),
         auth_header: defaults.auth_header,
         compat: None,
-        tool_use_profile: None,
         oauth_config: None,
     })
 }
@@ -2875,10 +4163,173 @@ mod tests {
         (key.0, key.1)
     }
 
+    fn test_catalog_route(
+        base_url: &str,
+        api_key: Option<&str>,
+        auth_header: bool,
+    ) -> ModelCatalogProviderConfig {
+        ModelCatalogProviderConfig {
+            base_url: base_url.to_string(),
+            api: "openai-completions".to_string(),
+            api_key: api_key.map(ToString::to_string),
+            headers: HashMap::new(),
+            auth_header,
+        }
+    }
+
+    fn fetched_provider_json(
+        provider: &str,
+        route: &ModelCatalogProviderConfig,
+        model_ids: &[&str],
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "routeFingerprint": model_catalog_route_fingerprint(provider, route),
+            "fetchedAtUnixMs": 1_800_000_000_000_u64,
+            "models": model_ids
+                .iter()
+                .map(|id| serde_json::json!({"id": id}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn persisted_route_fingerprint_excludes_secret_values_but_binds_transport_shape() {
+        let mut first = test_catalog_route(
+            "https://catalog.example/v1?api_key=first-secret&token=one&token=two#fragment",
+            Some("first-secret"),
+            true,
+        );
+        first.headers.insert(
+            "Authorization".to_string(),
+            "Bearer first-secret".to_string(),
+        );
+        first
+            .headers
+            .insert("X-API-Key".to_string(), "header-secret-a".to_string());
+
+        let mut rotated = test_catalog_route(
+            "https://catalog.example/v1?api_key=second-secret&token=three&token=four#different",
+            Some("second-secret"),
+            true,
+        );
+        rotated.headers.insert(
+            "authorization".to_string(),
+            "Bearer second-secret".to_string(),
+        );
+        rotated
+            .headers
+            .insert("x-api-key".to_string(), "header-secret-b".to_string());
+
+        assert!(model_catalog_route_is_persistable(&first));
+        assert!(model_catalog_route_is_persistable(&rotated));
+
+        assert_eq!(
+            model_catalog_route_fingerprint("acme", &first),
+            model_catalog_route_fingerprint("acme", &rotated),
+            "credential values, fragments, header casing, and header values must not become persisted verifiers"
+        );
+
+        rotated.base_url =
+            "https://catalog.example/v1?API_KEY=second-secret&token=three&token=four".to_string();
+        assert_ne!(
+            model_catalog_route_fingerprint("acme", &first),
+            model_catalog_route_fingerprint("acme", &rotated),
+            "case-sensitive query-name changes must invalidate generated membership"
+        );
+
+        rotated.base_url =
+            "https://catalog.example/v1?token=three&api_key=second-secret&token=four".to_string();
+        assert_ne!(
+            model_catalog_route_fingerprint("acme", &first),
+            model_catalog_route_fingerprint("acme", &rotated),
+            "query-pair ordering changes must invalidate generated membership"
+        );
+
+        rotated.base_url =
+            "https://catalog.example/v1?api_key=second-secret&token=three".to_string();
+        assert_ne!(
+            model_catalog_route_fingerprint("acme", &first),
+            model_catalog_route_fingerprint("acme", &rotated),
+            "repeated credential-query multiplicity is part of the transport shape"
+        );
+
+        rotated.base_url = "https://catalog.example/v2".to_string();
+        assert_ne!(
+            model_catalog_route_fingerprint("acme", &first),
+            model_catalog_route_fingerprint("acme", &rotated),
+            "endpoint path changes must invalidate generated membership"
+        );
+    }
+
+    #[test]
+    fn catalog_persistence_classification_is_exact_not_substring_based() {
+        let mut recognized = test_catalog_route(
+            "https://catalog.example/v1?ToKeN=rotatable-secret",
+            None,
+            false,
+        );
+        recognized.headers.insert(
+            "x-GoOg-ApI-kEy".to_string(),
+            "rotatable-header-secret".to_string(),
+        );
+        assert!(model_catalog_route_is_persistable(&recognized));
+
+        let ambiguous_query = test_catalog_route(
+            "https://catalog.example/v1?tenant_token=tenant-a",
+            None,
+            false,
+        );
+        assert!(!model_catalog_route_is_persistable(&ambiguous_query));
+
+        let mut ambiguous_header = test_catalog_route("https://catalog.example/v1", None, false);
+        ambiguous_header
+            .headers
+            .insert("x-tenant-token".to_string(), "tenant-a".to_string());
+        assert!(!model_catalog_route_is_persistable(&ambiguous_header));
+    }
+
+    #[cfg(unix)]
+    struct UnixModeGuard {
+        path: PathBuf,
+        original: fs::Permissions,
+    }
+
+    #[cfg(unix)]
+    impl UnixModeGuard {
+        fn set(path: &Path, mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let original = fs::metadata(path)
+                .expect("stat permission fixture")
+                .permissions();
+            let mut restricted = original.clone();
+            restricted.set_mode(mode);
+            fs::set_permissions(path, restricted).expect("restrict permission fixture");
+            Self {
+                path: path.to_path_buf(),
+                original,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UnixModeGuard {
+        fn drop(&mut self) {
+            if let Err(error) = fs::set_permissions(&self.path, self.original.clone()) {
+                eprintln!(
+                    "failed to restore permissions for {}: {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+
     #[test]
     fn parse_legacy_generated_models_extracts_known_legacy_only_providers() {
         let parsed = parse_legacy_generated_models();
-        if LEGACY_MODELS_GENERATED_TS.contains("export const MODELS = {} as const;") {
+        if crate::embedded_assets::legacy_models_generated_ts()
+            .contains("export const MODELS = {} as const;")
+        {
             assert!(
                 parsed.is_empty(),
                 "published stub catalog should not parse into legacy entries"
@@ -2985,8 +4436,7 @@ mod tests {
     #[test]
     fn built_in_models_include_core_provider_entries() {
         let (_dir, auth) = test_auth_storage();
-        // 用隔离版: 避免开发者本机 OPENAI_API_KEY 等环境变量覆盖 storage 里的测试 key
-        let models = built_in_models_isolated(&auth, ModelRegistryLoadMode::Full);
+        let models = built_in_models(&auth, ModelRegistryLoadMode::Full);
 
         assert!(
             models.iter().any(
@@ -3034,6 +4484,75 @@ mod tests {
         assert_eq!(openai.api_key.as_deref(), Some("openai-auth-key"));
         assert_eq!(google.api_key.as_deref(), Some("google-auth-key"));
         assert_eq!(openrouter.api_key.as_deref(), Some("openrouter-auth-key"));
+    }
+
+    #[test]
+    fn built_in_models_seed_gpt_5_6_family_for_openai_and_codex() {
+        let (_dir, auth) = test_auth_storage();
+        let models = built_in_models(&auth, ModelRegistryLoadMode::Full);
+
+        for (id, input, output, cache_read, cache_write) in [
+            ("gpt-5.6", 5.0, 30.0, 0.5, 6.25),
+            ("gpt-5.6-sol", 5.0, 30.0, 0.5, 6.25),
+            ("gpt-5.6-terra", 2.0, 12.0, 0.2, 2.5),
+            ("gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25),
+        ] {
+            let assert_cost = |actual: f64, expected: f64, field: &str| {
+                assert!(
+                    (actual - expected).abs() < f64::EPSILON,
+                    "{id} {field}: expected {expected}, got {actual}"
+                );
+            };
+            let openai = models
+                .iter()
+                .find(|m| m.model.provider == "openai" && m.model.id == id);
+            assert!(openai.is_some(), "missing openai seed for {id}");
+            let Some(openai) = openai else {
+                return;
+            };
+            assert_eq!(openai.model.api, Api::OpenAIResponses.to_string());
+            assert_eq!(openai.model.base_url, "https://api.openai.com/v1");
+            assert!(openai.model.reasoning);
+            assert_eq!(openai.api_key.as_deref(), Some("openai-auth-key"));
+            assert_eq!(openai.model.context_window, 1_050_000);
+            assert_eq!(openai.model.max_tokens, 128_000);
+            assert_cost(openai.model.cost.input, input, "input cost");
+            assert_cost(openai.model.cost.output, output, "output cost");
+            assert_cost(openai.model.cost.cache_read, cache_read, "cache-read cost");
+            assert_cost(
+                openai.model.cost.cache_write,
+                cache_write,
+                "cache-write cost",
+            );
+
+            // All GPT-5.6 API models accept the xhigh and max reasoning tiers.
+            assert!(openai.supports_xhigh(), "{id} should support xhigh");
+            assert!(openai.supports_max(), "{id} should support max");
+
+            if id != "gpt-5.6" {
+                let codex = models
+                    .iter()
+                    .find(|m| m.model.provider == "openai-codex" && m.model.id == id);
+                assert!(codex.is_some(), "missing openai-codex seed for {id}");
+                let Some(codex) = codex else {
+                    return;
+                };
+                assert_eq!(codex.model.api, Api::OpenAICodexResponses.to_string());
+                assert_eq!(codex.model.base_url, "https://chatgpt.com/backend-api");
+                assert!(codex.model.name.ends_with("Codex"));
+                assert_eq!(codex.model.context_window, 1_050_000);
+                assert_cost(codex.model.cost.input, input, "Codex input cost");
+                assert_cost(codex.model.cost.output, output, "Codex output cost");
+                assert_cost(
+                    codex.model.cost.cache_read,
+                    cache_read,
+                    "Codex cache-read cost",
+                );
+                assert_cost(codex.model.cost.cache_write, 0.0, "Codex cache-write cost");
+                assert!(codex.supports_xhigh(), "{id} Codex should support xhigh");
+                assert!(codex.supports_max(), "{id} Codex should support max");
+            }
+        }
     }
 
     #[test]
@@ -3162,6 +4681,12 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.slug == "openrouter/anthropic/claude-sonnet-4.6")
         );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| !candidate.slug.starts_with("github-models/")),
+            "the retired GitHub Models service must not leak through the captured upstream snapshot"
+        );
     }
 
     #[test]
@@ -3179,15 +4704,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_custom_models_overrides_provider_fields() {
+    fn apply_custom_models_overrides_provider_fields_but_not_runtime_credentials() {
         let (_dir, auth) = test_auth_storage();
         let mut models = built_in_models(&auth, ModelRegistryLoadMode::Full);
-        let (env_key, env_val) = expected_env_pair();
+        let (env_key, _) = expected_env_pair();
         let mut provider_headers = HashMap::new();
         provider_headers.insert("x-provider".to_string(), "provider-header".to_string());
 
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -3200,8 +4724,6 @@ mod tests {
                         supports_store: Some(true),
                         ..CompatConfig::default()
                     }),
-                    tool_use_profile: None,
-                    generation: None,
                     models: None,
                 },
             )]),
@@ -3212,7 +4734,11 @@ mod tests {
         for entry in models.iter().filter(|m| m.model.provider == "anthropic") {
             assert_eq!(entry.model.base_url, "https://proxy.example/v1/messages");
             assert_eq!(entry.model.api, "anthropic-messages");
-            assert_eq!(entry.api_key.as_deref(), Some(env_val.as_str()));
+            assert_eq!(
+                entry.api_key.as_deref(),
+                Some("anthropic-auth-key"),
+                "the normal runtime credential must win over models.json apiKey"
+            );
             assert_eq!(
                 entry.headers.get("x-provider").map(String::as_str),
                 Some("provider-header")
@@ -3254,12 +4780,10 @@ mod tests {
             headers: HashMap::from([("x-built-in".to_string(), "keep-me".to_string())]),
             auth_header: false,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         }];
 
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -3310,12 +4834,10 @@ mod tests {
             headers: HashMap::from([("x-built-in".to_string(), "remove-me".to_string())]),
             auth_header: false,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         }];
 
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -3338,7 +4860,6 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "cohere".to_string(),
                 ProviderConfig {
@@ -3390,7 +4911,6 @@ mod tests {
         // included deliberately to exercise path-join robustness.
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "my-local".to_string(),
                 ProviderConfig {
@@ -3424,7 +4944,6 @@ mod tests {
         // openai-completions default endpoint (unchanged default behavior).
         let mut defaulted = Vec::new();
         let default_config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "my-proxy".to_string(),
                 ProviderConfig {
@@ -3451,93 +4970,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_custom_models_merges_provider_and_model_generation_defaults() {
-        let (_dir, auth) = test_auth_storage();
-        let mut models = Vec::new();
-        let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
-            providers: HashMap::from([(
-                "custom-openai".to_string(),
-                ProviderConfig {
-                    api: Some("openai-completions".to_string()),
-                    base_url: Some("https://compat.example/v1".to_string()),
-                    generation: Some(GenerationConfig {
-                        stop: Some(vec!["<|im_end|>".to_string(), "</s>".to_string()]),
-                        temperature: Some(0.7),
-                        top_p: Some(0.9),
-                        min_p: Some(0.05),
-                        repetition_penalty: Some(1.15),
-                    }),
-                    models: Some(vec![
-                        ModelConfig {
-                            id: "inherits-generation".to_string(),
-                            ..ModelConfig::default()
-                        },
-                        ModelConfig {
-                            id: "overrides-generation".to_string(),
-                            generation: Some(GenerationConfig {
-                                stop: Some(vec!["<END>".to_string()]),
-                                temperature: Some(0.2),
-                                top_p: Some(0.8),
-                                min_p: Some(0.01),
-                                repetition_penalty: Some(1.05),
-                            }),
-                            ..ModelConfig::default()
-                        },
-                    ]),
-                    ..ProviderConfig::default()
-                },
-            )]),
-        };
-
-        apply_custom_models(&auth, &mut models, &config, None);
-
-        let inherited = models
-            .iter()
-            .find(|entry| {
-                entry.model.provider == "custom-openai" && entry.model.id == "inherits-generation"
-            })
-            .expect("provider generation defaults should load");
-        let overridden = models
-            .iter()
-            .find(|entry| {
-                entry.model.provider == "custom-openai" && entry.model.id == "overrides-generation"
-            })
-            .expect("model generation override should load");
-
-        let inherited_compat = inherited
-            .compat
-            .as_ref()
-            .expect("generation defaults should create compat carrier");
-        assert_eq!(
-            inherited_compat.stop.as_deref(),
-            Some(&["<|im_end|>".to_string(), "</s>".to_string()][..])
-        );
-        assert_eq!(inherited_compat.temperature, Some(0.7));
-        assert_eq!(inherited_compat.top_p, Some(0.9));
-        assert_eq!(inherited_compat.min_p, Some(0.05));
-        assert_eq!(inherited_compat.repetition_penalty, Some(1.15));
-
-        let overridden_compat = overridden
-            .compat
-            .as_ref()
-            .expect("model generation override should create compat carrier");
-        assert_eq!(
-            overridden_compat.stop.as_deref(),
-            Some(&["<END>".to_string()][..])
-        );
-        assert_eq!(overridden_compat.temperature, Some(0.2));
-        assert_eq!(overridden_compat.top_p, Some(0.8));
-        assert_eq!(overridden_compat.min_p, Some(0.01));
-        assert_eq!(overridden_compat.repetition_penalty, Some(1.05));
-    }
-
-    #[test]
     fn apply_custom_models_merges_provider_and_model_compat() {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "custom-openai".to_string(),
                 ProviderConfig {
@@ -3608,7 +5044,6 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -3647,7 +5082,6 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "codex".to_string(),
                 ProviderConfig {
@@ -3680,7 +5114,6 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([
                 (
                     "gemini-cli".to_string(),
@@ -3750,7 +5183,6 @@ mod tests {
 
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "kimi".to_string(),
                 ProviderConfig {
@@ -3884,7 +5316,6 @@ mod tests {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         };
 
@@ -3917,7 +5348,6 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "openrouter".to_string(),
                 ProviderConfig {
@@ -4051,8 +5481,8 @@ mod tests {
     }
 
     #[test]
-    fn model_registry_load_reads_models_json_and_applies_config() {
-        let (dir, auth) = test_auth_storage();
+    fn model_registry_uses_models_json_api_key_only_when_runtime_key_is_absent() {
+        let (dir, _auth) = test_auth_storage();
         let models_path = dir.path().join("models.json");
         let key_path = dir.path().join("custom_key.txt");
         std::fs::write(&key_path, "acme-file-key\n").expect("write custom key");
@@ -4090,7 +5520,7 @@ mod tests {
         )
         .expect("write models.json");
 
-        let registry = ModelRegistry::load(&auth, Some(models_path));
+        let registry = ModelRegistry::load_with_credential_resolver(Some(models_path), |_| None);
         let acme = registry
             .find("acme", "acme-chat")
             .expect("custom acme model should load from models.json");
@@ -4111,395 +5541,945 @@ mod tests {
             Some("model-level")
         );
         assert_eq!(acme.model.input, vec![InputType::Text, InputType::Image]);
-        assert!(acme.tool_use_profile.is_none());
     }
 
     #[test]
-    fn model_registry_loads_generation_defaults_from_models_json() {
-        let (dir, auth) = test_auth_storage();
+    fn model_catalog_discovery_uses_resolved_custom_provider_transport() {
+        let dir = tempdir().expect("tempdir");
         let models_path = dir.path().join("models.json");
-
-        let models_json = serde_json::json!({
-            "providers": {
-                "local-test": {
-                    "baseUrl": "http://127.0.0.1:18081/v1",
-                    "api": "openai-completions",
-                    "models": [
-                        {
-                            "id": "local-model",
-                            "generation": {
-                                "stop": ["<|im_end|>", "</s>"],
-                                "temperature": 0.7,
-                                "topP": 0.9,
-                                "minP": 0.05,
-                                "repetitionPenalty": 1.15
-                            }
-                        }
-                    ]
-                }
-            }
-        });
-
+        let key_path = dir.path().join("catalog-key.txt");
+        std::fs::write(&key_path, "custom-catalog-key\n").expect("write catalog key");
         std::fs::write(
             &models_path,
-            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
-        )
-        .expect("write models.json");
-
-        let registry = ModelRegistry::load(&auth, Some(models_path));
-        assert!(registry.error().is_none(), "{:?}", registry.error());
-        let entry = registry
-            .find("local-test", "local-model")
-            .expect("generation-configured custom model should load");
-        let compat = entry
-            .compat
-            .as_ref()
-            .expect("generation config should resolve into provider request defaults");
-
-        assert_eq!(
-            compat.stop.as_deref(),
-            Some(&["<|im_end|>".to_string(), "</s>".to_string()][..])
-        );
-        assert_eq!(compat.temperature, Some(0.7));
-        assert_eq!(compat.top_p, Some(0.9));
-        assert_eq!(compat.min_p, Some(0.05));
-        assert_eq!(compat.repetition_penalty, Some(1.15));
-    }
-
-    #[test]
-    fn model_registry_loads_tool_use_profiles_and_provider_default() {
-        let (dir, auth) = test_auth_storage();
-        let models_path = dir.path().join("models.json");
-
-        let models_json = serde_json::json!({
-            "toolUseProfiles": {
-                "weak-openai-compatible": {
-                    "appendSystemPrompt": "Use actual tool calls when tools are needed.",
-                    "pathSchema": {
-                        "fileTools": ["read", "write", "edit"],
-                        "optionalPathTools": ["grep", "find", "ls"],
-                        "filePathDescription": "Relative file path only.",
-                        "optionalPathDescription": "Optional relative path.",
-                        "genericPathDescription": "Relative path when provided."
-                    },
-                    "argumentRepair": {
-                        "repairDegeneratePathFromUserText": true,
-                        "repairGrepDegenerateGlob": true
-                    },
-                    "postToolGuard": {
-                        "rewriteRepeatedSuccessfulToolCall": true,
-                        "stripReadLinePrefixes": true
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "providers": {
+                    "acme": {
+                        "baseUrl": "https://models.acme.example/openai/v1",
+                        "api": "openai-completions",
+                        "apiKey": "file:catalog-key.txt",
+                        "authHeader": false,
+                        "headers": {"x-acme-key": "header-secret"}
                     }
                 }
-            },
-            "providers": {
-                "acme-profiled": {
-                    "baseUrl": "https://acme.example/v1",
-                    "api": "openai-completions",
-                    "toolUseProfile": "weak-openai-compatible",
-                    "models": [
-                        { "id": "acme-chat" }
-                    ]
-                }
-            }
-        });
-
-        std::fs::write(
-            &models_path,
-            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+            }))
+            .expect("serialize models.json"),
         )
         .expect("write models.json");
 
-        let registry = ModelRegistry::load(&auth, Some(models_path));
-        assert!(registry.error().is_none(), "{:?}", registry.error());
-        let acme = registry
-            .find("acme-profiled", "acme-chat")
-            .expect("profiled custom model should load");
-        let profile = acme
-            .tool_use_profile
-            .as_ref()
-            .expect("provider profile should resolve");
-
-        assert_eq!(profile.name, "weak-openai-compatible");
+        let route = resolve_model_catalog_provider_config("acme", &models_path)
+            .expect("resolve custom discovery route")
+            .expect("custom provider route");
+        assert_eq!(route.base_url, "https://models.acme.example/openai/v1");
+        assert_eq!(route.api, "openai-completions");
+        assert_eq!(route.api_key, None);
+        assert!(!route.auth_header);
         assert_eq!(
-            profile.append_system_prompt.as_deref(),
-            Some("Use actual tool calls when tools are needed.")
-        );
-        let path_schema = profile
-            .path_schema
-            .as_ref()
-            .expect("path schema should deserialize");
-        assert_eq!(
-            path_schema.file_tools.as_deref(),
-            Some(&["read".to_string(), "write".to_string(), "edit".to_string()][..])
-        );
-        assert_eq!(
-            profile
-                .argument_repair
-                .as_ref()
-                .and_then(|repair| repair.repair_grep_degenerate_glob),
-            Some(true)
-        );
-        assert_eq!(
-            profile
-                .post_tool_guard
-                .as_ref()
-                .and_then(|guard| guard.strip_read_line_prefixes),
-            Some(true)
+            route.headers.get("x-acme-key").map(String::as_str),
+            Some("header-secret")
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn model_registry_model_tool_use_profile_overrides_provider_default() {
-        let (dir, auth) = test_auth_storage();
+    fn model_catalog_discovery_does_not_evaluate_unused_fallback_api_key() {
+        let dir = tempdir().expect("tempdir");
         let models_path = dir.path().join("models.json");
-
-        let models_json = serde_json::json!({
-            "toolUseProfiles": {
-                "provider-profile": {
-                    "appendSystemPrompt": "provider prompt"
-                },
-                "model-profile": {
-                    "appendSystemPrompt": "model prompt"
-                }
-            },
-            "providers": {
-                "acme-override": {
-                    "baseUrl": "https://acme.example/v1",
-                    "api": "openai-completions",
-                    "toolUseProfile": "provider-profile",
-                    "models": [
-                        { "id": "inherits-provider" },
-                        {
-                            "id": "uses-model",
-                            "toolUseProfile": "model-profile"
-                        }
-                    ]
-                }
-            }
-        });
-
+        let marker_path = dir.path().join("fallback-was-evaluated");
+        let quoted_marker = marker_path.to_string_lossy().replace('\'', "'\\''");
+        let fallback_command = format!("!touch '{quoted_marker}'");
         std::fs::write(
             &models_path,
-            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "providers": {
+                    "acme": {
+                        "baseUrl": "https://models.acme.example/v1",
+                        "api": "openai-completions",
+                        "apiKey": fallback_command
+                    }
+                }
+            }))
+            .expect("serialize models.json"),
         )
         .expect("write models.json");
 
-        let registry = ModelRegistry::load(&auth, Some(models_path));
-        assert!(registry.error().is_none(), "{:?}", registry.error());
-        let inherited = registry
-            .find("acme-override", "inherits-provider")
-            .expect("provider default model should load");
-        let overridden = registry
-            .find("acme-override", "uses-model")
-            .expect("model override should load");
+        let route =
+            resolve_model_catalog_provider_config_with_api_key("acme", &models_path, "runtime-key")
+                .expect("resolve custom discovery route")
+                .expect("custom provider route");
 
+        assert_eq!(route.api_key, None);
         assert_eq!(
-            inherited
-                .tool_use_profile
-                .as_ref()
-                .map(|profile| profile.name.as_str()),
-            Some("provider-profile")
+            effective_model_catalog_api_key("runtime-key", &route),
+            "runtime-key"
         );
-        assert_eq!(
-            overridden
-                .tool_use_profile
-                .as_ref()
-                .map(|profile| profile.name.as_str()),
-            Some("model-profile")
-        );
-    }
-
-    #[test]
-    fn model_registry_unknown_provider_tool_use_profile_fails_closed() {
-        let (dir, auth) = test_auth_storage();
-        let models_path = dir.path().join("models.json");
-
-        let models_json = serde_json::json!({
-            "toolUseProfiles": {},
-            "providers": {
-                "acme-broken-provider": {
-                    "baseUrl": "https://acme.example/v1",
-                    "api": "openai-completions",
-                    "toolUseProfile": "missing-profile",
-                    "models": [
-                        { "id": "should-not-load" }
-                    ]
-                }
-            }
-        });
-
-        std::fs::write(
-            &models_path,
-            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
-        )
-        .expect("write models.json");
-
-        let registry = ModelRegistry::load(&auth, Some(models_path));
-        let error = registry
-            .error()
-            .expect("unknown provider-level profile must be a config error");
-        assert!(error.contains("Unknown toolUseProfile `missing-profile`"));
-        assert!(error.contains("provider `acme-broken-provider`"));
         assert!(
-            registry
-                .find("acme-broken-provider", "should-not-load")
-                .is_none(),
-            "broken custom provider must not be partially applied as no-profile"
+            !marker_path.exists(),
+            "models.json fallback command must not run when runtime auth wins"
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn model_registry_unknown_model_tool_use_profile_fails_closed() {
-        let (dir, auth) = test_auth_storage();
+    fn custom_authorization_does_not_evaluate_unused_fallback_api_key() {
+        let dir = tempdir().expect("tempdir");
         let models_path = dir.path().join("models.json");
-
-        let models_json = serde_json::json!({
-            "toolUseProfiles": {
-                "known-profile": {
-                    "appendSystemPrompt": "known prompt"
-                }
-            },
-            "providers": {
-                "acme-broken-model": {
-                    "baseUrl": "https://acme.example/v1",
-                    "api": "openai-completions",
-                    "toolUseProfile": "known-profile",
-                    "models": [
-                        {
-                            "id": "should-not-load",
-                            "toolUseProfile": "missing-model-profile"
-                        }
-                    ]
-                }
-            }
-        });
-
+        let marker_path = dir.path().join("fallback-was-evaluated");
+        let quoted_marker = marker_path.to_string_lossy().replace('\'', "'\\''");
+        let fallback_command = format!("!touch '{quoted_marker}'");
         std::fs::write(
             &models_path,
-            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "providers": {
+                    "acme": {
+                        "baseUrl": "https://models.acme.example/v1",
+                        "api": "openai-completions",
+                        "apiKey": fallback_command,
+                        "headers": {
+                            "Authorization": "Token configured-only"
+                        }
+                    }
+                }
+            }))
+            .expect("serialize models.json"),
         )
         .expect("write models.json");
 
-        let registry = ModelRegistry::load(&auth, Some(models_path));
-        let error = registry
-            .error()
-            .expect("unknown model-level profile must be a config error");
-        assert!(error.contains("Unknown toolUseProfile `missing-model-profile`"));
-        assert!(error.contains("model `should-not-load` under provider `acme-broken-model`"));
+        let route = resolve_model_catalog_provider_config_with_api_key("acme", &models_path, "")
+            .expect("resolve custom discovery route")
+            .expect("custom provider route");
+
+        assert_eq!(route.api_key, None);
+        assert_eq!(
+            route.headers.get("Authorization").map(String::as_str),
+            Some("Token configured-only")
+        );
         assert!(
-            registry
-                .find("acme-broken-model", "should-not-load")
-                .is_none(),
-            "broken custom model must not be partially applied as no-profile"
+            !marker_path.exists(),
+            "models.json fallback command must not run when custom Authorization wins"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabled_auth_header_does_not_evaluate_unused_fallback_api_key() {
+        let dir = tempdir().expect("tempdir");
+        let models_path = dir.path().join("models.json");
+        let marker_path = dir.path().join("fallback-was-evaluated");
+        let quoted_marker = marker_path.to_string_lossy().replace('\'', "'\\''");
+        let fallback_command = format!("!touch '{quoted_marker}'");
+        std::fs::write(
+            &models_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "providers": {
+                    "acme": {
+                        "baseUrl": "https://models.acme.example/v1",
+                        "api": "openai-completions",
+                        "apiKey": fallback_command,
+                        "authHeader": false,
+                        "headers": {
+                            "x-acme-key": "configured-only"
+                        }
+                    }
+                }
+            }))
+            .expect("serialize models.json"),
+        )
+        .expect("write models.json");
+
+        let route = resolve_model_catalog_provider_config_with_api_key("acme", &models_path, "")
+            .expect("resolve custom discovery route")
+            .expect("custom provider route");
+
+        assert!(!route.auth_header);
+        assert_eq!(route.api_key, None);
+        assert_eq!(
+            route.headers.get("x-acme-key").map(String::as_str),
+            Some("configured-only")
+        );
+        assert!(
+            !marker_path.exists(),
+            "models.json fallback command must not run when generated Authorization is disabled"
         );
     }
 
     #[test]
-    fn user_models_json_loads_rdog_control_bash_profile() {
-        // 端到端 smoke: 直接加载用户真实的 ~/.pi/agent/models.json,
-        // 确认 gemma-4-e2b-it-qat-OptiQ-4bit 条目解析出来的
-        // tool_use_profile.tools == ["bash"].
-        let (dir, auth) = test_auth_storage();
-        let user_path = std::path::PathBuf::from("/Users/cuiluming/.pi/agent/models.json");
-        if !user_path.exists() {
-            eprintln!("skip: {} not found", user_path.display());
-            return;
+    fn model_catalog_discovery_honors_builtin_endpoint_override() {
+        let dir = tempdir().expect("tempdir");
+        let models_path = dir.path().join("models.json");
+        std::fs::write(
+            &models_path,
+            r#"{"providers":{"ollama":{"baseUrl":"http://127.0.0.1:11000/v1"}}}"#,
+        )
+        .expect("write ollama override");
+
+        let route = resolve_model_catalog_provider_config("ollama", &models_path)
+            .expect("resolve ollama discovery route")
+            .expect("built-in provider route");
+        assert_eq!(route.base_url, "http://127.0.0.1:11000/v1");
+        assert_eq!(route.api, "openai-completions");
+        assert!(!route.auth_header);
+    }
+
+    #[test]
+    fn model_catalog_discovery_rejects_ambiguous_provider_aliases() {
+        let dir = tempdir().expect("tempdir");
+        let models_path = dir.path().join("models.json");
+        std::fs::write(&models_path, r#"{"providers":{"openai":{},"OpenAI":{}}}"#)
+            .expect("write ambiguous aliases");
+
+        let error = resolve_model_catalog_provider_config("openai", &models_path)
+            .expect_err("ambiguous provider aliases must fail deterministically");
+        assert!(
+            error.to_string().contains("multiple provider aliases"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn model_catalog_discovery_rejects_exact_and_escaped_duplicate_provider_keys() {
+        let dir = tempdir().expect("tempdir");
+        let models_path = dir.path().join("models.json");
+        for contents in [
+            r#"{"providers":{"openai":{"baseUrl":"https://safe.example/v1"},"openai":{"baseUrl":"https://attacker.example/v1"}}}"#,
+            r#"{"providers":{"openai":{"baseUrl":"https://safe.example/v1"},"\u006fpenai":{"baseUrl":"https://attacker.example/v1"}}}"#,
+        ] {
+            std::fs::write(&models_path, contents).expect("write duplicate provider route");
+            let error = resolve_model_catalog_provider_config("openai", &models_path)
+                .expect_err("duplicate provider routes must fail closed");
+            assert!(
+                error.to_string().contains("duplicate JSON object key"),
+                "{error}"
+            );
         }
-        let registry = ModelRegistry::load(&auth, Some(user_path));
-        assert!(
-            registry.error().is_none(),
-            "registry error: {:?}",
-            registry.error()
-        );
-        let entry = registry
-            .find(
-                "local",
-                "/Users/cuiluming/local_doc/l_dev/my/rust/fast-infer/models/gemma-4-e2b-it-qat-OptiQ-4bit",
-            )
-            .expect("gemma-4-e2b-it-qat-OptiQ-4bit should be registered");
-        let profile = entry
-            .tool_use_profile
-            .as_ref()
-            .expect("profile must be resolved");
-        assert_eq!(profile.name, "rdog-control-bash");
-        // 与 ~/.pi/agent/models.json 中 rdog-control-bash profile 现状对齐:
-        // `tools` 包含 bash + read, 之前是 ["bash"] 单元素,
-        // 后续某次改动加上了 read, 但这个测试没同步, 一直 fail.
-        // 这里改成与 models.json 实际值一致, 不再回滚 models.json (read 是用户有意加的).
-        assert_eq!(
-            profile.tools.as_deref(),
-            Some(&["bash".to_string(), "read".to_string()][..])
-        );
-        let prompt = profile
-            .append_system_prompt
-            .as_deref()
-            .expect("append_system_prompt must be set");
-        assert!(prompt.contains("bash"));
-        // 与 ~/.pi/agent/models.json 现状对齐: prompt 描述 bash/read 工具用法
-        // (旧版文案 "rdog control TARGET" 已被用户更新为通用工具说明)
-        assert!(prompt.contains("read"));
     }
 
     #[test]
-    fn model_registry_tool_use_profile_tools_field_resolves_into_allowlist() {
-        // rdog-control-bash 这类 profile 的 `tools` 字段必须从 models.json
-        // 顶层 toolUseProfiles 进入 ModelEntry.tool_use_profile.tools,
-        // 且保持原顺序, 供 OpenAI schema 过滤使用.
-        let (dir, auth) = test_auth_storage();
+    fn generated_catalog_parser_rejects_duplicate_fields_aliases_and_trailing_data() {
+        for (label, contents, expected) in [
+            (
+                "duplicate top-level schema",
+                r#"{"schema":"pi.models.fetched.v2","schema":"pi.models.fetched.v2","providers":{"openai":{"routeFingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","fetchedAtUnixMs":1,"models":[{"id":"model"}]}}}"#,
+                "duplicate field",
+            ),
+            (
+                "duplicate model id",
+                r#"{"schema":"pi.models.fetched.v2","providers":{"openai":{"routeFingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","fetchedAtUnixMs":1,"models":[{"id":"first","id":"second"}]}}}"#,
+                "duplicate field",
+            ),
+            (
+                "canonical provider aliases",
+                r#"{"schema":"pi.models.fetched.v2","providers":{"openai":{"routeFingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","fetchedAtUnixMs":1,"models":[{"id":"first"}]},"OpenAI":{"routeFingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","fetchedAtUnixMs":1,"models":[{"id":"second"}]}}}"#,
+                "duplicate aliases",
+            ),
+            (
+                "escaped exact provider key",
+                r#"{"schema":"pi.models.fetched.v2","providers":{"openai":{"routeFingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","fetchedAtUnixMs":1,"models":[{"id":"first"}]},"\u006fpenai":{"routeFingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","fetchedAtUnixMs":1,"models":[{"id":"second"}]}}}"#,
+                "duplicate JSON object key",
+            ),
+            (
+                "trailing JSON value",
+                r#"{"schema":"pi.models.fetched.v2","providers":{"openai":{"routeFingerprint":"sha256:0000000000000000000000000000000000000000000000000000000000000000","fetchedAtUnixMs":1,"models":[{"id":"model"}]}}} {}"#,
+                "trailing characters",
+            ),
+        ] {
+            let error = parse_persisted_fetched_catalog(contents)
+                .expect_err("malformed generated catalog must fail closed");
+            assert!(error.to_string().contains(expected), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn generated_catalog_v2_requires_valid_route_and_timestamp_provenance() {
+        for (label, provider, expected) in [
+            (
+                "missing route fingerprint",
+                serde_json::json!({
+                    "fetchedAtUnixMs": 1,
+                    "models": [{"id": "model"}]
+                }),
+                "routeFingerprint",
+            ),
+            (
+                "malformed route fingerprint",
+                serde_json::json!({
+                    "routeFingerprint": "sha256:not-a-digest",
+                    "fetchedAtUnixMs": 1,
+                    "models": [{"id": "model"}]
+                }),
+                "invalid route fingerprint",
+            ),
+            (
+                "zero fetch timestamp",
+                serde_json::json!({
+                    "routeFingerprint": format!("sha256:{}", "0".repeat(64)),
+                    "fetchedAtUnixMs": 0,
+                    "models": [{"id": "model"}]
+                }),
+                "invalid fetched timestamp",
+            ),
+        ] {
+            let payload = serde_json::json!({
+                "schema": FETCHED_MODELS_SCHEMA,
+                "providers": {"openai": provider},
+            });
+            let error = parse_persisted_fetched_catalog(&payload.to_string())
+                .expect_err("schema-v2 provenance must fail closed");
+            assert!(error.to_string().contains(expected), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn generated_catalog_parser_enforces_provider_and_model_cardinality_during_decode() {
+        let providers = (0..=MAX_FETCHED_PROVIDERS)
+            .map(|index| {
+                (
+                    format!("provider-{index}"),
+                    serde_json::json!({
+                        "routeFingerprint": format!("sha256:{}", "0".repeat(64)),
+                        "fetchedAtUnixMs": 1,
+                        "models": [{"id": "model"}]
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let provider_payload = serde_json::json!({
+            "schema": FETCHED_MODELS_SCHEMA,
+            "providers": providers,
+        });
+        let error = parse_persisted_fetched_catalog(&provider_payload.to_string())
+            .expect_err("provider cap must be enforced while decoding");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+
+        let models = (0..=MAX_FETCHED_MODELS_PER_PROVIDER)
+            .map(|index| serde_json::json!({"id": format!("model-{index}")}))
+            .collect::<Vec<_>>();
+        let model_payload = serde_json::json!({
+            "schema": FETCHED_MODELS_SCHEMA,
+            "providers": {"openai": {
+                "routeFingerprint": format!("sha256:{}", "0".repeat(64)),
+                "fetchedAtUnixMs": 1,
+                "models": models
+            }},
+        });
+        let error = parse_persisted_fetched_catalog(&model_payload.to_string())
+            .expect_err("model cap must be enforced while decoding");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    #[test]
+    fn model_catalog_discovery_rejects_custom_provider_without_explicit_endpoint() {
+        let dir = tempdir().expect("tempdir");
+        let models_path = dir.path().join("models.json");
+        std::fs::write(
+            &models_path,
+            r#"{"providers":{"acme":{"apiKey":"must-not-be-sent-elsewhere"}}}"#,
+        )
+        .expect("write incomplete custom route");
+
+        let error = resolve_model_catalog_provider_config("acme", &models_path)
+            .expect_err("a custom provider must not inherit OpenAI's public endpoint");
+        assert!(error.to_string().contains("non-empty baseUrl"), "{error}");
+    }
+
+    #[test]
+    fn model_catalog_discovery_requires_routes_for_self_routed_native_adapters() {
+        let dir = tempdir().expect("tempdir");
         let models_path = dir.path().join("models.json");
 
-        let models_json = serde_json::json!({
-            "toolUseProfiles": {
-                "rdog-control-bash": {
-                    "appendSystemPrompt": "rdog-control bash only",
-                    "tools": ["bash"]
-                }
-            },
-            "providers": {
-                "acme-rdog": {
-                    "baseUrl": "https://acme.example/v1",
-                    "api": "openai-completions",
-                    "apiKey": "sk-test",
-                    "models": [
-                        {
-                            "id": "gemma-rdog",
-                            "toolUseProfile": "rdog-control-bash"
-                        }
-                    ]
-                }
-            }
-        });
+        for provider in ["sap-ai-core", "github-copilot"] {
+            assert!(
+                model_catalog_provider_route_shape(provider, &models_path)
+                    .expect("probe empty native adapter route")
+                    .is_none(),
+                "route probing must reject empty native defaults before credential resolution"
+            );
+            let error = resolve_model_catalog_provider_config(provider, &models_path)
+                .expect_err("empty native adapter seed must not inherit the OpenAI endpoint");
+            assert!(error.to_string().contains("non-empty baseUrl"), "{error}");
+        }
 
         std::fs::write(
             &models_path,
-            serde_json::to_string_pretty(&models_json).expect("serialize models json"),
+            r#"{"providers":{"sap-ai-core":{"baseUrl":"https://sap.example/v1"},"github-copilot":{"baseUrl":"https://copilot.example/v1"}}}"#,
         )
-        .expect("write models.json");
+        .expect("write explicit native catalog routes");
+
+        for (provider, expected) in [
+            ("sap-ai-core", "https://sap.example/v1"),
+            ("github-copilot", "https://copilot.example/v1"),
+        ] {
+            assert!(
+                model_catalog_provider_route_shape(provider, &models_path)
+                    .expect("probe explicit native adapter route")
+                    .is_some(),
+                "configured native routes must survive the credential preflight"
+            );
+            let route = resolve_model_catalog_provider_config(provider, &models_path)
+                .expect("resolve explicit native adapter route")
+                .expect("configured native adapter route");
+            assert_eq!(route.base_url, expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manual_model_catalog_symlink_to_regular_file_remains_supported() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("actual-models.json");
+        let models_path = dir.path().join("models.json");
+        std::fs::write(
+            &target,
+            r#"{"providers":{"acme":{"baseUrl":"https://acme.example/v1"}}}"#,
+        )
+        .expect("write model catalog target");
+        symlink(&target, &models_path).expect("symlink model catalog");
+
+        assert!(
+            resolve_model_catalog_provider_config("acme", &models_path)
+                .expect("read symlinked manual catalog")
+                .is_some()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_model_catalog_reparse_policy_distinguishes_manual_and_generated_files() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("actual-models.json");
+        let manual_path = dir.path().join("models.json");
+        let generated_path = dir.path().join("models.fetched.json");
+        std::fs::write(
+            &target,
+            r#"{"providers":{"acme":{"baseUrl":"https://acme.example/v1"}}}"#,
+        )
+        .expect("write catalog target");
+
+        for link in [&manual_path, &generated_path] {
+            if let Err(error) = symlink_file(&target, link) {
+                // Creating a Windows symlink still requires Developer Mode or
+                // SeCreateSymbolicLinkPrivilege on some runners. The target
+                // build continues to compile this complete test even there.
+                if error.raw_os_error() == Some(1314) {
+                    eprintln!("skipping Windows symlink runtime assertion: {error}");
+                    return;
+                }
+                panic!("create catalog symlink {}: {error}", link.display());
+            }
+        }
+
+        assert!(
+            resolve_model_catalog_provider_config("acme", &manual_path)
+                .expect("manual catalog symlink remains supported")
+                .is_some()
+        );
+
+        let read_error = read_generated_catalog(&generated_path)
+            .expect_err("generated catalog symlink must not be followed");
+        assert_eq!(read_error.kind(), std::io::ErrorKind::InvalidData);
+        let persist_error = ensure_model_catalog_persistence_access(&generated_path)
+            .expect_err("generated catalog symlink must not pass persistence preflight");
+        assert_eq!(persist_error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            std::fs::symlink_metadata(&generated_path)
+                .expect("generated catalog link still exists")
+                .file_type()
+                .is_symlink(),
+            "preflight must not replace or otherwise mutate the reparse point"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_catalog_reads_enforce_effective_owner_class_even_for_uid_zero() {
+        let dir = tempdir().expect("tempdir");
+        let manual_path = dir.path().join("models.json");
+        let fetched_path = dir.path().join("models.fetched.json");
+        std::fs::write(&manual_path, r#"{"providers":{}}"#).expect("write manual catalog");
+        std::fs::write(&fetched_path, "{}\n").expect("write generated catalog");
+
+        let manual_mode = UnixModeGuard::set(&manual_path, 0o004);
+        let manual_error = load_models_config(&manual_path)
+            .expect_err("owner class without read must be denied even when other has read");
+        assert!(
+            manual_error.to_string().contains("Permission denied"),
+            "{manual_error}"
+        );
+        drop(manual_mode);
+
+        let fetched_mode = UnixModeGuard::set(&fetched_path, 0o000);
+        let fetched_error = read_generated_catalog(&fetched_path)
+            .expect_err("mode-000 generated catalog must be denied even to UID 0");
+        assert_eq!(fetched_error.kind(), std::io::ErrorKind::PermissionDenied);
+        drop(fetched_mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_catalog_reads_require_lexical_and_resolved_ancestors_to_be_searchable() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let lexical_dir = dir.path().join("lexical-denied");
+        std::fs::create_dir(&lexical_dir).expect("create lexical directory");
+        let lexical_catalog = lexical_dir.join("models.json");
+        std::fs::write(&lexical_catalog, r#"{"providers":{}}"#).expect("write lexical catalog");
+        let lexical_mode = UnixModeGuard::set(&lexical_dir, 0o007);
+        let lexical_error = load_models_config(&lexical_catalog)
+            .expect_err("owner class without search must block lexical traversal");
+        assert!(
+            lexical_error.to_string().contains("Permission denied"),
+            "{lexical_error}"
+        );
+        drop(lexical_mode);
+
+        let target_dir = dir.path().join("resolved-denied");
+        std::fs::create_dir(&target_dir).expect("create target directory");
+        let target = target_dir.join("actual-models.json");
+        std::fs::write(&target, r#"{"providers":{}}"#).expect("write target catalog");
+        let symlink_path = dir.path().join("models.json");
+        symlink(&target, &symlink_path).expect("create final catalog symlink");
+        let target_mode = UnixModeGuard::set(&target_dir, 0o007);
+        let resolved_error = load_models_config(&symlink_path)
+            .expect_err("resolved target ancestors must be independently searchable");
+        assert!(
+            resolved_error.to_string().contains("Permission denied"),
+            "{resolved_error}"
+        );
+        drop(target_mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_model_catalog_fifo_is_rejected_without_opening() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("models.fetched.json");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo must create the test fixture");
+
+        let error = read_generated_catalog(&path)
+            .expect_err("a FIFO must be rejected instead of blocking for a writer");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("regular"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_registry_reports_broken_catalog_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+        symlink(dir.path().join("missing-models.json"), &models_path)
+            .expect("create broken model catalog symlink");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        let error = registry
+            .error()
+            .expect("a configured but unreadable catalog must not be silently ignored");
+        assert!(error.contains("Failed to read model catalog"), "{error}");
+    }
+
+    #[test]
+    fn model_registry_loads_fetched_catalog_before_manual_models_json() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+        let fetched_path = fetched_models_path(&models_path);
+        let manual_json = serde_json::json!({
+            "futureUserField": {"mustRemain": true},
+            "providers": {
+                "shared-provider": {
+                    "baseUrl": "https://manual.example/v1",
+                    "models": [{"id": "manual-shared", "name": "Manual wins"}]
+                }
+            }
+        });
+        let manual_bytes =
+            serde_json::to_vec_pretty(&manual_json).expect("serialize manual config");
+        std::fs::write(&models_path, &manual_bytes).expect("write manual models.json");
+        let openai_route = resolve_model_catalog_provider_config("openai", &models_path)
+            .expect("resolve OpenAI route")
+            .expect("built-in OpenAI route");
+        let shared_route = resolve_model_catalog_provider_config("shared-provider", &models_path)
+            .expect("resolve shared-provider route")
+            .expect("manual shared-provider route");
+        let fetched_json = serde_json::json!({
+            "schema": FETCHED_MODELS_SCHEMA,
+            "providers": {
+                "shared-provider": fetched_provider_json(
+                    "shared-provider",
+                    &shared_route,
+                    &["generated-shared"],
+                ),
+                "openai": fetched_provider_json(
+                    "openai",
+                    &openai_route,
+                    &["fetched-model"],
+                ),
+            }
+        });
+        std::fs::write(
+            &fetched_path,
+            serde_json::to_string_pretty(&fetched_json).expect("serialize fetched catalog"),
+        )
+        .expect("write fetched catalog");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path.clone()));
+
+        assert!(
+            registry.find("openai", "fetched-model").is_some(),
+            "generated membership with a built-in provider route must survive"
+        );
+        let manual = registry
+            .find("shared-provider", "manual-shared")
+            .expect("manual provider catalog should win");
+        assert_eq!(manual.model.name, "Manual wins");
+        assert_eq!(manual.model.base_url, "https://manual.example/v1");
+        assert!(
+            registry
+                .find("shared-provider", "generated-shared")
+                .is_none(),
+            "manual models list should retain its existing full-provider override semantics"
+        );
+        assert_eq!(
+            std::fs::read(&models_path).expect("re-read manual models.json"),
+            manual_bytes,
+            "loading generated models must never rewrite user models.json"
+        );
+    }
+
+    #[test]
+    fn fetched_custom_provider_requires_an_explicit_manual_endpoint() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+        std::fs::write(
+            fetched_models_path(&models_path),
+            format!(
+                r#"{{"schema":"{FETCHED_MODELS_SCHEMA}","providers":{{"acme":{{"routeFingerprint":"sha256:{}","fetchedAtUnixMs":1,"models":[{{"id":"acme-live"}}]}}}}}}"#,
+                "0".repeat(64),
+            ),
+        )
+        .expect("write fetched catalog");
+        std::fs::write(&models_path, r#"{"providers":{"acme":{}}}"#)
+            .expect("write route-less manual catalog");
 
         let registry = ModelRegistry::load(&auth, Some(models_path));
         assert!(
-            registry.error().is_none(),
-            "registry should load: {:?}",
+            registry.find("acme", "acme-live").is_none(),
+            "generated membership must not synthesize an OpenAI endpoint for a custom provider"
+        );
+    }
+
+    #[test]
+    fn fetched_catalog_ignores_unverifiable_value_routed_membership() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+        std::fs::write(
+            &models_path,
+            r#"{"providers":{"acme":{"baseUrl":"https://acme.example/v1?tenant=tenant-a","headers":{"x-deployment":"blue"}}}}"#,
+        )
+        .expect("write value-routed manual catalog");
+        let route = resolve_model_catalog_provider_config("acme", &models_path)
+            .expect("resolve value-routed catalog")
+            .expect("manual catalog route");
+        assert!(!model_catalog_route_is_persistable(&route));
+        std::fs::write(
+            fetched_models_path(&models_path),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": FETCHED_MODELS_SCHEMA,
+                "providers": {
+                    "acme": fetched_provider_json("acme", &route, &["must-not-load"])
+                }
+            }))
+            .expect("serialize fetched catalog"),
+        )
+        .expect("write fetched catalog");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        assert!(registry.find("acme", "must-not-load").is_none());
+        assert!(
+            registry
+                .error()
+                .is_some_and(|error| error.contains("outside a recognized credential channel")),
+            "unverifiable persisted membership must produce an explicit binding error: {:?}",
             registry.error()
         );
-        let entry = registry
-            .find("acme-rdog", "gemma-rdog")
-            .expect("gemma-rdog entry should be registered");
-        let profile = entry
-            .tool_use_profile
-            .as_ref()
-            .expect("tool_use_profile must be resolved");
-        assert_eq!(profile.name, "rdog-control-bash");
+    }
+
+    #[test]
+    fn fetched_catalog_preserves_known_model_metadata_with_live_membership() {
+        let (dir, auth) = test_auth_storage();
+        let baseline = ModelRegistry::load(&auth, None)
+            .find("openai", "gpt-5.6")
+            .expect("built-in GPT-5.6");
+        let models_path = dir.path().join("models.json");
+        let route = resolve_model_catalog_provider_config("openai", &models_path)
+            .expect("resolve OpenAI route")
+            .expect("built-in OpenAI route");
+        std::fs::write(
+            fetched_models_path(&models_path),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": FETCHED_MODELS_SCHEMA,
+                "providers": {
+                    "openai": fetched_provider_json(
+                        "openai",
+                        &route,
+                        &["gpt-5.6", "new-live-model"],
+                    )
+                }
+            }))
+            .expect("serialize fetched catalog"),
+        )
+        .expect("write fetched catalog");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        let preserved = registry
+            .find("openai", "gpt-5.6")
+            .expect("known fetched model");
+        assert_eq!(preserved.model.api, baseline.model.api);
+        assert_eq!(preserved.model.base_url, baseline.model.base_url);
         assert_eq!(
-            profile.append_system_prompt.as_deref(),
-            Some("rdog-control bash only")
+            preserved.model.context_window,
+            baseline.model.context_window
         );
-        let tools = profile
-            .tools
-            .as_ref()
-            .expect("profile.tools must be Some(vec)");
-        assert_eq!(tools, &vec!["bash".to_string()]);
+        assert_eq!(preserved.model.max_tokens, baseline.model.max_tokens);
+        assert_eq!(preserved.model.reasoning, baseline.model.reasoning);
+        assert_eq!(preserved.supports_max(), baseline.supports_max());
+        assert!(registry.find("openai", "new-live-model").is_some());
+        assert!(
+            registry.find("openai", "gpt-4o").is_none(),
+            "models absent from the live membership must not be reintroduced"
+        );
+    }
+
+    #[test]
+    fn fetched_catalog_rejects_wrong_schema_and_user_only_fields() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+        let fetched_path = fetched_models_path(&models_path);
+        std::fs::write(
+            &fetched_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "pi.models.fetched.v999",
+                "providers": {
+                    "openrouter": {
+                        "routeFingerprint": format!("sha256:{}", "0".repeat(64)),
+                        "fetchedAtUnixMs": 1,
+                        "models": [{"id": "untrusted-generated-model"}]
+                    }
+                }
+            }))
+            .expect("serialize invalid fetched catalog"),
+        )
+        .expect("write invalid fetched catalog");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path.clone()));
+        let error = registry.error().expect("generated schema error");
+        assert!(
+            error.contains("Unsupported generated model catalog schema"),
+            "{error}"
+        );
+        assert!(
+            registry
+                .find("openrouter", "untrusted-generated-model")
+                .is_none(),
+            "invalid generated input must fail closed"
+        );
+
+        std::fs::write(
+            &fetched_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": FETCHED_MODELS_SCHEMA,
+                "providers": {
+                    "openrouter": {
+                        "routeFingerprint": format!("sha256:{}", "0".repeat(64)),
+                        "fetchedAtUnixMs": 1,
+                        "apiKey": "must-not-be-accepted-here",
+                        "models": [{"id": "untrusted-generated-model"}]
+                    }
+                }
+            }))
+            .expect("serialize invalid fetched fields"),
+        )
+        .expect("write invalid fetched fields");
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        let error = registry.error().expect("generated field error");
+        assert!(error.contains("Invalid generated model catalog"), "{error}");
+    }
+
+    #[test]
+    fn fetched_catalog_is_ignored_when_manual_route_configuration_is_unreadable() {
+        let (dir, auth) = test_auth_storage();
+        let models_path = dir.path().join("models.json");
+        let defaults = provider_routing_defaults("openai").expect("OpenAI route defaults");
+        let route = ModelCatalogProviderConfig {
+            base_url: defaults.base_url.to_string(),
+            api: defaults.api.to_string(),
+            api_key: None,
+            headers: HashMap::new(),
+            auth_header: defaults.auth_header,
+        };
+        std::fs::write(&models_path, "{ malformed").expect("write malformed models.json");
+        std::fs::write(
+            fetched_models_path(&models_path),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": FETCHED_MODELS_SCHEMA,
+                "providers": {
+                    "openai": fetched_provider_json(
+                        "openai",
+                        &route,
+                        &["must-not-load"],
+                    )
+                }
+            }))
+            .expect("serialize fetched catalog"),
+        )
+        .expect("write fetched catalog");
+
+        let registry = ModelRegistry::load(&auth, Some(models_path));
+        assert!(registry.find("openai", "must-not-load").is_none());
+        let error = registry
+            .error()
+            .expect("manual and generated catalog errors");
+        assert!(
+            error.contains("current models.json route configuration could not be loaded"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn model_registry_snapshots_one_credential_for_fetched_and_manual_entries() {
+        let dir = tempdir().expect("tempdir");
+        let models_path = dir.path().join("models.json");
+        let route = test_catalog_route(
+            "https://account-a.example/v1",
+            Some("route-fallback-key"),
+            true,
+        );
+        std::fs::write(
+            &models_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "providers": {
+                    "acme": {
+                        "api": "openai-completions",
+                        "baseUrl": &route.base_url,
+                        "apiKey": "route-fallback-key",
+                        "authHeader": true
+                    }
+                }
+            }))
+            .expect("serialize manual route"),
+        )
+        .expect("write manual route");
+        std::fs::write(
+            fetched_models_path(&models_path),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": FETCHED_MODELS_SCHEMA,
+                "providers": {
+                    "acme": fetched_provider_json(
+                        "acme",
+                        &route,
+                        &["route-bound-model"],
+                    )
+                }
+            }))
+            .expect("serialize fetched catalog"),
+        )
+        .expect("write fetched catalog");
+
+        let acme_calls = std::cell::Cell::new(0_u8);
+        let registry =
+            ModelRegistry::load_with_credential_resolver(Some(models_path), |provider| {
+                if !provider.eq_ignore_ascii_case("acme") {
+                    return None;
+                }
+                let call = acme_calls.get();
+                acme_calls.set(call.saturating_add(1));
+                Some(if call == 0 {
+                    "account-a-runtime-key".to_string()
+                } else {
+                    "account-b-runtime-key".to_string()
+                })
+            });
+
+        assert!(registry.error().is_none(), "{:?}", registry.error());
+        let model = registry
+            .find("acme", "route-bound-model")
+            .expect("route-matched generated model");
+        assert_eq!(model.api_key.as_deref(), Some("account-a-runtime-key"));
+        assert_eq!(
+            acme_calls.get(),
+            1,
+            "one registry load must not re-resolve a credential across merged catalog layers"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_registry_snapshots_manual_headers_across_binding_and_application() {
+        let dir = tempdir().expect("tempdir");
+        let models_path = dir.path().join("models.json");
+        let counter_path = dir.path().join("header-helper-count");
+        let quoted_counter = counter_path.to_string_lossy().replace('\'', "'\\''");
+        let header_command =
+            format!("!printf x >> '{quoted_counter}'; printf stable-header-secret");
+
+        let mut route = test_catalog_route("https://account-a.example/v1", None, false);
+        route
+            .headers
+            .insert("x-api-key".to_string(), "stable-header-secret".to_string());
+        std::fs::write(
+            &models_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "providers": {
+                    "acme": {
+                        "api": &route.api,
+                        "baseUrl": &route.base_url,
+                        "authHeader": false,
+                        "headers": {"x-api-key": header_command}
+                    }
+                }
+            }))
+            .expect("serialize manual route"),
+        )
+        .expect("write manual route");
+        std::fs::write(
+            fetched_models_path(&models_path),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": FETCHED_MODELS_SCHEMA,
+                "providers": {
+                    "acme": fetched_provider_json(
+                        "acme",
+                        &route,
+                        &["route-bound-model"],
+                    )
+                }
+            }))
+            .expect("serialize fetched catalog"),
+        )
+        .expect("write fetched catalog");
+
+        let registry = ModelRegistry::load_with_credential_resolver(Some(models_path), |_| None);
+
+        assert!(registry.error().is_none(), "{:?}", registry.error());
+        let model = registry
+            .find("acme", "route-bound-model")
+            .expect("route-matched generated model");
+        assert_eq!(
+            model.headers.get("x-api-key").map(String::as_str),
+            Some("stable-header-secret")
+        );
+        assert_eq!(
+            std::fs::read(&counter_path).expect("read helper counter"),
+            b"x",
+            "one registry load must evaluate each manual provider header helper exactly once"
+        );
     }
 
     #[test]
@@ -4587,7 +6567,6 @@ mod tests {
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
-            tool_use_profile: None,
             oauth_config: None,
         }
     }
@@ -5249,6 +7228,31 @@ mod tests {
     }
 
     #[test]
+    fn request_time_auth_providers_are_not_blocked_by_generic_api_key_preflight() {
+        let bedrock = ad_hoc_model_entry_with_sap_resolver(
+            "bedrock",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            || None,
+        )
+        .expect("bedrock ad-hoc entry");
+        assert!(!model_requires_configured_credential(&bedrock));
+        assert!(model_entry_is_ready(&bedrock));
+
+        let sap = ad_hoc_model_entry_with_sap_resolver("sap-ai-core", "deployment-a", || {
+            Some(SapResolvedCredentials {
+                client_id: "sap-client".to_string(),
+                // ubs:ignore test fixture credential, not live secret.
+                client_secret: "sap-secret".to_string(),
+                token_url: "https://auth.sap.example.com/oauth/token".to_string(),
+                service_url: "https://api.ai.sap.example.com".to_string(),
+            })
+        })
+        .expect("sap ad-hoc entry");
+        assert!(!model_requires_configured_credential(&sap));
+        assert!(model_entry_is_ready(&sap));
+    }
+
+    #[test]
     fn native_adapter_seed_defaults_gitlab_use_gitlab_chat_api() {
         let defaults = native_adapter_seed_defaults("gitlab").expect("gitlab seed defaults");
         assert_eq!(defaults.api, "gitlab-chat");
@@ -5574,6 +7578,14 @@ mod tests {
         assert_eq!(path, PathBuf::from("/home/user/.pi/models.json"));
     }
 
+    #[test]
+    fn fetched_provider_bound_covers_supported_provider_inventory() {
+        assert!(
+            crate::provider_metadata::PROVIDER_METADATA.len() <= MAX_FETCHED_PROVIDERS,
+            "generated catalog provider cap must cover every supported provider"
+        );
+    }
+
     // ─── ModelsConfig deserialization ────────────────────────────────
 
     #[test]
@@ -5694,7 +7706,6 @@ mod tests {
         assert!(anthropic_before > 0);
 
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "anthropic".to_string(),
                 ProviderConfig {
@@ -5732,7 +7743,6 @@ mod tests {
         assert!(google_before > 0);
 
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "gemini".to_string(),
                 ProviderConfig {
@@ -5771,7 +7781,6 @@ mod tests {
         assert!(google_before > 0);
 
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "gemini".to_string(),
                 ProviderConfig {
@@ -5808,7 +7817,6 @@ mod tests {
         let (_dir, auth) = test_auth_storage();
         let mut models = Vec::new();
         let config = ModelsConfig {
-            tool_use_profiles: HashMap::new(),
             providers: HashMap::from([(
                 "gemini".to_string(),
                 ProviderConfig {
@@ -6142,7 +8150,6 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
-                tool_use_profile: None,
                 oauth_config: None,
             }
         }
@@ -6257,7 +8264,6 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
-                tool_use_profile: None,
                 oauth_config: None,
             }
         }

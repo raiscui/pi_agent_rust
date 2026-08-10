@@ -8,13 +8,19 @@
 
 use std::borrow::Cow;
 
+use crate::auth::{
+    AUTH_RESOLUTION_LOCK_TIMEOUT, AuthStorage, AuthStorageLoadFailure,
+    resolve_ambient_sap_auth_token_with_client, resolve_sap_auth_candidate_with_client,
+    resolve_sap_auth_token_with_client,
+};
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::http::client::Client;
 use crate::model::{
     AssistantMessage, ContentBlock, Message, StopReason, StreamEvent, TextContent, ThinkingContent,
     ThinkingLevel, ToolCall, Usage, UserContent,
 };
-use crate::models::{CompatConfig, ToolUsePathSchemaConfig, ToolUseProfile};
+use crate::models::CompatConfig;
 use crate::provider::{Context, Provider, StreamOptions, ToolDef};
 use crate::provider_metadata::canonical_provider_id;
 use crate::sse::SseStream;
@@ -23,6 +29,7 @@ use futures::StreamExt;
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 // ============================================================================
@@ -31,8 +38,10 @@ use std::pin::Pin;
 
 const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+const MAX_API_ERROR_BODY_BYTES: usize = 64 * 1024;
 const OPENROUTER_DEFAULT_HTTP_REFERER: &str = "https://github.com/Dicklesworthstone/pi_agent_rust";
 const OPENROUTER_DEFAULT_X_TITLE: &str = "Pi Agent Rust";
+
 /// Map a role string (which may come from compat config at runtime) to a `Cow<'_, str>`.
 ///
 /// The OpenAI API uses a small, well-known set of role names.  When the value
@@ -74,6 +83,24 @@ fn authorization_override(
         })
 }
 
+fn redacted_api_error_body(body: &str, secrets: &[&str]) -> String {
+    crate::auth::redact_known_secrets_bounded(body, secrets, MAX_API_ERROR_BODY_BYTES)
+}
+
+fn push_api_error_secret(secrets: &mut Vec<String>, value: &str, authorization: bool) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    secrets.push(value.to_string());
+    if authorization && let Some(separator) = value.find(char::is_whitespace) {
+        let credential = value[separator..].trim();
+        if !credential.is_empty() {
+            secrets.push(credential.to_string());
+        }
+    }
+}
+
 fn first_non_empty_env(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         std::env::var(key)
@@ -104,7 +131,8 @@ pub struct OpenAIProvider {
     base_url: String,
     provider: String,
     compat: Option<CompatConfig>,
-    tool_use_profile: Option<ToolUseProfile>,
+    auth_path_override: Option<PathBuf>,
+    auth_header: bool,
     /// Whether the model is a reasoning model. Gates the DeepSeek thinking
     /// dialect so non-reasoning DeepSeek models (e.g. `deepseek-chat`) never
     /// emit `thinking`/`reasoning_effort` (gh #114). Defaults to `false`; the
@@ -121,7 +149,8 @@ impl OpenAIProvider {
             base_url: OPENAI_API_URL.to_string(),
             provider: "openai".to_string(),
             compat: None,
-            tool_use_profile: None,
+            auth_path_override: None,
+            auth_header: true,
             reasoning: false,
         }
     }
@@ -161,6 +190,19 @@ impl OpenAIProvider {
         self
     }
 
+    #[cfg(test)]
+    #[must_use]
+    fn with_auth_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.auth_path_override = Some(path.into());
+        self
+    }
+
+    fn auth_path(&self) -> PathBuf {
+        self.auth_path_override
+            .clone()
+            .unwrap_or_else(Config::auth_path)
+    }
+
     /// Attach provider-specific compatibility overrides.
     ///
     /// Overrides are applied during request building (field names, headers,
@@ -171,13 +213,11 @@ impl OpenAIProvider {
         self
     }
 
-    /// Attach a resolved tool-use profile from `models.json`.
-    ///
-    /// 这里接收的是 `ModelEntry` 上已经解析完成的 profile clone。
-    /// OpenAI provider 不再根据 provider/model 名称自行推断弱兼容模型。
+    /// Control whether this route generates a Bearer Authorization header.
+    /// Custom Authorization headers remain authoritative regardless of this flag.
     #[must_use]
-    pub fn with_tool_use_profile(mut self, profile: Option<ToolUseProfile>) -> Self {
-        self.tool_use_profile = profile;
+    pub const fn with_auth_header(mut self, enabled: bool) -> Self {
+        self.auth_header = enabled;
         self
     }
 
@@ -204,6 +244,10 @@ impl OpenAIProvider {
         }
     }
 
+    fn is_sap_ai_core(&self) -> bool {
+        canonical_provider_id(&self.provider).is_some_and(|canonical| canonical == "sap-ai-core")
+    }
+
     /// Build the request body for the OpenAI API.
     pub fn build_request<'a>(
         &'a self,
@@ -226,30 +270,7 @@ impl OpenAIProvider {
         let tools: Option<Vec<OpenAITool<'a>>> = if context.tools.is_empty() || !tools_supported {
             None
         } else {
-            // profile.tools 是 OpenAI schema 层的 allowlist。
-            // ToolRegistry 层已经在调用方被同一份 profile.tools 硬过滤。
-            // 这里保留第二层过滤,保证请求体和客户端可执行工具保持同源一致。
-            // 白名单内但本次未启用的 tool 会被静默忽略, 与 pathSchema 风格一致。
-            let profile_tools = self
-                .tool_use_profile
-                .as_ref()
-                .and_then(|profile| profile.tools.as_ref());
-            let converted: Vec<OpenAITool<'a>> = context
-                .tools
-                .iter()
-                .filter(|tool| {
-                    profile_tools
-                        .as_ref()
-                        .is_none_or(|allowed| allowed.iter().any(|name| name == &tool.name))
-                })
-                .map(|tool| {
-                    convert_tool_to_openai_with_profile(tool, self.tool_use_profile.as_ref())
-                })
-                .collect();
-            // profile 显式声明了空白名单, 等价于关闭 tool 能力.
-            // 这里返回 Some(vec) 而不是 None, 让 OpenAI request 显式表达
-            // "profile 决定禁掉所有 tool", 区别于 tools_supported=false 的能力缺失.
-            Some(converted)
+            Some(context.tools.iter().map(convert_tool_to_openai).collect())
         };
 
         // Determine which max-tokens field to populate based on compat config.
@@ -273,13 +294,6 @@ impl OpenAIProvider {
             .unwrap_or(true);
 
         let stream_options = Some(OpenAIStreamOptions { include_usage });
-        let stop = self.compat.as_ref().and_then(|c| c.stop.as_deref());
-        let temperature = options
-            .temperature
-            .or_else(|| self.compat.as_ref().and_then(|c| c.temperature));
-        let top_p = self.compat.as_ref().and_then(|c| c.top_p);
-        let min_p = self.compat.as_ref().and_then(|c| c.min_p);
-        let repetition_penalty = self.compat.as_ref().and_then(|c| c.repetition_penalty);
 
         // Forward the reasoning level for providers with a request-side reasoning
         // dialect. Only DeepSeek today; all other transports get `(None, None)`,
@@ -307,11 +321,7 @@ impl OpenAIProvider {
             messages,
             max_tokens,
             max_completion_tokens,
-            temperature,
-            top_p,
-            min_p,
-            stop,
-            repetition_penalty,
+            temperature: options.temperature,
             tools,
             stream: true,
             stream_options,
@@ -410,13 +420,62 @@ impl Provider for OpenAIProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         let authorization_override = authorization_override(options, self.compat.as_ref());
 
-        let auth_value = if authorization_override.is_some() {
+        let auth_value = if authorization_override.is_some() || !self.auth_header {
             None
         } else {
-            let resolved = options
+            // SAP supports either a direct bearer or a service-key JSON candidate. Classify every
+            // candidate before constructing the Authorization header so legacy ApiKey entries can
+            // never leak a service key verbatim. The explicit lane remains highest precedence and
+            // bypasses auth-file loading when it contains a direct bearer.
+            let resolved = if self.is_sap_ai_core() {
+                if let Some(candidate) = options
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                {
+                    resolve_sap_auth_candidate_with_client(&self.client, candidate).await?
+                } else {
+                    match AuthStorage::load_with_lock_timeout_classified(
+                        self.auth_path(),
+                        AUTH_RESOLUTION_LOCK_TIMEOUT,
+                    ) {
+                        Ok(auth) => {
+                            resolve_sap_auth_token_with_client(&self.client, &auth, None).await?
+                        }
+                        Err(failure @ AuthStorageLoadFailure::LockTimeout(_)) => {
+                            return Err(failure.into_error());
+                        }
+                        Err(AuthStorageLoadFailure::Other(load_error)) => {
+                            let ambient =
+                                resolve_ambient_sap_auth_token_with_client(&self.client).await?;
+                            if ambient.is_some() {
+                                tracing::warn!(
+                                    error = %load_error,
+                                    "stored SAP credentials are unavailable; using complete ambient credentials"
+                                );
+                                ambient
+                            } else {
+                                return Err(Error::auth(format!(
+                                    "Failed to load SAP AI Core credentials: {load_error}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            } else if let Some(key) = options
                 .api_key
-                .clone()
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+            {
+                Some(key.to_string())
+            } else {
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .map(|key| key.trim().to_string())
+                    .filter(|key| !key.is_empty())
+            };
             match resolved {
                 Some(key) => Some(key),
                 // Local / self-hosted providers (ollama, llamacpp, mistralrs, …)
@@ -424,6 +483,11 @@ impl Provider for OpenAIProvider {
                 // API key. For these we proceed without an Authorization header
                 // instead of failing, matching how ollama already works. (#104)
                 None if crate::provider_metadata::provider_is_keyless_local(self.name()) => None,
+                None if self.is_sap_ai_core() => {
+                    return Err(Error::auth(
+                        "SAP AI Core requires AICORE_SERVICE_KEY, the SAP_AI_CORE_* split credential variables, a stored service key, or an explicit bearer token.",
+                    ));
+                }
                 None => {
                     return Err(Error::provider(
                         self.name(),
@@ -442,7 +506,7 @@ impl Provider for OpenAIProvider {
             .post(&self.base_url)
             .header("Accept", "text/event-stream");
 
-        if let Some(auth_value) = auth_value {
+        if let Some(auth_value) = auth_value.as_deref() {
             request = request.header("Authorization", format!("Bearer {auth_value}"));
         }
 
@@ -467,14 +531,14 @@ impl Provider for OpenAIProvider {
         }
 
         // Apply provider-specific custom headers from compat config.
-        if let Some(compat) = &self.compat {
-            if let Some(custom_headers) = &compat.custom_headers {
-                request = super::apply_headers_ignoring_blank_auth_overrides(
-                    request,
-                    custom_headers,
-                    &["authorization"],
-                );
-            }
+        if let Some(compat) = &self.compat
+            && let Some(custom_headers) = &compat.custom_headers
+        {
+            request = super::apply_headers_ignoring_blank_auth_overrides(
+                request,
+                custom_headers,
+                &["authorization"],
+            );
         }
 
         // Per-request headers from StreamOptions (highest priority).
@@ -490,9 +554,49 @@ impl Provider for OpenAIProvider {
         let status = response.status();
         if !(200..300).contains(&status) {
             let body = response
-                .text()
+                .text_limited(MAX_API_ERROR_BODY_BYTES)
                 .await
                 .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+            let mut secrets = Vec::new();
+            for value in [auth_value.as_deref(), authorization_override.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                push_api_error_secret(&mut secrets, value, true);
+            }
+            if let Some(headers) = self
+                .compat
+                .as_ref()
+                .and_then(|compat| compat.custom_headers.as_ref())
+            {
+                for (name, value) in headers {
+                    push_api_error_secret(
+                        &mut secrets,
+                        value,
+                        name.eq_ignore_ascii_case("authorization"),
+                    );
+                }
+            }
+            for (name, value) in &options.headers {
+                push_api_error_secret(
+                    &mut secrets,
+                    value,
+                    name.eq_ignore_ascii_case("authorization"),
+                );
+            }
+            if let Ok(url) = url::Url::parse(&self.base_url) {
+                secrets.extend(
+                    url.query_pairs()
+                        .map(|(_, value)| value.into_owned())
+                        .filter(|value| !value.is_empty()),
+                );
+                push_api_error_secret(&mut secrets, url.username(), false);
+                if let Some(password) = url.password() {
+                    push_api_error_secret(&mut secrets, password, false);
+                }
+            }
+            let secret_refs = secrets.iter().map(String::as_str).collect::<Vec<_>>();
+            let body = redacted_api_error_body(&body, &secret_refs);
             return Err(Error::provider(
                 &self.provider,
                 format!("OpenAI API error (HTTP {status}): {body}"),
@@ -768,7 +872,7 @@ fn trailing_json_string_start(out: &str) -> Option<usize> {
                 backslashes += 1;
                 j -= 1;
             }
-            if backslashes % 2 == 0 {
+            if backslashes.is_multiple_of(2) {
                 return Some(i);
             }
         }
@@ -798,6 +902,7 @@ where
                 model,
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },
@@ -1075,12 +1180,11 @@ where
                         // JSON; on an un-completable fragment it returns None and
                         // we keep the last good value (never wrong data). The
                         // terminal event still sets the fully-parsed arguments.
-                        if let Some(partial_args) = complete_partial_json(&tc.arguments) {
-                            if let Some(ContentBlock::ToolCall(block)) =
+                        if let Some(partial_args) = complete_partial_json(&tc.arguments)
+                            && let Some(ContentBlock::ToolCall(block)) =
                                 self.partial.content.get_mut(content_index)
-                            {
-                                block.arguments = partial_args;
-                            }
+                        {
+                            block.arguments = partial_args;
                         }
 
                         // The delta is still emitted for streaming consumers.
@@ -1160,14 +1264,6 @@ pub struct OpenAIRequest<'a> {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    min_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stop: Option<&'a [String]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repetition_penalty: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAITool<'a>>>,
     stream: bool,
@@ -1265,9 +1361,9 @@ struct OpenAITool<'a> {
 
 #[derive(Debug, Serialize)]
 struct OpenAIFunction<'a> {
-    name: Cow<'a, str>,
-    description: Cow<'a, str>,
-    parameters: serde_json::Value,
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a serde_json::Value,
 }
 
 // ============================================================================
@@ -1505,95 +1601,14 @@ fn convert_user_content(content: &UserContent) -> OpenAIContent<'_> {
 }
 
 fn convert_tool_to_openai(tool: &ToolDef) -> OpenAITool<'_> {
-    convert_tool_to_openai_with_profile(tool, None)
-}
-
-fn convert_tool_to_openai_with_profile<'a>(
-    tool: &'a ToolDef,
-    profile: Option<&ToolUseProfile>,
-) -> OpenAITool<'a> {
-    let mut parameters = tool.parameters.clone();
-    if let Some(path_schema) = profile.and_then(|profile| profile.path_schema.as_ref()) {
-        normalize_profiled_path_arguments(&tool.name, &mut parameters, path_schema);
-    }
-
     OpenAITool {
         r#type: "function",
         function: OpenAIFunction {
-            name: Cow::Borrowed(&tool.name),
-            description: Cow::Borrowed(&tool.description),
-            parameters,
+            name: &tool.name,
+            description: &tool.description,
+            parameters: &tool.parameters,
         },
     }
-}
-
-fn normalize_profiled_path_arguments(
-    tool_name: &str,
-    schema: &mut serde_json::Value,
-    path_schema: &ToolUsePathSchemaConfig,
-) {
-    let Some(path_description) = profiled_path_description_for_tool(tool_name, path_schema) else {
-        return;
-    };
-    rewrite_path_argument_descriptions(schema, path_description);
-}
-
-fn rewrite_path_argument_descriptions(schema: &mut serde_json::Value, path_description: &str) {
-    match schema {
-        serde_json::Value::Object(object) => {
-            if let Some(properties) = object
-                .get_mut("properties")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                for (name, property) in properties {
-                    if name == "path" {
-                        // 某些 OpenAI-compatible 模型会强跟随 tool schema。
-                        // 因此 path 约束由配置 profile 提供, 而不是写死到某个模型名。
-                        if let serde_json::Value::Object(property_object) = property {
-                            property_object.insert(
-                                "description".to_string(),
-                                serde_json::Value::String(path_description.to_string()),
-                            );
-                        }
-                    }
-                    rewrite_path_argument_descriptions(property, path_description);
-                }
-            }
-
-            for value in object.values_mut() {
-                rewrite_path_argument_descriptions(value, path_description);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                rewrite_path_argument_descriptions(item, path_description);
-            }
-        }
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {}
-    }
-}
-
-fn profiled_path_description_for_tool<'a>(
-    tool_name: &str,
-    path_schema: &'a ToolUsePathSchemaConfig,
-) -> Option<&'a str> {
-    if tool_name_is_listed(path_schema.file_tools.as_deref(), tool_name) {
-        return path_schema.file_path_description.as_deref();
-    }
-    if tool_name_is_listed(path_schema.optional_path_tools.as_deref(), tool_name) {
-        return path_schema.optional_path_description.as_deref();
-    }
-    path_schema.generic_path_description.as_deref()
-}
-
-fn tool_name_is_listed(tool_names: Option<&[String]>, tool_name: &str) -> bool {
-    tool_names
-        .into_iter()
-        .flatten()
-        .any(|configured| configured.eq_ignore_ascii_case(tool_name))
 }
 
 // ============================================================================
@@ -1603,6 +1618,7 @@ fn tool_name_is_listed(tool_names: Option<&[String]>, tool_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthCredential;
     use asupersync::runtime::RuntimeBuilder;
     use futures::{StreamExt, stream};
     use serde::{Deserialize, Serialize};
@@ -1714,163 +1730,12 @@ mod tests {
         assert_eq!(converted.function.description, "A test tool");
         assert_eq!(
             converted.function.parameters,
-            serde_json::json!({
+            &serde_json::json!({
                 "type": "object",
                 "properties": {
                     "arg": {"type": "string"}
                 }
             })
-        );
-    }
-
-    fn tool_use_path_schema_profile(name: &str) -> ToolUseProfile {
-        ToolUseProfile {
-            name: name.to_string(),
-            append_system_prompt: None,
-            path_schema: Some(ToolUsePathSchemaConfig {
-                file_tools: Some(vec![
-                    "read".to_string(),
-                    "edit".to_string(),
-                    "write".to_string(),
-                    "hashline_edit".to_string(),
-                ]),
-                optional_path_tools: Some(vec![
-                    "grep".to_string(),
-                    "find".to_string(),
-                    "ls".to_string(),
-                ]),
-                file_path_description: Some("Configured file path description".to_string()),
-                optional_path_description: Some("Configured optional path description".to_string()),
-                generic_path_description: Some("Configured generic path description".to_string()),
-            }),
-            argument_repair: None,
-            post_tool_guard: None,
-            tools: None,
-            skills: None,
-            extensions: None,
-        }
-    }
-
-    #[test]
-    fn tool_use_profile_conversion_rewrites_path_descriptions_from_config() {
-        let tool = ToolDef {
-            name: "generic_path_tool".to_string(),
-            description: "A generic path tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to use (relative or absolute)"
-                    },
-                    "nested": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "Nested path"
-                            }
-                        }
-                    }
-                }
-            }),
-        };
-
-        let default_converted = convert_tool_to_openai(&tool);
-        assert_eq!(
-            default_converted.function.parameters["properties"]["path"]["description"],
-            "Path to use (relative or absolute)"
-        );
-
-        let profile = tool_use_path_schema_profile("renamed-compatible-profile");
-        let profiled_converted = convert_tool_to_openai_with_profile(&tool, Some(&profile));
-        assert_eq!(
-            profiled_converted.function.parameters["properties"]["path"]["description"],
-            "Configured generic path description"
-        );
-        assert_eq!(
-            profiled_converted.function.parameters["properties"]["nested"]["properties"]["path"]["description"],
-            "Configured generic path description"
-        );
-        assert_eq!(profiled_converted.function.name, "generic_path_tool");
-        assert_eq!(
-            profiled_converted.function.description,
-            "A generic path tool"
-        );
-    }
-
-    #[test]
-    fn tool_use_profile_conversion_uses_configured_tool_categories() {
-        let file_tool = ToolDef {
-            name: "write".to_string(),
-            description: "Write a file".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to write"
-                    }
-                }
-            }),
-        };
-        let listed_tool = ToolDef {
-            name: "ls".to_string(),
-            description: "List files".to_string(),
-            parameters: file_tool.parameters.clone(),
-        };
-
-        let profile = tool_use_path_schema_profile("weak-openai-compatible");
-        let file_converted = convert_tool_to_openai_with_profile(&file_tool, Some(&profile));
-        assert_eq!(
-            file_converted.function.parameters["properties"]["path"]["description"],
-            "Configured file path description"
-        );
-
-        let listed_converted = convert_tool_to_openai_with_profile(&listed_tool, Some(&profile));
-        assert_eq!(
-            listed_converted.function.parameters["properties"]["path"]["description"],
-            "Configured optional path description"
-        );
-    }
-
-    #[test]
-    fn tool_use_profile_conversion_skips_generic_path_without_description() {
-        let tool = ToolDef {
-            name: "unknown_path_tool".to_string(),
-            description: "Unknown path tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Original path description"
-                    }
-                }
-            }),
-        };
-        let profile = ToolUseProfile {
-            name: "file-only-profile".to_string(),
-            append_system_prompt: None,
-            path_schema: Some(ToolUsePathSchemaConfig {
-                file_tools: Some(vec!["write".to_string()]),
-                optional_path_tools: None,
-                file_path_description: Some("Configured file path description".to_string()),
-                optional_path_description: None,
-                generic_path_description: None,
-            }),
-            argument_repair: None,
-            post_tool_guard: None,
-            tools: None,
-            skills: None,
-            extensions: None,
-        };
-
-        let converted = convert_tool_to_openai_with_profile(&tool, Some(&profile));
-
-        assert_eq!(
-            converted.function.parameters["properties"]["path"]["description"],
-            "Original path description"
         );
     }
 
@@ -1937,156 +1802,6 @@ mod tests {
                 "required": ["q"]
             })
         );
-    }
-
-    // Helper: 从一组 ToolDef 构造一个最小 Context, 给 profile.tools 过滤测试用.
-    fn profiled_context_with_tools(tools: Vec<ToolDef>) -> Context<'static> {
-        Context {
-            system_prompt: Some("base".to_string().into()),
-            messages: vec![Message::User(crate::model::UserMessage {
-                content: UserContent::Text("ping".to_string()),
-                timestamp: 0,
-            })]
-            .into(),
-            tools: tools.into(),
-        }
-    }
-
-    // Helper: 给 build_request 注入 profile + tools + 解析出 JSON.
-    fn build_request_with_profile(
-        profile: Option<ToolUseProfile>,
-        tools: Vec<ToolDef>,
-    ) -> serde_json::Value {
-        let mut provider = OpenAIProvider::new("gemma-4-e2b-it-qat-OptiQ-4bit");
-        provider.tool_use_profile = profile;
-        let context = profiled_context_with_tools(tools);
-        let options = StreamOptions::default();
-        let request = provider.build_request(&context, &options);
-        serde_json::to_value(&request).expect("serialize request")
-    }
-
-    #[test]
-    fn profile_tools_allowlist_filters_to_named_tools_only() {
-        // rdog-control-bash 这类 profile 的核心约束: 模型只能看到 bash.
-        // 即使 Pi 内部启用了 read/write/grep, schema 也不应把它们暴露给模型.
-        let profile = ToolUseProfile {
-            name: "rdog-control-bash".to_string(),
-            append_system_prompt: None,
-            path_schema: None,
-            argument_repair: None,
-            post_tool_guard: None,
-            tools: Some(vec!["bash".to_string()]),
-            skills: None,
-            extensions: None,
-        };
-        let tools = vec![
-            ToolDef {
-                name: "bash".to_string(),
-                description: "shell".to_string(),
-                parameters: json!({"type": "object"}),
-            },
-            ToolDef {
-                name: "read".to_string(),
-                description: "read file".to_string(),
-                parameters: json!({"type": "object"}),
-            },
-            ToolDef {
-                name: "write".to_string(),
-                description: "write file".to_string(),
-                parameters: json!({"type": "object"}),
-            },
-        ];
-        let value = build_request_with_profile(Some(profile), tools);
-        let names: Vec<&str> = value["tools"]
-            .as_array()
-            .expect("tools should serialize as array")
-            .iter()
-            .map(|t| t["function"]["name"].as_str().expect("tool name"))
-            .collect();
-        assert_eq!(names, vec!["bash"]);
-    }
-
-    #[test]
-    fn profile_tools_allowlist_empty_disables_all_tools() {
-        // 空白名单应该让 model 完全看不到 tool, schema 数组为空.
-        // 这是"profile 显式禁用"语义, 与 tools_supported=false 区分.
-        let profile = ToolUseProfile {
-            name: "no-tools".to_string(),
-            append_system_prompt: None,
-            path_schema: None,
-            argument_repair: None,
-            post_tool_guard: None,
-            tools: Some(vec![]),
-            skills: None,
-            extensions: None,
-        };
-        let tools = vec![ToolDef {
-            name: "bash".to_string(),
-            description: "shell".to_string(),
-            parameters: json!({"type": "object"}),
-        }];
-        let value = build_request_with_profile(Some(profile), tools);
-        let arr = value["tools"]
-            .as_array()
-            .expect("tools should serialize as array");
-        assert!(
-            arr.is_empty(),
-            "empty allowlist should drop every tool, got {arr:?}"
-        );
-    }
-
-    #[test]
-    fn profile_tools_none_keeps_historical_no_filter_behavior() {
-        // 没有 profile.tools 字段时, 维持原行为: 全部 tool 都进入 schema.
-        let tools = vec![
-            ToolDef {
-                name: "bash".to_string(),
-                description: "shell".to_string(),
-                parameters: json!({"type": "object"}),
-            },
-            ToolDef {
-                name: "read".to_string(),
-                description: "read file".to_string(),
-                parameters: json!({"type": "object"}),
-            },
-        ];
-        let value = build_request_with_profile(None, tools);
-        let names: Vec<&str> = value["tools"]
-            .as_array()
-            .expect("tools should serialize as array")
-            .iter()
-            .map(|t| t["function"]["name"].as_str().expect("tool name"))
-            .collect();
-        assert_eq!(names, vec!["bash", "read"]);
-    }
-
-    #[test]
-    fn profile_tools_allowlist_silently_drops_unregistered_names() {
-        // 白名单里写了 Pi 内部没有的工具名, 不能 panic, 也不能污染 schema.
-        // 与 pathSchema 的"未启用的 tool 名被忽略"风格保持一致.
-        let profile = ToolUseProfile {
-            name: "rdog-control-bash".to_string(),
-            append_system_prompt: None,
-            path_schema: None,
-            argument_repair: None,
-            post_tool_guard: None,
-            tools: Some(vec!["bash".to_string(), "rdog-line-control".to_string()]),
-            skills: None,
-            extensions: None,
-        };
-        let tools = vec![ToolDef {
-            name: "bash".to_string(),
-            description: "shell".to_string(),
-            parameters: json!({"type": "object"}),
-        }];
-        let value = build_request_with_profile(Some(profile), tools);
-        let names: Vec<&str> = value["tools"]
-            .as_array()
-            .expect("tools should serialize as array")
-            .iter()
-            .map(|t| t["function"]["name"].as_str().expect("tool name"))
-            .collect();
-        assert_eq!(names, vec!["bash"]);
     }
 
     #[test]
@@ -2504,6 +2219,226 @@ mod tests {
         let body: Value = serde_json::from_str(&captured.body).expect("request body json");
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn auth_header_false_sends_custom_openai_request_without_authorization() {
+        let options = StreamOptions::default();
+        let captured = run_stream_and_capture_headers_with(
+            OpenAIProvider::new("custom-model")
+                .with_provider_name("custom-openai")
+                .with_auth_header(false),
+            &options,
+        )
+        .expect("captured keyless custom request");
+
+        assert!(
+            !captured.headers.contains_key("authorization"),
+            "authHeader:false must not synthesize Authorization"
+        );
+    }
+
+    #[test]
+    fn stream_error_redacts_transmitted_bearer_credential() {
+        let secret = "provider-\"secret\\with&reserved=characters";
+        let header_secret = "custom-\"header\\credential";
+        let query_secret = "query-secret-value";
+        let response_json = serde_json::json!({
+            "authorizationEcho": secret,
+            "customHeaderEcho": header_secret,
+            "queryEcho": query_secret,
+        })
+        .to_string();
+        let response_body = format!("upstream error: {response_json}");
+        let (base_url, request_rx) = spawn_test_server(401, "application/json", &response_body);
+        let provider = OpenAIProvider::new("gpt-4o")
+            .with_base_url(format!("{base_url}?api_key={query_secret}"));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+        let mut options = StreamOptions {
+            api_key: Some(secret.to_string()),
+            ..Default::default()
+        };
+        options
+            .headers
+            .insert("x-api-key".to_string(), header_secret.to_string());
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let error = runtime.block_on(async {
+            match provider.stream(&context, &options).await {
+                Ok(_) => panic!("HTTP error must not produce a stream"),
+                Err(error) => error,
+            }
+        });
+        let message = error.to_string();
+        assert!(message.contains("HTTP 401"), "{message}");
+        assert!(message.contains("[REDACTED]"), "{message}");
+        assert!(!message.contains(secret), "credential leaked: {message}");
+        assert!(
+            !message.contains("provider-"),
+            "escaped credential leaked: {message}"
+        );
+        assert!(
+            !message.contains("custom-"),
+            "header credential leaked: {message}"
+        );
+        assert!(
+            !message.contains(query_secret),
+            "query credential leaked: {message}"
+        );
+        request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured error request");
+
+        let expanding = redacted_api_error_body(&"x".repeat(MAX_API_ERROR_BODY_BYTES), &["x"]);
+        assert!(
+            expanding.len() <= MAX_API_ERROR_BODY_BYTES,
+            "redaction expansion exceeded the final API error bound"
+        );
+    }
+
+    #[test]
+    fn sap_stream_exchanges_service_key_before_sending_bearer_header() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp_dir.path().join("auth.json");
+        let (token_url, token_request_rx) = spawn_test_server(
+            200,
+            "application/json",
+            r#"{"access_token":"sap-access-token"}"#,
+        );
+        let mut auth = AuthStorage::load(auth_path.clone()).expect("load auth");
+        let service_key_json = json!({
+            "clientid": "sap-client",
+            // ubs:ignore test fixture credential, not live secret.
+            "clientsecret": "sap-secret",
+            "url": token_url,
+            "serviceurls": {
+                "AI_API_URL": "https://api.ai.sap.example.com"
+            }
+        })
+        .to_string();
+        auth.set(
+            "sap-ai-core",
+            // Legacy auth files stored the complete service-key JSON in the generic ApiKey lane.
+            // It must be exchanged, never forwarded as the bearer value.
+            AuthCredential::ApiKey {
+                key: service_key_json.clone(),
+            },
+        );
+        auth.save().expect("save auth");
+
+        let (inference_url, inference_request_rx) =
+            spawn_test_server(200, "text/event-stream", &success_sse_body());
+        let provider = OpenAIProvider::new("deployment-a")
+            .with_provider_name("sap-ai-core")
+            .with_base_url(inference_url)
+            .with_auth_path(auth_path);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+        let options = StreamOptions::default();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider.stream(&context, &options).await.expect("stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let token_request = token_request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured token request");
+        assert!(token_request.body.contains("grant_type=client_credentials"));
+        assert!(token_request.body.contains("client_id=sap-client"));
+
+        let inference_request = inference_request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured inference request");
+        let authorization = inference_request
+            .headers
+            .get("authorization")
+            .expect("SAP inference authorization header");
+        assert_eq!(
+            authorization, "Bearer sap-access-token",
+            "legacy service-key JSON must be exchanged before inference"
+        );
+        assert!(!authorization.contains(&service_key_json));
+        assert!(!authorization.contains("sap-secret"));
+        assert!(!inference_request.body.contains(&service_key_json));
+        assert!(!inference_request.body.contains("sap-secret"));
+    }
+
+    #[test]
+    fn sap_stream_uses_stored_direct_bearer_without_requiring_service_key() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let auth_path = temp_dir.path().join("auth.json");
+        let mut auth = AuthStorage::load(auth_path.clone()).expect("load auth");
+        auth.set(
+            "sap-ai-core",
+            AuthCredential::BearerToken {
+                token: "stored-sap-bearer".to_string(),
+            },
+        );
+        auth.save().expect("save auth");
+
+        let (inference_url, inference_request_rx) =
+            spawn_test_server(200, "text/event-stream", &success_sse_body());
+        let provider = OpenAIProvider::new("deployment-a")
+            .with_provider_name("sap-ai-core")
+            .with_base_url(inference_url)
+            .with_auth_path(auth_path);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("ping".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let mut stream = provider
+                .stream(&context, &StreamOptions::default())
+                .await
+                .expect("stream");
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::Done { .. }) {
+                    break;
+                }
+            }
+        });
+
+        let inference_request = inference_request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("captured inference request");
+        assert_eq!(
+            inference_request
+                .headers
+                .get("authorization")
+                .map(String::as_str),
+            Some("Bearer stored-sap-bearer")
+        );
     }
 
     /// Drive `provider.stream()` once against `base_url` with no API key and
@@ -2952,6 +2887,8 @@ mod tests {
             StopReason::Stop => "stop",
             StopReason::Length => "length",
             StopReason::ToolUse => "tool_use",
+            StopReason::PauseTurn => "pause_turn",
+            StopReason::Refusal => "refusal",
             StopReason::Error => "error",
             StopReason::Aborted => "aborted",
         }
@@ -3095,77 +3032,6 @@ mod tests {
         assert_eq!(
             value["stream_options"]["include_usage"], false,
             "include_usage should be false when supports_usage_in_streaming=false"
-        );
-    }
-
-    #[test]
-    fn compat_generation_defaults_add_sampling_and_stop_controls() {
-        let provider = OpenAIProvider::new("local-model").with_compat(Some(CompatConfig {
-            stop: Some(vec!["<|im_end|>".to_string(), "</s>".to_string()]),
-            temperature: Some(0.7),
-            top_p: Some(0.9),
-            min_p: Some(0.05),
-            repetition_penalty: Some(1.15),
-            ..Default::default()
-        }));
-        let context = context_with_tools();
-        let options = default_stream_options();
-        let req = provider.build_request(&context, &options);
-        let value = serde_json::to_value(&req).expect("serialize");
-
-        assert_eq!(
-            value["stop"],
-            serde_json::json!(["<|im_end|>", "</s>"]),
-            "configured stop sequences should be forwarded to OpenAI-compatible backends"
-        );
-        let temperature = value["temperature"]
-            .as_f64()
-            .expect("temperature should serialize as number");
-        assert!(
-            (temperature - 0.7).abs() < 1e-6,
-            "configured temperature should be forwarded"
-        );
-        let top_p = value["top_p"]
-            .as_f64()
-            .expect("top_p should serialize as number");
-        assert!(
-            (top_p - 0.9).abs() < 1e-6,
-            "configured top_p should be forwarded"
-        );
-        let min_p = value["min_p"]
-            .as_f64()
-            .expect("min_p should serialize as number");
-        assert!(
-            (min_p - 0.05).abs() < 1e-6,
-            "configured min_p should be forwarded"
-        );
-        let repetition_penalty = value["repetition_penalty"]
-            .as_f64()
-            .expect("repetition penalty should serialize as number");
-        assert!(
-            (repetition_penalty - 1.15).abs() < 1e-6,
-            "configured repetition penalty should be forwarded"
-        );
-    }
-
-    #[test]
-    fn stream_options_temperature_overrides_generation_default() {
-        let provider = OpenAIProvider::new("local-model").with_compat(Some(CompatConfig {
-            temperature: Some(0.7),
-            ..Default::default()
-        }));
-        let context = context_with_tools();
-        let mut options = default_stream_options();
-        options.temperature = Some(0.2);
-        let req = provider.build_request(&context, &options);
-        let value = serde_json::to_value(&req).expect("serialize");
-        let temperature = value["temperature"]
-            .as_f64()
-            .expect("temperature should serialize as number");
-
-        assert!(
-            (temperature - 0.2).abs() < 1e-6,
-            "per-request temperature should override generation default"
         );
     }
 

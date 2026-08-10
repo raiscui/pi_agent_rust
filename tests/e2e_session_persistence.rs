@@ -81,6 +81,7 @@ impl PlannedProvider {
                 ..Usage::default()
             },
             stop_reason,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         }
@@ -292,10 +293,10 @@ fn run_cli(
         buf
     });
 
-    if let Some(input) = stdin {
-        if let Some(mut child_stdin) = child.stdin.take() {
-            child_stdin.write_all(input).expect("write stdin");
-        }
+    if let Some(input) = stdin
+        && let Some(mut child_stdin) = child.stdin.take()
+    {
+        child_stdin.write_all(input).expect("write stdin");
     }
 
     let timeout = Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS);
@@ -1145,7 +1146,7 @@ fn run_session_store_chaos_worker_from_env() {
                     )
                     .expect("append rollback base");
                 rollback_store
-                    .create_checkpoint(1, "chaos-baseline")
+                    .create_checkpoint(1, "manual")
                     .expect("create rollback checkpoint");
                 rollback_store
                     .append_entry(

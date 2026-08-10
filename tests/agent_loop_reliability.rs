@@ -52,6 +52,7 @@ fn make_assistant(text: &str, stop: StopReason, total_tokens: u64) -> AssistantM
             ..Usage::default()
         },
         stop_reason: stop,
+        stop_details: None,
         error_message: None,
         timestamp: 0,
     }
@@ -69,6 +70,7 @@ fn make_tool_call_message(tools: Vec<ToolCall>, total_tokens: u64) -> AssistantM
             ..Usage::default()
         },
         stop_reason: StopReason::ToolUse,
+        stop_details: None,
         error_message: None,
         timestamp: 0,
     }
@@ -331,6 +333,7 @@ fn make_partial(text: &str) -> AssistantMessage {
         model: "test-model".to_string(),
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
+        stop_details: None,
         error_message: None,
         timestamp: 0,
     }
@@ -802,6 +805,7 @@ impl Provider for ToolCallThenHangProvider {
             let msg = make_tool_call_message(self.tool_calls.clone(), 30);
             let partial = AssistantMessage {
                 content: Vec::new(),
+                stop_details: None,
                 ..msg.clone()
             };
             let events = vec![
@@ -1216,6 +1220,7 @@ fn max_tool_iterations_exceeded_returns_clean_stop() {
         let msg = make_tool_call_message(vec![tool_call.clone()], 20);
         let partial = AssistantMessage {
             content: Vec::new(),
+            stop_details: None,
             ..msg.clone()
         };
 
@@ -1909,6 +1914,7 @@ fn partial_write_tool_failure_recovers_without_state_corruption() {
         );
         let first_partial = AssistantMessage {
             content: Vec::new(),
+            stop_details: None,
             ..first_turn.clone()
         };
         let second_turn = make_assistant(

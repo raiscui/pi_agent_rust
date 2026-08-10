@@ -514,6 +514,14 @@ pub const MAX_TOOL_ITERATIONS_DEFAULT: usize = 50;
 /// spec implementations).
 pub const MAX_TOOL_ITERATIONS_CEILING: usize = 1_000;
 
+/// Maximum automatic continuations after an Anthropic `pause_turn` stop.
+///
+/// Anthropic documents `pause_turn` as a successful, resumable response from
+/// long-running server tools. Retrying indefinitely would let a broken remote
+/// tool turn one user request into an unbounded loop, so keep the provider's
+/// recommended retry budget explicit and small.
+pub const MAX_PAUSE_TURN_CONTINUATIONS: usize = 3;
+
 /// Threshold (as a fraction of `max_tool_iterations`) at which the runtime
 /// emits a one-shot soft-handoff steering message so the agent can begin a
 /// graceful incomplete-handoff rather than being silently killed at the cap.
@@ -1786,6 +1794,7 @@ impl Agent {
             model: self.provider.model_id().to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Aborted,
+            stop_details: None,
             error_message: Some("Aborted".to_string()),
             timestamp: Utc::now().timestamp_millis(),
         });
@@ -1808,6 +1817,7 @@ impl Agent {
             model: self.provider.model_id().to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Error,
+            stop_details: None,
             error_message: Some(error_message.clone()),
             timestamp: Utc::now().timestamp_millis(),
         });
@@ -1834,6 +1844,7 @@ impl Agent {
             .unwrap_or("")
             .into();
         let mut iterations = 0usize;
+        let mut pause_turn_continuations = 0usize;
         let mut warned_at_handoff_threshold = false;
         let mut turn_index: usize = 0;
         let mut new_messages: Vec<Message> = Vec::with_capacity(prompts.len() + 8);
@@ -2030,10 +2041,31 @@ impl Agent {
                 }
 
                 let tool_calls = extract_tool_calls(&assistant_arc.content);
-                has_more_tool_calls = !tool_calls.is_empty();
+                let pause_turn = assistant_arc.stop_reason == StopReason::PauseTurn;
+                // A paused Anthropic server-tool turn must be resubmitted
+                // verbatim. Its content can contain tool-use blocks, but those
+                // are not a request to execute our local tool registry.
+                let execute_local_tools = !pause_turn && !tool_calls.is_empty();
+                has_more_tool_calls = execute_local_tools;
+                if pause_turn {
+                    pause_turn_continuations = pause_turn_continuations.saturating_add(1);
+                    if pause_turn_continuations <= MAX_PAUSE_TURN_CONTINUATIONS {
+                        // The completed assistant message is already in history. The
+                        // next stream request therefore resubmits it verbatim with
+                        // the same model, tools, and stream options, as Anthropic
+                        // requires. No synthetic user message is introduced.
+                        has_more_tool_calls = true;
+                    } else {
+                        tracing::warn!(
+                            pause_turn_continuations,
+                            max = MAX_PAUSE_TURN_CONTINUATIONS,
+                            "pause_turn continuation limit reached"
+                        );
+                    }
+                }
 
                 let mut tool_results: Vec<Arc<ToolResultMessage>> = Vec::new();
-                if has_more_tool_calls {
+                if execute_local_tools {
                     iterations += 1;
                     // Soft handoff: at >=80% of the cap, push a one-shot
                     // steering message so the agent has room to write an
@@ -2362,6 +2394,10 @@ impl Agent {
         // uniformly for every provider.
         let mut tool_call_raw_args: std::collections::HashMap<usize, String> =
             std::collections::HashMap::new();
+        // #148: whether this streaming response ever began assembling a tool
+        // call. Needed to tell "cut off mid tool call" apart from "cut off in
+        // the middle of plain prose", which is an ordinary `Length` stop.
+        let mut tool_call_started = false;
 
         'stream: loop {
             if checkpoint_cx.checkpoint().is_err() {
@@ -2800,6 +2836,7 @@ impl Agent {
                     id,
                     name,
                 } => {
+                    tool_call_started = true;
                     self.seed_partial_message_if_missing(&mut added_partial);
                     if let Some(Message::Assistant(msg_arc)) = self
                         .messages
@@ -2849,6 +2886,7 @@ impl Agent {
                     delta,
                     ..
                 } => {
+                    tool_call_started = true;
                     self.seed_partial_message_if_missing(&mut added_partial);
                     if let Some(Message::Assistant(msg_arc)) = self
                         .messages
@@ -2884,12 +2922,10 @@ impl Agent {
                             raw.push_str(&delta);
                             if let Some(partial_args) =
                                 crate::providers::openai::complete_partial_json(raw)
-                            {
-                                if let Some(ContentBlock::ToolCall(tc)) =
+                                && let Some(ContentBlock::ToolCall(tc)) =
                                     msg.content.get_mut(content_index)
-                                {
-                                    tc.arguments = partial_args;
-                                }
+                            {
+                                tc.arguments = partial_args;
                             }
                         }
                         let shared = Arc::clone(msg_arc);
@@ -2914,6 +2950,7 @@ impl Agent {
                     tool_call,
                     ..
                 } => {
+                    tool_call_started = true;
                     self.seed_partial_message_if_missing(&mut added_partial);
                     if let Some(Message::Assistant(msg_arc)) = self
                         .messages
@@ -2956,7 +2993,18 @@ impl Agent {
                         });
                     }
                 }
-                StreamEvent::Done { message, .. } => {
+                StreamEvent::Done { mut message, .. } => {
+                    // #148: a turn cut short by the provider's token limit while a
+                    // tool call was still being assembled must not finalize as an
+                    // ordinary stop. The half-built call is unusable, so the run
+                    // loop would see no executable tool call and quietly end the
+                    // turn. Re-stamping it as `Error` routes it through the
+                    // existing error handling, which surfaces `error_message` to
+                    // the caller via `AgentEnd`.
+                    if is_truncated_before_tool_call(&message, tool_call_started) {
+                        message.stop_reason = StopReason::Error;
+                        message.error_message = Some(TRUNCATED_TOOL_CALL_ERROR.to_string());
+                    }
                     return Ok(self.finalize_assistant_message(message, &on_event, added_partial));
                 }
                 StreamEvent::Error { error, .. } => {
@@ -2968,18 +3016,27 @@ impl Agent {
         // If the stream ends without a Done/Error event, we may have a partial message.
         // Instead of discarding it, we finalize it with an error state so the user/session
         // retains the partial content.
-        if added_partial {
-            if let Some(Message::Assistant(last_msg)) = self
+        if added_partial
+            && let Some(Message::Assistant(last_msg)) = self
                 .messages
                 .iter()
                 .rev()
                 .find(|m| matches!(m, Message::Assistant(_)))
-            {
-                let mut final_msg = (**last_msg).clone();
-                final_msg.stop_reason = StopReason::Error;
-                final_msg.error_message = Some("Stream ended without Done event".to_string());
-                return Ok(self.finalize_assistant_message(final_msg, &on_event, true));
-            }
+        {
+            let mut final_msg = (**last_msg).clone();
+            // #148: same truncation check as the `Done` arm. A provider can
+            // stamp `Length` on a partial (via `Start`/deltas) and then drop
+            // the connection without a terminal event; the resulting error
+            // should name the truncated tool call rather than the generic
+            // missing-`Done` condition.
+            let truncated_tool_call = is_truncated_before_tool_call(&final_msg, tool_call_started);
+            final_msg.stop_reason = StopReason::Error;
+            final_msg.error_message = Some(if truncated_tool_call {
+                TRUNCATED_TOOL_CALL_ERROR.to_string()
+            } else {
+                "Stream ended without Done event".to_string()
+            });
+            return Ok(self.finalize_assistant_message(final_msg, &on_event, true));
         }
         Err(Error::api("Stream ended without Done event"))
     }
@@ -3000,6 +3057,7 @@ impl Agent {
             model: self.provider.model_id().to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: Utc::now().timestamp_millis(),
         };
@@ -4206,6 +4264,7 @@ fn push_pi_ai_assistant_message(text: &str, messages: &mut Vec<Message>) {
     messages.push(Message::assistant(AssistantMessage {
         content: vec![ContentBlock::Text(TextContent::new(text.to_string()))],
         timestamp: Utc::now().timestamp_millis(),
+        stop_details: None,
         ..AssistantMessage::default()
     }));
 }
@@ -4987,6 +5046,7 @@ mod extensions_integration_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             };
@@ -4999,6 +5059,7 @@ mod extensions_integration_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             };
@@ -5075,6 +5136,7 @@ mod extensions_integration_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             }
@@ -5587,6 +5649,7 @@ mod extensions_integration_tests {
                 model: "capture-model".to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             };
@@ -7042,6 +7105,7 @@ mod abort_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             };
@@ -7106,6 +7170,7 @@ mod abort_tests {
                 model: "test-model".to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             }
@@ -7196,6 +7261,7 @@ mod abort_tests {
                 model: "test-model".to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             };
@@ -7725,6 +7791,7 @@ mod turn_event_tests {
             model: "test-model".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         }
@@ -7764,6 +7831,70 @@ mod turn_event_tests {
                 }),
             ];
             Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    struct PauseThenStopProvider {
+        calls: AtomicUsize,
+        pause_turns: usize,
+        pause_has_tool_call: bool,
+        contexts: std::sync::Mutex<Vec<Vec<Message>>>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for PauseThenStopProvider {
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            self.contexts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(context.messages.to_vec());
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let partial = assistant_message("");
+            let mut done = if call < self.pause_turns {
+                assistant_message("server tool is still working")
+            } else {
+                assistant_message("completed after pause")
+            };
+            done.stop_reason = if call < self.pause_turns {
+                StopReason::PauseTurn
+            } else {
+                StopReason::Stop
+            };
+            if call < self.pause_turns && self.pause_has_tool_call {
+                done.content = vec![ContentBlock::ToolCall(ToolCall {
+                    id: "server-tool-1".to_string(),
+                    name: "server_tool".to_string(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                })];
+            }
+
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(StreamEvent::Start { partial }),
+                Ok(StreamEvent::Done {
+                    reason: done.stop_reason,
+                    message: done,
+                }),
+            ])))
         }
     }
 
@@ -7855,6 +7986,7 @@ mod turn_event_tests {
                 model: self.model_id().to_string(),
                 usage: Usage::default(),
                 stop_reason,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             }
@@ -7910,6 +8042,113 @@ mod turn_event_tests {
                 }),
             ])))
         }
+    }
+
+    #[test]
+    fn pause_turn_resubmits_the_assistant_response_without_a_synthetic_user_message() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let provider = Arc::new(PauseThenStopProvider {
+            calls: AtomicUsize::new(0),
+            pause_turns: 1,
+            pause_has_tool_call: false,
+            contexts: std::sync::Mutex::new(Vec::new()),
+        });
+        let provider_for_assertions = Arc::clone(&provider);
+        let tools = ToolRegistry::new(&[], Path::new("."), None);
+        let mut agent = Agent::new(provider, tools, AgentConfig::default());
+
+        runtime.block_on(async move {
+            let result = agent
+                .run("search for current news", |_| {})
+                .await
+                .expect("pause continuation succeeds");
+            assert_eq!(result.stop_reason, StopReason::Stop);
+            assert!(matches!(
+                result.content.as_slice(),
+                [ContentBlock::Text(text)] if text.text == "completed after pause"
+            ));
+        });
+
+        assert_eq!(provider_for_assertions.calls.load(Ordering::SeqCst), 2);
+        let contexts = provider_for_assertions
+            .contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(contexts.len(), 2);
+        assert!(matches!(contexts[0].as_slice(), [Message::User(_)]));
+        assert!(matches!(
+            contexts[1].as_slice(),
+            [Message::User(_), Message::Assistant(message)]
+                if message.stop_reason == StopReason::PauseTurn
+                    && matches!(message.content.as_slice(), [ContentBlock::Text(text)] if text.text == "server tool is still working")
+        ));
+    }
+
+    #[test]
+    fn pause_turn_never_executes_its_tool_call_as_a_local_tool() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let provider = Arc::new(PauseThenStopProvider {
+            calls: AtomicUsize::new(0),
+            pause_turns: 1,
+            pause_has_tool_call: true,
+            contexts: std::sync::Mutex::new(Vec::new()),
+        });
+        let provider_for_assertions = Arc::clone(&provider);
+        let tools = ToolRegistry::new(&[], Path::new("."), None);
+        let mut agent = Agent::new(provider, tools, AgentConfig::default());
+
+        runtime.block_on(async move {
+            let result = agent
+                .run("wait for the server tool", |_| {})
+                .await
+                .expect("pause continuation succeeds without local tool execution");
+            assert_eq!(result.stop_reason, StopReason::Stop);
+        });
+
+        let contexts = provider_for_assertions
+            .contexts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(matches!(
+            contexts[1].as_slice(),
+            [Message::User(_), Message::Assistant(message)]
+                if matches!(message.content.as_slice(), [ContentBlock::ToolCall(call)] if call.name == "server_tool")
+        ));
+    }
+
+    #[test]
+    fn pause_turn_continuation_budget_stops_an_unbounded_server_tool_loop() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let provider = Arc::new(PauseThenStopProvider {
+            calls: AtomicUsize::new(0),
+            pause_turns: MAX_PAUSE_TURN_CONTINUATIONS + 1,
+            pause_has_tool_call: false,
+            contexts: std::sync::Mutex::new(Vec::new()),
+        });
+        let provider_for_assertions = Arc::clone(&provider);
+        let tools = ToolRegistry::new(&[], Path::new("."), None);
+        let mut agent = Agent::new(provider, tools, AgentConfig::default());
+
+        runtime.block_on(async move {
+            let result = agent
+                .run("run the server tool", |_| {})
+                .await
+                .expect("bounded pause continuation succeeds");
+            assert_eq!(result.stop_reason, StopReason::PauseTurn);
+        });
+
+        assert_eq!(
+            provider_for_assertions.calls.load(Ordering::SeqCst),
+            MAX_PAUSE_TURN_CONTINUATIONS + 1
+        );
     }
 
     #[test]
@@ -10671,18 +10910,28 @@ fn push_semantic_context_exclusions(
         "Suppressed or excluded context:",
         stats,
     );
-    if bundle.stale_evidence_suppressions.is_empty() && bundle.excluded_items.is_empty() {
+    let mut seen = std::collections::BTreeSet::new();
+    let unique_exclusions = bundle
+        .stale_evidence_suppressions
+        .iter()
+        .chain(bundle.excluded_items.iter())
+        .filter(|item| {
+            seen.insert((
+                item.node_type,
+                item.source_path.as_str(),
+                item.title.as_str(),
+                item.reason.as_str(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    if unique_exclusions.is_empty() {
         push_semantic_context_line(prompt, budget.max_bytes, "- (none)", stats);
         return;
     }
 
-    for (index, item) in bundle
-        .stale_evidence_suppressions
-        .iter()
-        .chain(bundle.excluded_items.iter())
-        .take(8)
-        .enumerate()
-    {
+    let mut included = 0_usize;
+    for item in unique_exclusions.iter().take(8) {
         let line = format!(
             "- {:?} {} :: {} reason={}",
             item.node_type,
@@ -10691,16 +10940,15 @@ fn push_semantic_context_exclusions(
             safe_context_field(&item.reason)
         );
         if push_semantic_context_line(prompt, budget.max_bytes, &line, stats) {
-            stats.exclusions_included = stats.exclusions_included.saturating_add(1);
+            included = included.saturating_add(1);
         } else {
-            stats.exclusions_omitted = bundle
-                .stale_evidence_suppressions
-                .len()
-                .saturating_add(bundle.excluded_items.len())
-                .saturating_sub(index);
             break;
         }
     }
+    stats.exclusions_included = stats.exclusions_included.saturating_add(included);
+    stats.exclusions_omitted = stats
+        .exclusions_omitted
+        .saturating_add(unique_exclusions.len().saturating_sub(included));
 }
 
 fn push_semantic_context_item(
@@ -10903,6 +11151,54 @@ fn filter_image_blocks(blocks: &mut Vec<ContentBlock>) -> usize {
 
     *blocks = filtered;
     removed
+}
+
+/// Error text stamped on an assistant message whose stream was cut off by the
+/// provider's token limit while a tool call was still being assembled (#148).
+const TRUNCATED_TOOL_CALL_ERROR: &str = "Model output truncated before tool call completed (provider stop reason: length); \
+     the incomplete tool call was not executed";
+
+/// Whether a tool call survived streaming intact enough to execute.
+///
+/// Two ways a truncated call fails this: an empty `name` (the placeholder
+/// `stream_assistant_response` seeds when deltas arrive before the call is
+/// identified), or `arguments` left as JSON null. Providers set null exactly
+/// when the accumulated argument fragment does not parse — see
+/// `openai::finalize_tool_call_arguments` and
+/// `anthropic::handle_content_block_stop`, which both log a parse warning and
+/// fall back to `Value::Null`. A complete no-argument call carries `{}`, not
+/// null, so this does not misjudge argument-less tools.
+fn is_complete_tool_call(tool_call: &ToolCall) -> bool {
+    !tool_call.name.trim().is_empty() && !tool_call.arguments.is_null()
+}
+
+/// Whether `message` represents a response the provider truncated at its token
+/// limit before any tool call finished (#148).
+///
+/// `tool_call_started` says a `ToolCall{Start,Delta,End}` event arrived on this
+/// stream; without it, a `Length` stop in the middle of plain prose (no tool
+/// call involved) would be misreported as a failure. It also covers the case
+/// where truncation drops the half-built call from the final message entirely,
+/// leaving nothing in `content` to inspect.
+///
+/// Returns `false` when at least one usable tool call survived — that turn still
+/// has work the run loop can execute, so it keeps its provider stop reason.
+fn is_truncated_before_tool_call(message: &AssistantMessage, tool_call_started: bool) -> bool {
+    if message.stop_reason != StopReason::Length {
+        return false;
+    }
+
+    let mut saw_incomplete = false;
+    for block in &message.content {
+        if let ContentBlock::ToolCall(tool_call) = block {
+            if is_complete_tool_call(tool_call) {
+                return false;
+            }
+            saw_incomplete = true;
+        }
+    }
+
+    tool_call_started || saw_incomplete
 }
 
 /// Extract tool calls from content blocks.
@@ -11407,6 +11703,7 @@ mod tests {
             model: "test-model".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         }
@@ -11627,6 +11924,48 @@ mod tests {
     }
 
     #[test]
+    fn semantic_context_exclusion_prompt_deduplicates_before_row_cap() {
+        let mut bundle = sample_semantic_context_bundle();
+        let duplicate = bundle.excluded_items[0].clone();
+        bundle.stale_evidence_suppressions.push(duplicate);
+
+        for index in 0..8 {
+            let mut exclusion = bundle.excluded_items[0].clone();
+            exclusion.node_id = format!("excluded-{index}");
+            exclusion.source_path = format!("docs/evidence/excluded-{index}.json");
+            exclusion.title = format!("excluded evidence {index}");
+            bundle.excluded_items.push(exclusion);
+        }
+
+        let mut prompt = String::new();
+        let mut stats = SemanticContextPromptStats::default();
+        push_semantic_context_exclusions(
+            &mut prompt,
+            &mut stats,
+            SemanticContextPromptBudget {
+                max_items: 16,
+                max_bytes: 64 * 1024,
+            },
+            &bundle,
+        );
+
+        assert_eq!(
+            prompt
+                .matches(
+                    "README.md :: obsolete drop-in claim reason=suppressed_stale_or_unsafe_evidence",
+                )
+                .count(),
+            1,
+            "the same exclusion from both bundle collections must render once"
+        );
+        assert_eq!(stats.exclusions_included, 8);
+        assert_eq!(
+            stats.exclusions_omitted, 1,
+            "the row cap must count omitted unique exclusions, not raw duplicate records"
+        );
+    }
+
+    #[test]
     fn delta_without_start_does_not_mutate_previous_message() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -11664,6 +12003,242 @@ mod tests {
             assert_eq!(
                 assistant_texts.as_slice(),
                 ["prev".to_string(), "hello".to_string()]
+            );
+        });
+    }
+
+    /// #148: first turn is cut off by the token cap while a tool call is still
+    /// streaming, exactly as OpenAI (`finish_reason: "length"`) and Anthropic
+    /// (`stop_reason: "max_tokens"`) report it — the tool call keeps its name
+    /// but its argument fragment fails to parse, so the provider stores
+    /// `arguments: null`. A second turn is scripted so the pre-fix behaviour
+    /// (continue as if nothing went wrong) is observable rather than hanging.
+    #[derive(Debug)]
+    struct TruncatedToolCallProvider {
+        stream_calls: StdArc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl TruncatedToolCallProvider {
+        fn new() -> Self {
+            Self {
+                stream_calls: StdArc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        /// Shared handle to the stream-call counter, taken before the provider
+        /// is moved into the agent.
+        fn calls(&self) -> StdArc<std::sync::atomic::AtomicUsize> {
+            StdArc::clone(&self.stream_calls)
+        }
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for TruncatedToolCallProvider {
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            let call_index = self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            if call_index > 0 {
+                let events = vec![Ok(StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    message: assistant_message("recovered"),
+                })];
+                return Ok(Box::pin(futures::stream::iter(events)));
+            }
+
+            let mut truncated = assistant_message("Let me read that file");
+            truncated.stop_reason = StopReason::Length;
+            truncated.content.push(ContentBlock::ToolCall(ToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                // `{"path": "/etc/ho` does not parse; both providers fall back
+                // to null after logging a parse warning.
+                arguments: Value::Null,
+                thought_signature: None,
+            }));
+
+            let events = vec![
+                Ok(StreamEvent::Start {
+                    partial: assistant_message(""),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "Let me read that file".to_string(),
+                }),
+                Ok(StreamEvent::ToolCallStart {
+                    content_index: 1,
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    content_index: 1,
+                    delta: "{\"path\": \"/etc/ho".to_string(),
+                }),
+                Ok(StreamEvent::Done {
+                    reason: StopReason::Length,
+                    message: truncated,
+                }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// #148 negative case: the same token cap, but the model was writing prose.
+    /// No tool call was ever started, so this is an ordinary `Length` stop and
+    /// must not be rewritten into an error.
+    #[derive(Debug)]
+    struct TruncatedTextProvider;
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for TruncatedTextProvider {
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> crate::error::Result<
+            Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
+        > {
+            let mut truncated = assistant_message("The answer is fourty-tw");
+            truncated.stop_reason = StopReason::Length;
+
+            let events = vec![
+                Ok(StreamEvent::Start {
+                    partial: assistant_message(""),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "The answer is fourty-tw".to_string(),
+                }),
+                Ok(StreamEvent::Done {
+                    reason: StopReason::Length,
+                    message: truncated,
+                }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[test]
+    fn truncated_tool_call_finalizes_as_error() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let provider = TruncatedToolCallProvider::new();
+            let stream_calls = provider.calls();
+            let tools = ToolRegistry::from_tools(Vec::new());
+            let mut agent = Agent::new(Arc::new(provider), tools, AgentConfig::default());
+
+            let result = agent
+                .run_with_message_with_abort(user_message("read /etc/hosts"), None, |_| {})
+                .await
+                .expect("run");
+
+            assert_eq!(
+                result.stop_reason,
+                StopReason::Error,
+                "truncated tool call must not finalize as a normal turn"
+            );
+            let error_message = result
+                .error_message
+                .as_deref()
+                .expect("truncated turn carries an error message");
+            assert!(
+                error_message.contains("truncated before tool call completed"),
+                "unexpected error message: {error_message}"
+            );
+
+            // The turn must stop here: continuing would either execute a tool
+            // call whose arguments were cut off, or silently drop it.
+            assert_eq!(
+                stream_calls.load(Ordering::SeqCst),
+                1,
+                "agent kept running past the truncated tool call"
+            );
+
+            // The partial text is retained so the caller can show what arrived.
+            let last = agent
+                .messages()
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::Assistant(assistant) => Some(Arc::clone(assistant)),
+                    _ => None,
+                })
+                .expect("assistant message in history");
+            assert_eq!(last.stop_reason, StopReason::Error);
+            assert!(
+                last.content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Text(text)
+                        if text.text == "Let me read that file")),
+                "partial text was dropped: {:?}",
+                last.content
+            );
+        });
+    }
+
+    #[test]
+    fn truncated_text_without_tool_call_stays_a_length_stop() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let provider = Arc::new(TruncatedTextProvider);
+            let tools = ToolRegistry::from_tools(Vec::new());
+            let mut agent = Agent::new(provider, tools, AgentConfig::default());
+
+            let result = agent
+                .run_with_message_with_abort(user_message("what is the answer"), None, |_| {})
+                .await
+                .expect("run");
+
+            assert_eq!(
+                result.stop_reason,
+                StopReason::Length,
+                "a plain length stop must not be rewritten into an error"
+            );
+            assert_eq!(result.error_message, None);
+            assert!(
+                result
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Text(text)
+                        if text.text == "The answer is fourty-tw")),
+                "partial text was dropped: {:?}",
+                result.content
             );
         });
     }
@@ -12153,6 +12728,7 @@ mod tests {
                 model: "test".to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             })),

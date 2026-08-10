@@ -7,7 +7,6 @@
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::models::ModelEntry;
 use crate::package_manager::{
     PackageManager, PackageScope, ResolveExtensionSourcesOptions, ResolvedResource, ResourceOrigin,
 };
@@ -101,9 +100,6 @@ const ALLOWED_SKILL_FRONTMATTER: [&str; 7] = [
 pub struct Skill {
     pub name: String,
     pub description: String,
-    /// 加载时已经通过 frontmatter 校验的完整 SKILL.md 内容。
-    /// profile 装配直接复用它,避免每次重建 system prompt 时重复读盘。
-    pub content: String,
     pub file_path: PathBuf,
     pub base_dir: PathBuf,
     pub source: String,
@@ -190,7 +186,7 @@ pub struct ResourceCliOptions {
 
 impl ResourceCliOptions {
     #[must_use]
-    pub fn has_explicit_paths(&self) -> bool {
+    pub const fn has_explicit_paths(&self) -> bool {
         !self.skill_paths.is_empty()
             || !self.prompt_paths.is_empty()
             || !self.extension_paths.is_empty()
@@ -216,18 +212,14 @@ pub struct PackageResources {
 
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionResourcePaths {
-    pub extension_paths: Vec<PathBuf>,
     pub skill_paths: Vec<PathBuf>,
     pub prompt_paths: Vec<PathBuf>,
     pub theme_paths: Vec<PathBuf>,
 }
 
 impl ExtensionResourcePaths {
-    pub fn is_empty(&self) -> bool {
-        self.extension_paths.is_empty()
-            && self.skill_paths.is_empty()
-            && self.prompt_paths.is_empty()
-            && self.theme_paths.is_empty()
+    pub const fn is_empty(&self) -> bool {
+        self.skill_paths.is_empty() && self.prompt_paths.is_empty() && self.theme_paths.is_empty()
     }
 }
 
@@ -465,12 +457,6 @@ impl ResourceLoader {
         let agent_dir = Config::global_dir();
         let cwd_buf = cwd.to_path_buf();
 
-        if !paths.extension_paths.is_empty() {
-            let mut merged = self.extensions.clone();
-            merged.extend(paths.extension_paths.iter().cloned());
-            self.extensions = dedupe_extension_entries_by_id(merged);
-        }
-
         if !paths.skill_paths.is_empty() {
             let skill_paths = dedupe_paths(paths.skill_paths.clone());
             if !skill_paths.is_empty() {
@@ -558,101 +544,6 @@ impl ResourceLoader {
         Ok(())
     }
 
-    /// 装配 model 启动时需要加载到 system prompt 的 skills。
-    ///
-    /// 同时支持两条路径, 向后兼容:
-    /// 1. 旧约定: `~/.pi/agent/skills/<model_id>/SKILL.md` (隐式目录约定)
-    ///    历史原因: 用户在 2026-06-18 已经用这条路径放 gemma-4-e2b 的 SKILL.md symlink。
-    ///    保留它是为了不破坏当前 work 的隐式绑定。
-    /// 2. 新约定: `ToolUseProfile.skills: ["rdog-control"]` 解析后, 加载
-    ///    `~/.pi/agent/skills/<skill_name>/SKILL.md` (用 skill 名字, 不是 model id)
-    ///    这条路径在 `models.json` 的 `toolUseProfiles` 块里显式声明,
-    ///    不依赖 model id 路径约定。
-    ///
-    /// `ModelEntry` 上不增加 `preload_skill` 字段, 因为 `src/models.rs:251` 注释
-    /// 明确禁止给 `ModelEntry` 再增加并列真相源。 skill 绑定统一在 `ToolUseProfile`
-    /// 体系下管理。
-    pub fn extend_with_model_skills(&mut self, cwd: &Path, model_entry: &ModelEntry) -> Result<()> {
-        let agent_dir = Config::global_dir();
-        self.extend_with_model_skills_from_agent_dir(cwd, model_entry, &agent_dir)
-    }
-
-    /// 根据模型的 ToolUseProfile 追加专用 extension。
-    ///
-    /// profile 只保存稳定的 extension 名称,具体入口仍由 agent 资源目录解析,
-    /// 这样模型配置不会把运行时实现塞进 Agent 核心。
-    pub fn extend_with_model_extensions(
-        &mut self,
-        cwd: &Path,
-        model_entry: &ModelEntry,
-    ) -> Result<()> {
-        let agent_dir = Config::global_dir();
-        self.extend_with_model_extensions_from_agent_dir(cwd, model_entry, &agent_dir)
-    }
-
-    fn extend_with_model_extensions_from_agent_dir(
-        &mut self,
-        cwd: &Path,
-        model_entry: &ModelEntry,
-        agent_dir: &Path,
-    ) -> Result<()> {
-        let Some(profile_extensions) = model_entry
-            .tool_use_profile
-            .as_ref()
-            .and_then(|profile| profile.extensions.as_ref())
-        else {
-            return Ok(());
-        };
-
-        let mut paths = ExtensionResourcePaths::default();
-        for name in profile_extensions {
-            if let Some(path) = resolve_model_extension_path(cwd, agent_dir, name) {
-                paths.extension_paths.push(path);
-            }
-        }
-        if paths.extension_paths.is_empty() {
-            return Ok(());
-        }
-        self.extend_with_paths(cwd, &paths)
-    }
-
-    fn extend_with_model_skills_from_agent_dir(
-        &mut self,
-        cwd: &Path,
-        model_entry: &ModelEntry,
-        agent_dir: &Path,
-    ) -> Result<()> {
-        let mut paths = ExtensionResourcePaths::default();
-
-        // 旧机制: model_id 路径 (向后兼容, 不破坏)
-        let model_id = &model_entry.model.id;
-        if !model_id.is_empty() {
-            let model_skill_dir = agent_dir.join("skills").join(model_id);
-            if model_skill_dir.exists() {
-                paths.skill_paths.push(model_skill_dir);
-            }
-        }
-
-        // 新机制: toolUseProfile.skills 路径 (用户表达 "model → profile → skill" 绑定)
-        if let Some(profile) = model_entry.tool_use_profile.as_ref() {
-            if let Some(skills) = profile.skills.as_ref() {
-                for skill_name in skills {
-                    // skill_name 已经是验证过的字符串, 不做 normalization,
-                    // 缺哪个就是用户配置错误, 静默跳过 (跟 model_id 路径一样 fail-soft)。
-                    let skill_dir = agent_dir.join("skills").join(skill_name);
-                    if skill_dir.exists() {
-                        paths.skill_paths.push(skill_dir);
-                    }
-                }
-            }
-        }
-
-        if paths.skill_paths.is_empty() {
-            return Ok(());
-        }
-        self.extend_with_paths(cwd, &paths)
-    }
-
     pub fn extensions(&self) -> &[PathBuf] {
         &self.extensions
     }
@@ -718,19 +609,6 @@ impl ResourceLoader {
         format_skills_for_prompt(&self.skills)
     }
 
-    /// 为当前模型装配 skill prompt。
-    ///
-    /// 普通发现的 skill 仍然只展示 metadata,由模型按需读取。
-    /// model id 隐式绑定和 profile 显式绑定的 skill 则直接内联正文,
-    /// 兑现模型配置在启动期加载 SKILL.md 的合同。
-    pub fn format_skills_for_model_prompt(
-        &self,
-        model_entry: &ModelEntry,
-        include_available_skills: bool,
-    ) -> String {
-        format_skills_for_model_prompt(&self.skills, model_entry, include_available_skills)
-    }
-
     pub fn list_commands(&self) -> Vec<Value> {
         let mut commands = Vec::new();
 
@@ -778,11 +656,11 @@ pub async fn discover_package_resources(manager: &PackageManager) -> Result<Pack
         let Some(root) = manager.installed_path(&entry.source, entry.scope).await? else {
             continue;
         };
-        if !root.exists() {
-            if let Err(err) = manager.install(&entry.source, entry.scope).await {
-                warn!("Failed to install {}: {err}", entry.source);
-                continue;
-            }
+        if !root.exists()
+            && let Err(err) = manager.install(&entry.source, entry.scope).await
+        {
+            warn!("Failed to install {}: {err}", entry.source);
+            continue;
         }
 
         if !root.exists() {
@@ -1324,7 +1202,6 @@ fn load_skill_from_file(path: &Path, source: String) -> LoadSkillFileResult {
         skill: Some(Skill {
             name,
             description,
-            content: raw,
             file_path: path.to_path_buf(),
             base_dir,
             source,
@@ -1399,69 +1276,10 @@ where
 }
 
 pub fn format_skills_for_prompt(skills: &[Skill]) -> String {
-    format_available_skills_for_prompt(
-        skills
-            .iter()
-            .filter(|skill| !skill.disable_model_invocation),
-    )
-}
-
-fn format_skills_for_model_prompt(
-    skills: &[Skill],
-    model_entry: &ModelEntry,
-    include_available_skills: bool,
-) -> String {
-    let mut bound_names = Vec::new();
-
-    // 保留历史 model-id 目录绑定,同时让 ToolUseProfile.skills 成为
-    // 新配置的唯一显式真相源。顺序稳定,便于 prompt cache 复用。
-    if !model_entry.model.id.is_empty() {
-        bound_names.push(model_entry.model.id.as_str());
-    }
-    if let Some(profile_skills) = model_entry
-        .tool_use_profile
-        .as_ref()
-        .and_then(|profile| profile.skills.as_ref())
-    {
-        for name in profile_skills {
-            if !bound_names.contains(&name.as_str()) {
-                bound_names.push(name);
-            }
-        }
-    }
-
-    let bound_skills: Vec<&Skill> = bound_names
+    let visible: Vec<&Skill> = skills
         .iter()
-        .filter_map(|name| {
-            skills
-                .iter()
-                .find(|skill| skill.name == **name && !skill.disable_model_invocation)
-        })
+        .filter(|s| !s.disable_model_invocation)
         .collect();
-    let bound_name_set: HashSet<&str> = bound_skills
-        .iter()
-        .map(|skill| skill.name.as_str())
-        .collect();
-
-    let mut sections = Vec::new();
-    if include_available_skills {
-        let available = format_available_skills_for_prompt(skills.iter().filter(|skill| {
-            !skill.disable_model_invocation && !bound_name_set.contains(skill.name.as_str())
-        }));
-        if !available.is_empty() {
-            sections.push(available);
-        }
-    }
-
-    let loaded = format_loaded_profile_skills_for_prompt(&bound_skills);
-    if !loaded.is_empty() {
-        sections.push(loaded);
-    }
-    sections.join("\n")
-}
-
-fn format_available_skills_for_prompt<'a>(skills: impl IntoIterator<Item = &'a Skill>) -> String {
-    let visible: Vec<&Skill> = skills.into_iter().collect();
     if visible.is_empty() {
         return String::new();
     }
@@ -1490,29 +1308,6 @@ fn format_available_skills_for_prompt<'a>(skills: impl IntoIterator<Item = &'a S
     }
 
     lines.push("</available_skills>".to_string());
-    lines.join("\n")
-}
-
-fn format_loaded_profile_skills_for_prompt(skills: &[&Skill]) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-
-    let mut lines = vec![
-        "\n\nThe active tool-use profile has loaded these skills. Follow them directly."
-            .to_string(),
-        "<loaded_profile_skills>".to_string(),
-    ];
-    for skill in skills {
-        lines.push(format!(
-            "  <skill name=\"{}\" location=\"{}\">",
-            escape_xml(&skill.name),
-            escape_xml(&skill.file_path.display().to_string())
-        ));
-        lines.push(skill.content.trim().to_string());
-        lines.push("  </skill>".to_string());
-    }
-    lines.push("</loaded_profile_skills>".to_string());
     lines.join("\n")
 }
 
@@ -1585,10 +1380,11 @@ fn load_templates_from_dir(dir: &Path, source: &str, label: &str) -> Vec<PromptT
     for full_path in read_dir_sorted_paths(dir) {
         let (_, is_file) = resolved_path_kind(&full_path);
 
-        if is_file && full_path.extension().is_some_and(|ext| ext == "md") {
-            if let Some(template) = load_template_from_file(&full_path, source, label) {
-                templates.push(template);
-            }
+        if is_file
+            && full_path.extension().is_some_and(|ext| ext == "md")
+            && let Some(template) = load_template_from_file(&full_path, source, label)
+        {
+            templates.push(template);
         }
     }
 
@@ -1604,17 +1400,17 @@ fn load_template_from_file(path: &Path, source: &str, label: &str) -> Option<Pro
         .cloned()
         .unwrap_or_default();
 
-    if description.is_empty() {
-        if let Some(first_line) = parsed.body.lines().find(|line| !line.trim().is_empty()) {
-            let trimmed = first_line.trim();
-            let truncated = if trimmed.chars().count() > 60 {
-                let s: String = trimmed.chars().take(57).collect();
-                format!("{s}...")
-            } else {
-                trimmed.to_string()
-            };
-            description = truncated;
-        }
+    if description.is_empty()
+        && let Some(first_line) = parsed.body.lines().find(|line| !line.trim().is_empty())
+    {
+        let trimmed = first_line.trim();
+        let truncated = if trimmed.chars().count() > 60 {
+            let s: String = trimmed.chars().take(57).collect();
+            format!("{s}...")
+        } else {
+            trimmed.to_string()
+        };
+        description = truncated;
     }
 
     if description.is_empty() {
@@ -1719,10 +1515,11 @@ fn load_themes_from_dir(
     for full_path in read_dir_sorted_paths(dir) {
         let (_, is_file) = resolved_path_kind(&full_path);
 
-        if is_file && is_theme_file(&full_path) {
-            if let Some(theme) = load_theme_from_file(&full_path, source, label, diagnostics) {
-                themes.push(theme);
-            }
+        if is_file
+            && is_theme_file(&full_path)
+            && let Some(theme) = load_theme_from_file(&full_path, source, label, diagnostics)
+        {
+            themes.push(theme);
         }
     }
 
@@ -2221,40 +2018,6 @@ fn extension_id_from_path(path: &Path) -> Option<String> {
     }
 }
 
-/// Resolve a profile extension name without making the profile know the loader internals.
-fn resolve_model_extension_path(cwd: &Path, agent_dir: &Path, name: &str) -> Option<PathBuf> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let raw = Path::new(trimmed);
-    let mut candidates = Vec::new();
-    if raw.is_absolute() {
-        candidates.push(raw.to_path_buf());
-    } else {
-        candidates.push(cwd.join(raw));
-        candidates.push(agent_dir.join("extensions").join(raw));
-    }
-
-    // A profile may use either an exact entry path or a short extension id.
-    // Keep the candidate list deterministic and prefer source files over indexes.
-    let mut expanded = Vec::new();
-    for candidate in candidates {
-        expanded.push(candidate.clone());
-        if candidate.extension().is_none() {
-            for extension in ["ts", "js", "mjs", "native.json"] {
-                expanded.push(candidate.with_extension(extension));
-            }
-            for index in ["index.ts", "index.js", "index.mjs", "index.native.json"] {
-                expanded.push(candidate.join(index));
-            }
-        }
-    }
-
-    expanded.into_iter().find(|path| path.is_file())
-}
-
 fn extension_dedupe_key_from_path(path: &Path) -> Option<String> {
     extension_id_from_path(path).map(|id| id.to_ascii_lowercase())
 }
@@ -2282,11 +2045,11 @@ fn dedupe_extension_entries_by_id_with_cache_dir(
         let cache = is_cache_module_path_with_cache_dir(path, cache_dir);
         is_cache.push(cache);
 
-        if let Some(id) = extension_dedupe_key_from_path(path) {
-            if !cache {
-                // Source entry wins; record its index.
-                id_to_source_idx.entry(id).or_insert(idx);
-            }
+        if let Some(id) = extension_dedupe_key_from_path(path)
+            && !cache
+        {
+            // Source entry wins; record its index.
+            id_to_source_idx.entry(id).or_insert(idx);
         }
     }
 
@@ -2294,13 +2057,12 @@ fn dedupe_extension_entries_by_id_with_cache_dir(
     // has a source entry.
     let mut out = Vec::with_capacity(entries.len());
     for (idx, path) in entries.into_iter().enumerate() {
-        if is_cache[idx] {
-            if let Some(id) = extension_dedupe_key_from_path(&path) {
-                if id_to_source_idx.contains_key(&id) {
-                    // Skip cache entry — source entry is preferred.
-                    continue;
-                }
-            }
+        if is_cache[idx]
+            && let Some(id) = extension_dedupe_key_from_path(&path)
+            && id_to_source_idx.contains_key(&id)
+        {
+            // Skip cache entry — source entry is preferred.
+            continue;
         }
         out.push(path);
     }
@@ -2571,7 +2333,6 @@ mod tests {
         let skill = Skill {
             name: "review".to_string(),
             description: "Review code".to_string(),
-            content: "Skill body.".to_string(),
             file_path: skill_file,
             base_dir: skill_dir,
             source: "user".to_string(),
@@ -2596,7 +2357,6 @@ mod tests {
             Skill {
                 name: "a".to_string(),
                 description: "desc".to_string(),
-                content: "A body marker".to_string(),
                 file_path: PathBuf::from("/tmp/a/SKILL.md"),
                 base_dir: PathBuf::from("/tmp/a"),
                 source: "user".to_string(),
@@ -2605,7 +2365,6 @@ mod tests {
             Skill {
                 name: "b".to_string(),
                 description: "desc".to_string(),
-                content: "B body marker".to_string(),
                 file_path: PathBuf::from("/tmp/b/SKILL.md"),
                 base_dir: PathBuf::from("/tmp/b"),
                 source: "user".to_string(),
@@ -2615,7 +2374,6 @@ mod tests {
         let prompt = format_skills_for_prompt(&skills);
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<name>a</name>"));
-        assert!(!prompt.contains("A body marker"));
         assert!(!prompt.contains("<name>b</name>"));
     }
 
@@ -3238,144 +2996,6 @@ still frontmatter",
             .collect();
         assert_eq!(names, vec!["a.md", "z.md"]);
     }
-    #[test]
-    fn test_end_to_end_profile_skills_loads_rdog_control_skill() {
-        // 端到端 smoke: 验证 extend_with_model_skills 真的能根据
-        // ToolUseProfile.skills 加载 <agent_dir>/skills/<name>/SKILL.md。
-        // 测试只读临时目录,避免依赖开发者本机 ~/.pi/agent/models.json。
-        use crate::auth::AuthStorage;
-        use crate::models::ModelRegistry;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let agent_dir = dir.path().join("agent");
-        let skill_dir = agent_dir.join("skills").join("rdog-control");
-        fs::create_dir_all(&skill_dir).expect("create skill dir");
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: rdog-control\ndescription: rustdog control bridge\n---\n\n# rdog-control\n\nPROFILE_BOUND_BODY_MARKER\n",
-        )
-        .expect("write skill");
-
-        // 普通发现到的 skill 只应提供路由元数据。若它的正文也被内联,
-        // profile 绑定一个 skill 仍会退化为把整个 skill 目录塞进 prompt。
-        let unrelated_dir = agent_dir.join("skills").join("unrelated");
-        fs::create_dir_all(&unrelated_dir).expect("create unrelated skill dir");
-        fs::write(
-            unrelated_dir.join("SKILL.md"),
-            "---\nname: unrelated\ndescription: unrelated helper\n---\n\nUNBOUND_BODY_MARKER\n",
-        )
-        .expect("write unrelated skill");
-        let extension_dir = agent_dir.join("extensions");
-        fs::create_dir_all(&extension_dir).expect("create extension dir");
-        let extension_path = extension_dir.join("model-adapter.mjs");
-        fs::write(&extension_path, "export default function init(_pi) {}\n")
-            .expect("write extension");
-
-        let models_path = dir.path().join("models.json");
-        fs::write(
-            &models_path,
-            serde_json::json!({
-                "toolUseProfiles": {
-                    "rdog-control-bash": {
-                        "tools": ["bash"],
-                        "skills": ["rdog-control"],
-                        "extensions": ["model-adapter"]
-                    }
-                },
-                "providers": {
-                    "local": {
-                        "baseUrl": "http://127.0.0.1:18081/v1",
-                        "api": "openai-completions",
-                        "apiKey": "local-no-key-needed",
-                        "authHeader": false,
-                        "models": [
-                            {
-                                "id": "local-rdog-model",
-                                "name": "Local RDOG Model",
-                                "toolUseProfile": "rdog-control-bash"
-                            }
-                        ]
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .expect("write models json");
-
-        let auth_path = dir.path().join("auth.json");
-        let auth = AuthStorage::load(auth_path).expect("load auth");
-        let registry = ModelRegistry::load(&auth, Some(models_path));
-        assert!(
-            registry.error().is_none(),
-            "registry error: {:?}",
-            registry.error()
-        );
-        let entry = registry
-            .find("local", "local-rdog-model")
-            .expect("local rdog model should be registered");
-        let profile = entry
-            .tool_use_profile
-            .as_ref()
-            .expect("tool_use_profile must be resolved");
-        assert_eq!(profile.name, "rdog-control-bash");
-        let skills = profile
-            .skills
-            .as_ref()
-            .expect("profile.skills must be Some(vec)");
-        assert_eq!(skills.as_slice(), &["rdog-control".to_string()][..]);
-        assert_eq!(
-            profile.extensions.as_deref(),
-            Some(["model-adapter".to_string()].as_slice())
-        );
-
-        // 走 extend_with_model_skills_from_agent_dir 全链路。
-        // 生产路径仍通过 extend_with_model_skills 读取 Config::global_dir(),
-        // 测试路径显式传入 agent_dir,避免环境变量串扰并保持并发测试安全。
-        let cwd = dir.path();
-        let mut loader = ResourceLoader::empty(false);
-        loader
-            .extend_with_paths(
-                cwd,
-                &ExtensionResourcePaths {
-                    skill_paths: vec![unrelated_dir],
-                    ..ExtensionResourcePaths::default()
-                },
-            )
-            .expect("load unrelated discovered skill");
-        loader
-            .extend_with_model_skills_from_agent_dir(cwd, &entry, &agent_dir)
-            .expect("extend_with_model_skills should succeed");
-        let names: Vec<&str> = loader.skills().iter().map(|s| s.name.as_str()).collect();
-        assert!(
-            names.contains(&"rdog-control"),
-            "rdog-control skill should be loaded, got: {:?}",
-            names
-        );
-        let rdog = loader
-            .skills()
-            .iter()
-            .find(|s| s.name == "rdog-control")
-            .unwrap();
-        assert!(rdog.description.contains("rustdog"));
-
-        // profile.skills 的公开合同是启动时注入正文,不应依赖弱模型
-        // 先从 metadata 自主决定是否调用 read。
-        let prompt = loader.format_skills_for_model_prompt(&entry, true);
-        assert!(prompt.contains("PROFILE_BOUND_BODY_MARKER"));
-        assert!(prompt.contains("<name>unrelated</name>"));
-        assert!(!prompt.contains("UNBOUND_BODY_MARKER"));
-
-        // profile skill 是启动期上下文,不依赖 read 工具是否暴露。
-        let prompt_without_read = loader.format_skills_for_model_prompt(&entry, false);
-        assert!(prompt_without_read.contains("PROFILE_BOUND_BODY_MARKER"));
-        assert!(!prompt_without_read.contains("<available_skills>"));
-        assert!(!prompt_without_read.contains("UNBOUND_BODY_MARKER"));
-
-        loader
-            .extend_with_model_extensions_from_agent_dir(cwd, &entry, &agent_dir)
-            .expect("extend_with_model_extensions should succeed");
-        assert_eq!(loader.extensions(), &[extension_path]);
-    }
 
     #[test]
     fn test_precedence_sorted_enabled_paths_orders_by_documented_resource_priority() {
@@ -3671,7 +3291,6 @@ still frontmatter",
         let skills = vec![Skill {
             name: "test-skill".to_string(),
             description: "A test".to_string(),
-            content: "Do the thing.".to_string(),
             file_path: skill_file,
             base_dir: tmp.path().to_path_buf(),
             source: "test".to_string(),

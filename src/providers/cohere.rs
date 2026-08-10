@@ -159,14 +159,14 @@ impl Provider for CohereProvider {
         }
 
         // Apply provider-specific custom headers from compat config.
-        if let Some(compat) = &self.compat {
-            if let Some(custom_headers) = &compat.custom_headers {
-                request = super::apply_headers_ignoring_blank_auth_overrides(
-                    request,
-                    custom_headers,
-                    &["authorization"],
-                );
-            }
+        if let Some(compat) = &self.compat
+            && let Some(custom_headers) = &compat.custom_headers
+        {
+            request = super::apply_headers_ignoring_blank_auth_overrides(
+                request,
+                custom_headers,
+                &["authorization"],
+            );
         }
 
         // Per-request headers from StreamOptions (highest priority).
@@ -330,6 +330,7 @@ where
                 model,
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: chrono::Utc::now().timestamp_millis(),
             },
@@ -1012,6 +1013,8 @@ mod tests {
             StopReason::Stop => "stop",
             StopReason::Length => "length",
             StopReason::ToolUse => "tool_use",
+            StopReason::PauseTurn => "pause_turn",
+            StopReason::Refusal => "refusal",
             StopReason::Error => "error",
             StopReason::Aborted => "aborted",
         }
@@ -1644,6 +1647,7 @@ mod tests {
                     model: "command-r".to_string(),
                     usage: Usage::default(),
                     stop_reason: StopReason::ToolUse,
+                    stop_details: None,
                     error_message: None,
                     timestamp: 1,
                 }),
@@ -1708,6 +1712,7 @@ mod tests {
                 model: "command-r".to_string(),
                 usage: Usage::default(),
                 stop_reason: StopReason::ToolUse,
+                stop_details: None,
                 error_message: None,
                 timestamp: 0,
             })],

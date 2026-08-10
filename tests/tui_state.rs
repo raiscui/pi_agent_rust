@@ -5125,6 +5125,7 @@ fn create_two_branch_session() -> (Session, String, String, String) {
                 cost: Cost::default(),
             },
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 1,
         },
@@ -5153,6 +5154,7 @@ fn create_two_branch_session() -> (Session, String, String, String) {
                 cost: Cost::default(),
             },
             stop_reason: StopReason::Stop,
+            stop_details: None,
             error_message: None,
             timestamp: 3,
         },
@@ -5194,6 +5196,7 @@ fn create_many_branch_session(branch_count: usize) -> Session {
                     cost: Cost::default(),
                 },
                 stop_reason: StopReason::Stop,
+                stop_details: None,
                 error_message: None,
                 timestamp: i_i64 + 1,
             },
@@ -8604,12 +8607,136 @@ fn assert_view_bounded(surface: &str, view: &str, terminal_height: usize) {
     );
 }
 
-fn write_large_session_perf_json_artifact(value: &serde_json::Value) {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/artifacts/perf");
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join("large_session_tui_frame_budget.json");
-    let content = serde_json::to_string_pretty(value).expect("serialize perf artifact");
-    fs::write(&path, format!("{content}\n")).expect("write perf json artifact");
+const TUI_PERF_ARTIFACT_GENERATION_ENV: &str = "PI_GENERATE_TUI_PERF_ARTIFACTS";
+
+fn tui_perf_artifact_generation_enabled() -> bool {
+    let Some(value) = std::env::var_os(TUI_PERF_ARTIFACT_GENERATION_ENV) else {
+        return false;
+    };
+    assert_eq!(
+        value,
+        std::ffi::OsStr::new("1"),
+        "{TUI_PERF_ARTIFACT_GENERATION_ENV} must be unset or exactly '1', got {}",
+        value.display()
+    );
+    true
+}
+
+fn write_verified_perf_artifact(path: &std::path::Path, payload: &str) {
+    let parent = path.parent().expect("perf artifact must have a parent");
+    fs::create_dir_all(parent).unwrap_or_else(|error| {
+        panic!(
+            "failed to create perf artifact directory {}: {error}",
+            parent.display()
+        )
+    });
+    let parent_metadata = fs::symlink_metadata(parent).unwrap_or_else(|error| {
+        panic!(
+            "failed to stat perf artifact directory {}: {error}",
+            parent.display()
+        )
+    });
+    assert!(
+        parent_metadata.file_type().is_dir(),
+        "perf artifact parent must be a real directory, not a symlink: {}",
+        parent.display()
+    );
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => assert!(
+            metadata.file_type().is_file(),
+            "existing perf artifact must be a regular file, not a symlink: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "failed to inspect existing perf artifact {}: {error}",
+            path.display()
+        ),
+    }
+
+    fs::write(path, payload).unwrap_or_else(|error| {
+        panic!("failed to write perf artifact {}: {error}", path.display())
+    });
+    let metadata = fs::symlink_metadata(path).unwrap_or_else(|error| {
+        panic!(
+            "failed to stat written perf artifact {}: {error}",
+            path.display()
+        )
+    });
+    assert!(
+        metadata.file_type().is_file(),
+        "written perf artifact must be a regular file: {}",
+        path.display()
+    );
+    assert_eq!(
+        metadata.len(),
+        u64::try_from(payload.len()).expect("perf artifact length must fit u64"),
+        "written perf artifact length mismatch: {}",
+        path.display()
+    );
+    let retained = fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read back written perf artifact {}: {error}",
+            path.display()
+        )
+    });
+    assert_eq!(
+        retained,
+        payload,
+        "written perf artifact bytes differ from the validated payload: {}",
+        path.display()
+    );
+}
+
+fn serialize_and_validate_perf_json(value: &serde_json::Value) -> String {
+    let content = serde_json::to_string_pretty(value)
+        .unwrap_or_else(|error| panic!("failed to serialize TUI perf JSON: {error}"));
+    let payload = format!("{content}\n");
+    let parsed: serde_json::Value = serde_json::from_str(&payload)
+        .unwrap_or_else(|error| panic!("generated TUI perf JSON must parse: {error}"));
+    assert_eq!(
+        parsed, *value,
+        "generated TUI perf JSON must round-trip without semantic changes"
+    );
+    payload
+}
+
+fn serialize_and_validate_perf_jsonl(entries: &[serde_json::Value]) -> String {
+    assert!(!entries.is_empty(), "TUI perf JSONL must contain records");
+    let lines = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let line = serde_json::to_string(entry).unwrap_or_else(|error| {
+                panic!(
+                    "failed to serialize TUI perf JSONL record {}: {error}",
+                    index + 1
+                )
+            });
+            let parsed: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|error| {
+                panic!(
+                    "generated TUI perf JSONL record {} must parse: {error}",
+                    index + 1
+                )
+            });
+            assert_eq!(
+                parsed,
+                *entry,
+                "generated TUI perf JSONL record {} must round-trip without semantic changes",
+                index + 1
+            );
+            line
+        })
+        .collect::<Vec<_>>();
+    format!("{}\n", lines.join("\n"))
+}
+
+fn write_runtime_large_session_perf_json_artifact(value: &serde_json::Value) {
+    let payload = serialize_and_validate_perf_json(value);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/artifacts/perf/large_session_tui_frame_budget.json");
+    write_verified_perf_artifact(&path, &payload);
 }
 
 #[test]
@@ -8882,7 +9009,7 @@ fn tui_perf_large_session_frame_budget_surfaces_emit_evidence() {
         );
     }
 
-    write_large_session_perf_json_artifact(&evidence);
+    write_runtime_large_session_perf_json_artifact(&evidence);
     log_perf_test_event(
         "tui_perf_large_session_frame_budget_surfaces_emit_evidence",
         "large_session_tui_frame_budget",
@@ -8979,7 +9106,7 @@ fn tui_perf_e2e_long_conversation_responsiveness() {
          got {content_p50_us}us"
     );
 
-    write_perf_artifact(
+    validate_or_write_perf_artifact(
         "long_conversation_responsiveness.jsonl",
         &[json!({
             "schema": "pi.test.perf_event.v1",
@@ -9218,7 +9345,7 @@ fn tui_frame_budget_snapshot_covers_large_session_surfaces() {
         "frame-budget telemetry must not include raw conversation or tool payload text"
     );
 
-    write_perf_artifact("large_session_tui_frame_budget.jsonl", &snapshots);
+    validate_or_write_perf_artifact("large_session_tui_frame_budget.jsonl", &snapshots);
     log_perf_test_event(
         "tui_frame_budget_snapshot_covers_large_session_surfaces",
         "surface_snapshots",
@@ -9318,7 +9445,7 @@ fn tui_perf_e2e_streaming_with_history() {
 
     let streaming_len: usize = (0..token_count).map(|i| format!("token-{i} ").len()).sum();
 
-    write_perf_artifact(
+    validate_or_write_perf_artifact(
         "streaming_with_history.jsonl",
         &[json!({
             "schema": "pi.test.perf_event.v1",
@@ -9455,7 +9582,7 @@ fn tui_perf_e2e_degradation_under_load() {
         "view should render after pressure recovery"
     );
 
-    write_perf_artifact(
+    validate_or_write_perf_artifact(
         "degradation_under_load.jsonl",
         &[json!({
             "schema": "pi.test.perf_event.v1",
@@ -9616,7 +9743,7 @@ fn tui_perf_e2e_memory_pressure_response() {
         "memory pressure actions should not modify the session file"
     );
 
-    write_perf_artifact(
+    validate_or_write_perf_artifact(
         "memory_pressure_response.jsonl",
         &[json!({
             "schema": "pi.test.perf_event.v1",
@@ -9644,16 +9771,25 @@ fn tui_perf_e2e_memory_pressure_response() {
     );
 }
 
-/// Helper: write a JSONL artifact file to tests/artifacts/perf/.
+/// Validate a JSONL payload and retain it only when its output policy allows it.
 #[allow(dead_code)]
-fn write_perf_artifact(filename: &str, entries: &[serde_json::Value]) {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/artifacts/perf");
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join(filename);
-    let content = entries
-        .iter()
-        .map(|e| serde_json::to_string(e).expect("serialize artifact entry"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&path, format!("{content}\n")).expect("write perf artifact");
+fn validate_or_write_perf_artifact(filename: &str, entries: &[serde_json::Value]) {
+    let payload = serialize_and_validate_perf_jsonl(entries);
+    let generation_enabled = tui_perf_artifact_generation_enabled();
+    let should_write = match filename {
+        "large_session_tui_frame_budget.jsonl" => true,
+        "long_conversation_responsiveness.jsonl"
+        | "streaming_with_history.jsonl"
+        | "degradation_under_load.jsonl"
+        | "memory_pressure_response.jsonl" => generation_enabled,
+        _ => panic!("unexpected TUI perf artifact filename: {filename}"),
+    };
+    if !should_write {
+        return;
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/artifacts/perf")
+        .join(filename);
+    write_verified_perf_artifact(&path, &payload);
 }

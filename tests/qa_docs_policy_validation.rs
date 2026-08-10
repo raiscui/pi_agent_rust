@@ -2034,8 +2034,14 @@ fn weekly_certification_verdict_workflow_regenerates_verdict_and_opens_pr() {
         "full_certification",
         "tests/full_suite_gate/certification_verdict.json",
         "docs/evidence/dropin-certification-verdict.json",
-        "\"overall_verdict\": \"NOT_CERTIFIED\"",
-        "\"overall_verdict\": \"CERTIFIED\" if not blocking_reasons else \"NOT_CERTIFIED\"",
+        "overall_verdict = (",
+        "if source_commit == expected_source_sha",
+        "and len(hard_gate_results) == 12",
+        "and [gate[\"gate_id\"] for gate in hard_gate_results] == expected_gate_ids",
+        "and all(gate[\"status\"] == \"pass\" for gate in hard_gate_results)",
+        "and lane_verdict == \"pass\"",
+        "and not blocking_reasons",
+        "else \"NOT_CERTIFIED\"",
         "peter-evans/create-pull-request@v7",
         "automation/weekly-certification-verdict",
     ] {
@@ -2870,15 +2876,15 @@ fn testing_policy_and_runbook_coverage_thresholds_agree() {
     let providers = modules
         .iter()
         .find(|m| m["name"].as_str() == Some("providers"));
-    if let Some(providers) = providers {
-        if let Some(line_floor) = providers["line_floor_pct"].as_f64() {
-            let floor_str = format!("{line_floor:.0}%");
-            // At least one of policy or runbook should mention this threshold
-            assert!(
-                policy.contains(&floor_str) || runbook.contains(&floor_str),
-                "provider line_floor_pct ({floor_str}) must appear in testing-policy or runbook"
-            );
-        }
+    if let Some(providers) = providers
+        && let Some(line_floor) = providers["line_floor_pct"].as_f64()
+    {
+        let floor_str = format!("{line_floor:.0}%");
+        // At least one of policy or runbook should mention this threshold
+        assert!(
+            policy.contains(&floor_str) || runbook.contains(&floor_str),
+            "provider line_floor_pct ({floor_str}) must appear in testing-policy or runbook"
+        );
     }
 }
 
@@ -3321,13 +3327,13 @@ fn validate_critical_perf3x_bead_entries(entries: &[Value]) -> Result<HashSet<St
                 "critical_perf3x_beads[{index}] must be canonical numeric PERF-3X id: {bead_id}"
             )
         })?;
-        if let Some(previous) = previous_segments.as_ref() {
-            if bead_segments < *previous {
-                let previous_bead = previous_bead_id.as_deref().unwrap_or("<unknown>");
-                return Err(format!(
-                    "critical_perf3x_beads must be sorted by canonical bead id order: index {index} '{bead_id}' appears after '{previous_bead}'"
-                ));
-            }
+        if let Some(previous) = previous_segments.as_ref()
+            && bead_segments < *previous
+        {
+            let previous_bead = previous_bead_id.as_deref().unwrap_or("<unknown>");
+            return Err(format!(
+                "critical_perf3x_beads must be sorted by canonical bead id order: index {index} '{bead_id}' appears after '{previous_bead}'"
+            ));
         }
         previous_segments = Some(bead_segments);
         previous_bead_id = Some(bead_id.to_string());

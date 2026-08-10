@@ -1743,13 +1743,12 @@ impl PiApp {
                     (output_path, html)
                 };
 
-                if let Some(parent) = output_path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        if let Err(err) = std::fs::create_dir_all(parent) {
-                            self.status_message = Some(format!("Failed to create dir: {err}"));
-                            return None;
-                        }
-                    }
+                if let Some(parent) = output_path.parent()
+                    && !parent.as_os_str().is_empty()
+                    && let Err(err) = std::fs::create_dir_all(parent)
+                {
+                    self.status_message = Some(format!("Failed to create dir: {err}"));
+                    return None;
                 }
                 if let Err(err) = std::fs::write(&output_path, html) {
                     self.status_message = Some(format!("Failed to write export: {err}"));
@@ -2127,7 +2126,7 @@ impl PiApp {
                 None
             }
             SlashCommand::Changelog => {
-                let content = include_str!("../../CHANGELOG.md").to_string();
+                let content = crate::embedded_assets::changelog().to_string();
                 self.messages.push(ConversationMessage {
                     role: MessageRole::System,
                     content,
@@ -2877,14 +2876,14 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
                 Ok(mut resources) => {
                     if let Some(manager) = extensions {
                         let discovered = manager.discover_resources(&cwd, "reload").await;
-                        if !discovered.is_empty() {
-                            if let Err(err) = resources.extend_with_paths(&cwd, &discovered) {
-                                tracing::warn!(
-                                    event = "pi.resources.reload.extension_paths_failed",
-                                    error = %err,
-                                    "Failed to apply extension-discovered resource paths"
-                                );
-                            }
+                        if !discovered.is_empty()
+                            && let Err(err) = resources.extend_with_paths(&cwd, &discovered)
+                        {
+                            tracing::warn!(
+                                event = "pi.resources.reload.extension_paths_failed",
+                                error = %err,
+                                "Failed to apply extension-discovered resource paths"
+                            );
                         }
                     }
 
