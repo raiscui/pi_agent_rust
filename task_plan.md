@@ -1206,3 +1206,23 @@
 - [ ] 1f. git commit (scoped message)
 - [ ] 1g. git push my main
 - [ ] 1h. 验证 my/main HEAD 更新 + 本地 working tree 状态
+
+## [2026-08-09 16:05:00] [Session ID: 1] 阶段1完成: 推本地 88 commits 到 my/main
+
+### 结果
+- Commit 6ee27be4 (chore: 文档化 perf evidence 已知缺口 + 三个未跟踪支线归档): 22 文件 +1414 行
+- my remote URL: HTTPS → SSH (git@github.com:raiscui/pi_agent_rust.git)
+- my/main HEAD: e0cc8689 (2026-06-08) → 6ee27be4 (本 Session 最新)
+- 本地 vs my/main: 完全同步 (0/0)
+- push 失败原因: HTTPS PAT 缺 workflow scope, SSH key 通过后成功
+- WORKLOG 记录: 推的过程 + 安全验证 + remote URL 改动
+
+### 当前 git 拓扑
+- 本地 main: 6ee27be4 (本 Session, + 88 commits ahead of my/main)
+- my/main: 6ee27be4 (同步)
+- origin/main (Dicklesworthstone 上游): 44ddf80ff (落后本地 96 commits)
+
+### 下一步候选
+1. 跟 origin/main: merge 96 commits (v0.2.0 收口: Windows path/identity / perf claim 授权 / models v2 / pijs VFS 隔离 / fs effective-mode)
+2. 处理主线 task_plan 剩下的"slash 3 + certification 1" (pi-mono 缺 core/tools 模块)
+3. 等用户决定

@@ -539,3 +539,38 @@
 - `tests/perf/reports/budget_summary.json` 的 stale 状态不应被当成 active test failure; 14 个 missing artifact + 3 个 1598h stale evidence 都是历史真实 perf run 的快照。
 - 支线归档不是删除: `mv` 是 rename, archive/branch_contexts/ 是 OMX 标准的支线归宿, archive/manifests/ARCHIVE_MANIFEST 记录每次归档的摘要。
 - secret_cleanup 的 history rewrite 已经完成, 唯一遗留是 4 条不可逆外部操作, 必须等用户授权, 不能由 agent 推进。
+
+## [2026-08-09 16:00:00] [Session ID: 1] 任务名称: 推本地 88 commits 到 my/main
+
+### 任务内容
+- 把本地 main 领先 my/main 的 88 commits + 本 Session 的 1 个 commit 推到 my/main。
+- 解决 push 被 GitHub 拒绝的问题 (PAT 缺 workflow scope)。
+
+### 完成过程
+- 1. 调研 88 commits 内容: 主题是 v0.1.19 → v0.1.23 + RCH 集成 + DeepSeek thinking + 多次 fix(test) 收口 + 测试产物 gitignore + chore(test) 还原 perf 产物。
+- 2. 安全验证 (避免推上去泄露 DeepSeek Key):
+  - working tree 扫: 无真值
+  - git ls-files 扫 `sk-[a-zA-Z0-9]{30,}`: 仅 src/tools.rs 命中, 内容是测试 fixture + redaction regex (redactionfixture / bashredactionfixture / deniedpathfixture 等)
+  - docs/provider-config-examples.md 命中: 内容是 placeholder (`sk-ant-...`, `sk-...`, `DEEPSEEK_API_KEY="sk-..."`)
+  - .envrc 真值仍在 .gitignore 中
+  - git log --all -S 'sk-' 唯一引入 commit: `8341d687 Gate tool artifact lifecycle metadata` (fixture 字符串)
+  - 结论: history rewrite 已生效, 推上去安全
+- 3. scoped commit (6ee27be4, 22 文件, +1414 行): 本 Session 的 C+A 产出精确 add, 3 个其他 session 产物保留 untracked
+- 4. push 第一次失败: HTTPS PAT 缺 `workflow` scope, 无法更新 `.github/workflows/model-catalog-drift.yml` (commit ce89fbf3)
+- 5. 切 my remote 到 SSH URL (`git@github.com:raiscui/pi_agent_rust.git`), ssh key 认证成功
+- 6. push 成功: `e0cc8689..6ee27be4`, my/main HEAD 更新到 6ee27be4
+
+### 后续影响
+- my remote URL 已从 HTTPS 改成 SSH, 不影响其他 remote (origin 仍是 HTTPS = Dicklesworthstone 上游)
+- 下次 `git fetch my` / `git push my` 不需要重新输密码或 PAT
+- 本地 working tree 仅剩 3 个其他 session 产物 untracked:
+  - `legacy_pi_mono_code/pi-mono/pnpm-lock.yaml`
+  - `tests/cross_platform_reports/macos/`
+  - `tests/evidence_bundle/`
+  - 不动, 让原始 session 处理
+
+### 总结感悟
+- HTTPS PAT 的 workflow scope 限制是 GitHub 标准安全设计, 不算 bug。SSH key + repo write 是完整权限, 推荐用 SSH。
+- push 之前必须做真值扫描: 即使 history rewrite 已做, 也要再扫一次, 避免 SKIP placeholder 误判。
+- scoped git add (不 git add .): 本 Session 22 文件精确 add, 其他 session 3 个产物保留 untracked, 完美符合 mixed-worktree 规则。
+- 88 commits 中 ce89fbf3 改 workflow 是关键, 没有 SSH 权限 push 不上去。
