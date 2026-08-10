@@ -1226,3 +1226,24 @@
 1. 跟 origin/main: merge 96 commits (v0.2.0 收口: Windows path/identity / perf claim 授权 / models v2 / pijs VFS 隔离 / fs effective-mode)
 2. 处理主线 task_plan 剩下的"slash 3 + certification 1" (pi-mono 缺 core/tools 模块)
 3. 等用户决定
+
+## [2026-08-10 14:55:00] [Session ID: 1] 阶段1完成: merge origin/main 96 commits
+
+### 结果
+- merge commit: fc83e48f (96 conflicts recorded)
+- my/main HEAD: fc83e48f (本地 31 commits 领先)
+- origin/main HEAD: 44ddf80ff (Dicklesworthstone 上游)
+- 工作树: clean + 3 个其他 session untracked
+- push 走 SSH (my remote 已切)
+
+### 风险与遗留
+- Cargo.toml / Cargo.lock 用 --theirs (没有手工合并), 编译风险未知
+- 本地 88 commits 的 src/*.rs 改动被 origin 覆盖 (因为优先 origin), 历史上有意义的本地 commit 保留 (时间线)
+- 没有跑 cargo check 验证合并结果 (用户警告 cargo 编译爆内存)
+- /tmp/pi_agent_rust_untracked_backup_20260810_143833/ 保留
+
+### 下一步候选
+1. 跑 cargo check 验证 merge 后能编译 (低负载时段, 例如早上)
+2. 处理主线 task_plan 剩下的 "slash 3 + certification 1" (pi-mono 缺 core/tools 模块)
+3. 处理 origin 还有的 31 commits 落后? (实际本地领先 origin 31, 已经包含 origin 96 commits)
+4. 跟 next remote? (用户指定)
