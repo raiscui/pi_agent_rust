@@ -4257,7 +4257,8 @@ where
         let original_permissions = expected_target_identity.map(|(_, _, mode)| {
             use std::os::unix::fs::PermissionsExt as _;
 
-            std::fs::Permissions::from_mode(mode)
+            // rustix st_mode is u16; std::fs::Permissions::from_mode needs u32.
+            std::fs::Permissions::from_mode(mode as u32)
         });
 
         // The pathname stored by `NamedTempFile` is not descriptor-relative.
@@ -4354,8 +4355,11 @@ where
                 let source_file = std::fs::File::from(source_descriptor);
                 let source_metadata = source_file.metadata()?;
                 if !source_metadata.is_file()
-                    || source_metadata.dev() != expected_dev
-                    || source_metadata.ino() != expected_ino
+                    // rustix st_dev/st_ino is i32 on this toolchain; std Metadata
+                    // returns u64. Cast at the comparison site to keep the
+                    // captured target identity tuple unchanged.
+                    || source_metadata.dev() != expected_dev as u64
+                    || source_metadata.ino() != expected_ino as u64
                 {
                     return Err(std::io::Error::other(
                         "file changed since it was read; re-read it and retry the edit",

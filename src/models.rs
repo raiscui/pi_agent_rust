@@ -24,6 +24,12 @@ pub struct ModelEntry {
     pub headers: HashMap<String, String>,
     pub auth_header: bool,
     pub compat: Option<CompatConfig>,
+    /// 已经从 models.json 解析完成的工具调用行为 profile。
+    ///
+    /// 这里保存的是"解析后的结果", 而不是 profile 名称。
+    /// 后续 prompt / provider / agent 层只消费这个单一真相源,
+    /// 避免各层重复用 provider/model 字符串做硬编码判断。
+    pub tool_use_profile: Option<ToolUseProfile>,
     /// OAuth config for extension-registered providers that require browser-based auth.
     pub oauth_config: Option<OAuthConfig>,
 }
@@ -217,6 +223,87 @@ pub struct OAuthConfig {
     pub client_id: String,
     pub scopes: Vec<String>,
     pub redirect_uri: Option<String>,
+}
+
+/// Tool-use profile: 工具调用行为的预解析结果, 与 ModelEntry 强绑定。
+///
+/// 来源: `models.json` 中 `toolUseProfiles` 段通过 `ToolUseProfileConfig`
+/// 解析后, 再由 `resolve_tool_use_profile` 折算成 `ToolUseProfile`。
+/// 这里保存的是"解析后的结果", 不是 profile 名称。
+/// 后续 prompt / provider / agent 层只消费这个单一真相源,
+/// 避免各层重复用 provider/model 字符串做硬编码判断。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseProfile {
+    /// profile 的配置名, 用于生成 idempotence marker 和诊断信息。
+    pub name: String,
+    /// 可追加到 system prompt 的 profile 文本。
+    pub append_system_prompt: Option<String>,
+    /// OpenAI-compatible tools schema 的 path 字段收窄配置。
+    pub path_schema: Option<ToolUsePathSchemaConfig>,
+    /// 模型输出 tool arguments 后的保守修复开关。
+    pub argument_repair: Option<ToolUseArgumentRepairConfig>,
+    /// 工具返回后的重复调用 / 文本收束保护开关。
+    pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
+}
+
+impl ToolUseProfile {
+    /// 从已解析的 `ToolUseProfileConfig` + profile name 折算 `ToolUseProfile`。
+    ///
+    /// 注: 此处只做数据组装, 不做 profile name 校验。
+    /// 校验由 `validate_tool_use_profile_references` 在 load 阶段完成。
+    pub(crate) fn from_config(name: &str, config: &ToolUseProfileConfig) -> Self {
+        Self {
+            name: name.to_string(),
+            append_system_prompt: config.append_system_prompt.clone(),
+            path_schema: config.path_schema.clone(),
+            argument_repair: config.argument_repair.clone(),
+            post_tool_guard: config.post_tool_guard.clone(),
+        }
+    }
+}
+
+/// models.json `toolUseProfiles` 段的原始配置形态。
+///
+/// 与 `ToolUseProfile` 的区别: `ToolUseProfileConfig` 不携带 profile name,
+/// name 由外层 HashMap 的 key 提供, 解析时才折算到 `ToolUseProfile`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseProfileConfig {
+    pub append_system_prompt: Option<String>,
+    pub path_schema: Option<ToolUsePathSchemaConfig>,
+    pub argument_repair: Option<ToolUseArgumentRepairConfig>,
+    pub post_tool_guard: Option<ToolUsePostToolGuardConfig>,
+}
+
+/// OpenAI-compatible tools schema 的 path 字段收窄配置。
+///
+/// 用 file_tools / optional_path_tools 列表把"路径"语义工具收窄,
+/// 提示模型只输出相对路径, 由客户端的 path repair 兜底。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUsePathSchemaConfig {
+    pub file_tools: Option<Vec<String>>,
+    pub optional_path_tools: Option<Vec<String>>,
+    pub file_path_description: Option<String>,
+    pub optional_path_description: Option<String>,
+    pub generic_path_description: Option<String>,
+}
+
+/// 模型输出 tool arguments 后的保守修复开关。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseArgumentRepairConfig {
+    pub repair_degenerate_path_from_user_text: Option<bool>,
+    pub repair_grep_degenerate_glob: Option<bool>,
+}
+
+/// 工具返回后的重复调用 / 文本收束保护开关。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUsePostToolGuardConfig {
+    pub rewrite_repeated_successful_tool_call: Option<bool>,
+    pub strip_read_line_prefixes: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1885,7 +1972,8 @@ fn append_upstream_nonlegacy_models(
                 headers: HashMap::new(),
                 auth_header: defaults.auth_header,
                 compat: None,
-                oauth_config: None,
+                tool_use_profile: None,
+            oauth_config: None,
             });
         }
     }
@@ -2031,6 +2119,7 @@ fn built_in_models(
             } else {
                 None
             },
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2086,6 +2175,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2176,7 +2266,8 @@ fn built_in_models(
                 headers: HashMap::new(),
                 auth_header: true,
                 compat: None,
-                oauth_config: None,
+                tool_use_profile: None,
+            oauth_config: None,
             });
         }
     }
@@ -2226,6 +2317,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2271,6 +2363,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2320,6 +2413,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2365,6 +2459,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2410,6 +2505,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2456,6 +2552,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2501,6 +2598,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2541,6 +2639,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2581,6 +2680,7 @@ fn built_in_models(
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -2873,7 +2973,8 @@ fn apply_custom_models_with_provider_headers(
                 headers: model_headers,
                 auth_header,
                 compat: merge_compat(provider_cfg.compat.as_ref(), model_cfg.compat.as_ref()),
-                oauth_config: None,
+                tool_use_profile: None,
+            oauth_config: None,
             });
         }
     }
@@ -4051,6 +4152,7 @@ where
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         });
     }
@@ -4084,7 +4186,8 @@ where
         headers: HashMap::new(),
         auth_header: defaults.auth_header,
         compat: None,
-        oauth_config: None,
+        tool_use_profile: None,
+            oauth_config: None,
     })
 }
 
@@ -4780,6 +4883,7 @@ mod tests {
             headers: HashMap::from([("x-built-in".to_string(), "keep-me".to_string())]),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }];
 
@@ -4834,6 +4938,7 @@ mod tests {
             headers: HashMap::from([("x-built-in".to_string(), "remove-me".to_string())]),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }];
 
@@ -5316,6 +5421,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: true,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         };
 
@@ -6567,6 +6673,7 @@ mod tests {
             headers: HashMap::new(),
             auth_header: false,
             compat: None,
+            tool_use_profile: None,
             oauth_config: None,
         }
     }
@@ -8150,7 +8257,8 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
-                oauth_config: None,
+                tool_use_profile: None,
+            oauth_config: None,
             }
         }
 
@@ -8264,7 +8372,8 @@ mod tests {
                 headers: HashMap::new(),
                 auth_header: false,
                 compat: None,
-                oauth_config: None,
+                tool_use_profile: None,
+            oauth_config: None,
             }
         }
 

@@ -1247,3 +1247,32 @@
 2. 处理主线 task_plan 剩下的 "slash 3 + certification 1" (pi-mono 缺 core/tools 模块)
 3. 处理 origin 还有的 31 commits 落后? (实际本地领先 origin 31, 已经包含 origin 96 commits)
 4. 跟 next remote? (用户指定)
+
+## [2026-08-10 15:05:00] [Session ID: 1] 阶段1: cargo check 验证 merge 后能编译
+
+### 行动
+- [ ] 1a. load 检查 (现在是 3.14/2.51/2.55, 健康)
+- [ ] 1b. cargo check -j 2 (5 分钟超时)
+- [ ] 1c. 失败则 abort,记录错误
+
+## [2026-08-10 20:35:00] [Session ID: 1] 阶段1完成: 修复 merge 9 个 compile errors
+
+### 修复策略
+按用户选 A:加回 ToolUseProfile struct + ModelEntry 字段,不引入 validate/resolve 集成(避免与 origin 96 commits 的 ModelsConfig 冲突)。
+
+### 实际改动
+- src/models.rs: + 5 个 ToolUseProfile struct (ToolUseProfile, ToolUseProfileConfig, ToolUsePathSchemaConfig, ToolUseArgumentRepairConfig, ToolUsePostToolGuardConfig) + ModelEntry.tool_use_profile 字段 + 28 个 ModelEntry { ... } 初始化加 tool_use_profile: None
+- src/extensions/extension_manager_impl.rs: 1 个 ModelEntry { ... } 初始化加 tool_use_profile: None
+- src/tools.rs: 2 处 type mismatch 修复 (as u32, as u64 cast)
+- src/main.rs: 1 个 AgentConfig { ... } 初始化加 tool_use_profile: None
+
+### 验证
+- cargo check --bin pi: 通过 (5.31s)
+- cargo check workspace (lib + bin + examples + tests): 通过 (0.76s)
+- 唯一警告: proc-macro-error2 v2.0.1 future-incompat (与本次修改无关)
+
+### 关键发现
+- merge 时 src/models.rs 在 UU 列表, --theirs 取 origin 版本(无 ToolUseProfile struct)
+- merge 时 src/agent.rs / src/rpc.rs / src/sdk.rs / src/acp.rs / src/app.rs 不在 UU 列表, 自动保留本地 1ae44892e 引入的 ToolUseProfile 引用
+- merge 时 src/tools.rs 在 UU 列表, --theirs 取 origin a5f36e59d, 但 origin 引入 type mismatch (u16 vs u32, i32 vs u64)
+- merge 时 src/extensions/extension_manager_impl.rs / src/main.rs 不在 UU 列表, 保留本地版本(无 tool_use_profile 字段, 因本地 main.rs 在 1ae44892e 之前没引入这个概念)

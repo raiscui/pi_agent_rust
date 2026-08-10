@@ -1586,6 +1586,7 @@ async fn run(
         stream_options,
         block_images: config.image_block_images(),
         fail_closed_hooks: config.fail_closed_hooks(),
+        tool_use_profile: None,
         tool_approval: None,
     };
 
