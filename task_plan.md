@@ -433,3 +433,19 @@
 ### 当前状态
 
 **正在执行阶段 5 提交** - 所有实现与质量门已完成,只剩 Git 交付。
+
+## [2026-08-12 02:24:30] [Session ID: omx-1786418643597-4bz6s9] 阶段 5 完成: 提交与远端同步
+
+### 完成结果
+
+- [x] 本轮修改已提交为 `817ab928 feat(config): move global agent directory to rpi`。
+- [x] `git pull --rebase my main`、`git push my main` 与 `git push my main:master` 全部通过。
+- [x] `my/main` 与 `my/master` 均已同步到 `817ab928`。
+
+### 保留状态
+
+- `legacy_pi_mono_code/pi-mono/pnpm-lock.yaml`、`tests/cross_platform_reports/macos/` 与 `tests/evidence_bundle/` 是其他会话的未跟踪产物,未修改也未提交。
+
+### 当前状态
+
+**任务完成** - 默认全局目录、Rust CLI 调用面、当前运行文档、fixture 和 provider 示例已统一为 `.rpi/agent` 与 `rpi`。
