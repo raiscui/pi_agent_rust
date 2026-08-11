@@ -138,7 +138,7 @@ struct CliTestHarness {
 impl CliTestHarness {
     fn new(name: &str) -> Self {
         let harness = TestHarness::new(name);
-        let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_pi"));
+        let binary_path = PathBuf::from(env!("CARGO_BIN_EXE_rpi"));
 
         let mut env = BTreeMap::new();
 

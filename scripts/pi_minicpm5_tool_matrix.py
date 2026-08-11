@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-DEFAULT_PI_BIN = Path('/Users/cuiluming/local_doc/l_dev/my/rust/pi_agent_rust/target/debug/pi')
+DEFAULT_PI_BIN = Path('/Users/cuiluming/local_doc/l_dev/my/rust/pi_agent_rust/target/debug/rpi')
 DEFAULT_MODEL = Path('/Users/cuiluming/local_doc/l_dev/my/rust/fast-infer/models/MiniCPM5-1B')
 DEFAULT_SERVER_URL = 'http://127.0.0.1:18081/v1'
 PARSE_ERROR_TOOL_NAME = '__minicpm5_tool_parse_error'

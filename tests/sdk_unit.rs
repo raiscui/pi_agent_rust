@@ -268,7 +268,7 @@ fn transport_rpc_options_default() {
     let harness = TestHarness::new("transport_rpc_options_default");
 
     let options = RpcTransportOptions::default();
-    assert_eq!(options.binary_path.to_str().unwrap(), "pi");
+    assert_eq!(options.binary_path.to_str().unwrap(), "rpi");
     assert!(options.args.contains(&"--mode".to_string()));
     assert!(options.args.contains(&"rpc".to_string()));
     assert!(options.cwd.is_none());

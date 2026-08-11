@@ -112,25 +112,21 @@ Goal: keep packaging and invocation ergonomics compatible enough for frictionles
 - **Source path (`cargo build --release --locked`)**: deterministic fallback for constrained/air-gapped environments.
 
 ### Executable compatibility path
-- Canonical command is `pi`.
-- If TypeScript `pi` already exists, installer supports in-place migration and preserves old command as `legacy-pi`.
-- If migration is declined (`--keep-existing-pi`), Rust Pi installs as `pi-rust` so both CLIs remain callable.
+- Canonical command is `rpi`.
+- The installer leaves an existing TypeScript `pi` command unchanged.
 - Pinned rollout is supported by `install.sh --version vX.Y.Z`.
 
 ### Representative validation matrix
 Run this matrix before declaring distribution parity complete for a release candidate:
 
-1. Fresh Linux/macOS install (no prior `pi`):
+1. Fresh Linux/macOS install:
    - `curl .../install.sh | bash`
-   - `command -v pi && pi --version && pi --help >/dev/null`
-2. Migration host with existing TypeScript `pi`:
-   - `install.sh --adopt` (or interactive adopt path)
-   - `pi --version` returns Rust build
-   - `legacy-pi --version` still resolves to preserved TypeScript CLI
-3. Keep-existing path:
-   - `install.sh --keep-existing-pi`
-   - `pi` remains TypeScript CLI, `pi-rust --version` resolves to Rust build
-4. Pinned enterprise/CI rollout:
+   - `command -v rpi && rpi --version && rpi --help >/dev/null`
+2. Host with an existing TypeScript `pi`:
+   - `curl .../install.sh | bash`
+   - `pi --version` remains the existing command
+   - `rpi --version` resolves to the Rust build
+3. Pinned enterprise/CI rollout:
    - `install.sh --version vX.Y.Z`
    - binary checksum validation passes against release `SHA256SUMS`
 
@@ -139,7 +135,7 @@ Run this matrix before declaring distribution parity complete for a release cand
 Release operations must keep benchmark evidence and shipping artifacts distinct.
 
 - **Shipping/distribution artifacts**: built with Cargo `release` profile and published via
-  `release.yml` + installer flows (`pi` binaries + `SHA256SUMS`).
+  `release.yml` + installer flows (`rpi` binaries + `SHA256SUMS`).
 - **Benchmark evidence artifacts**: produced by PERF-3X lanes (`scripts/perf/orchestrate.sh`,
   `scripts/bench_extension_workloads.sh`) using benchmark profile labeling (typically `perf`)
   with run-level provenance (`correlation_id`, build/profile metadata, allocator/PGO metadata).
@@ -2942,7 +2938,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    """
    smoke = f"""$ErrorActionPreference = 'Stop'
    $RemoteDir = Join-Path $HOME '{remote_dir}'
-   $Binary = Join-Path $RemoteDir 'pi.exe'
+   $Binary = Join-Path $RemoteDir 'rpi.exe'
    if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) {{ throw 'binary missing' }}
    $Item = Get-Item -LiteralPath $Binary -Force
    if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $Item.Length -le 0) {{
@@ -2953,10 +2949,10 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    $ActualSha = (Get-FileHash -LiteralPath $Binary -Algorithm SHA256).Hash.ToLowerInvariant()
    if ($ActualSha -ne '{expected_sha}') {{ throw 'Windows smoke digest mismatch' }}
    $VersionOutput = ((& $Binary --version 2>&1) -join "`n").Trim()
-   if ($LASTEXITCODE -ne 0) {{ throw 'pi --version failed' }}
+   if ($LASTEXITCODE -ne 0) {{ throw 'rpi --version failed' }}
    if (-not $VersionOutput.StartsWith('pi {version} (')) {{ throw "unexpected version: $VersionOutput" }}
    & $Binary --help *> $null
-   if ($LASTEXITCODE -ne 0) {{ throw 'pi --help failed' }}
+   if ($LASTEXITCODE -ne 0) {{ throw 'rpi --help failed' }}
    Write-Output 'status=success'
    Write-Output 'label=windows-amd64'
    Write-Output "os=$([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)"
@@ -3935,4 +3931,4 @@ For branches opened before this gate was introduced:
 - GitHub Release exists and includes expected artifacts for each platform.
 - `SHA256SUMS` matches downloaded artifacts.
 - Crates.io publish succeeded (if configured) and the version matches the tag.
-- Smoke test install paths (download binary + run `pi --version`).
+- Smoke test install paths (download binary + run `rpi --version`).

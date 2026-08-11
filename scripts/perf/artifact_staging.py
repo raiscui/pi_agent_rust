@@ -512,7 +512,7 @@ def write_fixture(root: Path, include_policy: bool) -> None:
         '{"schema":"pi.perf.workload.v1","tool_calls_per_iteration":1}\n',
         encoding="utf-8",
     )
-    (root / "target/release/pi").write_bytes(b"binary")
+    (root / "target/release/rpi").write_bytes(b"binary")
     (root / "tests/perf/reports/extension_benchmark_stratification.json").write_text(
         '{"schema":"pi.perf.extension_benchmark_stratification.v1"}',
         encoding="utf-8",

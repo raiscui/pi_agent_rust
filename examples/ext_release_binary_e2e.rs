@@ -29,7 +29,7 @@ struct Args {
     artifacts_root: PathBuf,
 
     /// Release binary under test.
-    #[arg(long, default_value = "target/release/pi")]
+    #[arg(long, default_value = "target/release/rpi")]
     pi_bin: PathBuf,
 
     /// Provider ID passed to pi.
@@ -200,7 +200,7 @@ fn run() -> Result<()> {
 
     if !pi_bin.exists() {
         bail!(
-            "pi release binary not found at {}. Build first: cargo build --release --bin pi",
+            "rpi release binary not found at {}. Build first: cargo build --release --bin rpi",
             pi_bin.display()
         );
     }
@@ -976,7 +976,7 @@ mod tests {
             timeout_secs: 30,
             jobs: 1,
             allow_dangerous: false,
-            pi_bin: "target/release/pi".to_string(),
+            pi_bin: "target/release/rpi".to_string(),
             manifest: "tests/ext_conformance/VALIDATED_MANIFEST.json".to_string(),
             artifacts_root: "tests/ext_conformance/artifacts".to_string(),
             shard_index: None,

@@ -1690,11 +1690,9 @@ pub async fn run_interactive(
     runtime_handle: RuntimeHandle,
 ) -> anyhow::Result<()> {
     let should_check_for_updates = config.should_check_for_updates();
-    let show_hardware_cursor = config.show_hardware_cursor.unwrap_or_else(|| {
-        std::env::var("PI_HARDWARE_CURSOR")
-            .ok()
-            .is_some_and(|val| val == "1")
-    });
+    let show_hardware_cursor = config
+        .show_hardware_cursor
+        .unwrap_or_else(|| std::env::var("PI_HARDWARE_CURSOR").is_ok_and(|val| val == "1"));
     let mouse_capture_enabled = should_enable_interactive_mouse_capture(&config);
     apply_interactive_cursor_visibility(show_hardware_cursor);
 

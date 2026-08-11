@@ -554,12 +554,12 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
 
   if suite_selected "perf_budgets" || suite_selected "perf_regression"; then
     log_step "Building release pi binary for release-size gates..."
-    if "${CARGO_RUNNER_ARGS[@]}" build --bin pi --release >"$OUTPUT_DIR/logs/build_release_pi.log" 2>&1; then
-      log_ok "Release pi binary built: $TARGET_DIR/release/pi"
+    if "${CARGO_RUNNER_ARGS[@]}" build --bin rpi --release >"$OUTPUT_DIR/logs/build_release_rpi.log" 2>&1; then
+      log_ok "Release rpi binary built: $TARGET_DIR/release/rpi"
     elif [[ "${PI_PERF_STRICT:-0}" == "1" ]]; then
-      die "Failed to build release pi binary required for binary-size gates (see logs/build_release_pi.log)"
+      die "Failed to build release rpi binary required for binary-size gates (see logs/build_release_rpi.log)"
     else
-      log_warn "Failed to build release pi binary (see logs/build_release_pi.log); binary-size checks may return NO_DATA"
+      log_warn "Failed to build release rpi binary (see logs/build_release_rpi.log); binary-size checks may return NO_DATA"
     fi
   fi
 
@@ -609,7 +609,7 @@ run_test_suite() {
   exit_code=0
   BENCH_OUTPUT_DIR="$result_dir" \
   PERF_REGRESSION_OUTPUT="$result_dir" \
-  PERF_RELEASE_BINARY_PATH="$TARGET_DIR/release/pi" \
+  PERF_RELEASE_BINARY_PATH="$TARGET_DIR/release/rpi" \
   CI_CORRELATION_ID="$CORRELATION_ID" \
   RUST_TEST_THREADS="$PARALLELISM" \
     "${CARGO_RUNNER_ARGS[@]}" test --test "$target_name" --profile "$CARGO_PROFILE" -- --nocapture \

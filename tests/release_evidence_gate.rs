@@ -1425,38 +1425,52 @@ fn manual_release_controller_preamble_rejects_dispatch_shadowing() {
                 .map(|(body, _)| body)
         })
         .expect("manual controller preamble must precede toolchain export");
+    let bash = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .expect("a supported Bash executable is required");
+    let executable_preamble = if cfg!(target_os = "linux") {
+        preamble.to_string()
+    } else {
+        preamble.replace("done < \"/proc/$$/environ\"", "done < <(/usr/bin/env -0)")
+    };
 
     let run = |script: &str, raw_function: bool| {
-        let mut command = std::process::Command::new("/bin/bash");
+        let mut command = std::process::Command::new(bash);
         command
             .args(["--noprofile", "--norc", "-p", "-c", script])
             .env_clear();
         if raw_function {
-            command.env("BASH_FUNC_git%%", format!("() {{  :\n}}"));
+            let open = '{';
+            let close = '}';
+            command.env("BASH_FUNC_git%%", format!("() {open}  :\n{close}"));
         }
         command.output().expect("execute controller preamble")
     };
 
-    let clean = run(preamble, false);
+    let clean = run(&executable_preamble, false);
     assert!(
         clean.status.success(),
         "clean controller preamble failed: {}",
         String::from_utf8_lossy(&clean.stderr)
     );
 
-    let function_shadow = run(&format!("git() {{ :; }}\n{preamble}"), false);
+    let function_shadow = run(&format!("git() {{ :; }}\n{executable_preamble}"), false);
     assert!(
         !function_shadow.status.success(),
         "tool-shadowing function must fail the controller preamble"
     );
 
-    let alias_shadow = run(&format!("alias git='printf shadowed'\n{preamble}"), false);
+    let alias_shadow = run(
+        &format!("alias git='printf shadowed'\n{executable_preamble}"),
+        false,
+    );
     assert!(
         !alias_shadow.status.success(),
         "tool-shadowing alias must fail the controller preamble"
     );
 
-    let raw_function = run(preamble, true);
+    let raw_function = run(&executable_preamble, true);
     assert!(
         !raw_function.status.success()
             && String::from_utf8_lossy(&raw_function.stderr)
@@ -2703,7 +2717,7 @@ fn failure_count_within_release_threshold() {
 
 const PERF_BUDGET_SUMMARY_SCHEMA: &str = "pi.perf.budget_summary.v2";
 const PERF_CANONICAL_BUDGET_INVENTORY_SHA256: &str =
-    "96e3147ef23e1c634d56265581975a2b619ac9a701f4839ef6f3f4b3987226ad";
+    "ba299455435c1d5e950bf44586b72af44597529f896d854e15365060eedf524c";
 const PERF_TOP_LEVEL_FIELDS: &[&str] = &[
     "schema",
     "generated_at",

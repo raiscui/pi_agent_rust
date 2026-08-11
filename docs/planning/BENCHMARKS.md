@@ -216,7 +216,7 @@ jobs:
 
       - name: Check binary size budget
         run: |
-          SIZE_MB=$(stat --printf="%s" target/release/pi | awk '{printf "%.2f", $1/1024/1024}')
+          SIZE_MB=$(stat --printf="%s" target/release/rpi | awk '{printf "%.2f", $1/1024/1024}')
           echo "Binary size: ${SIZE_MB}MB"
           if (( $(echo "$SIZE_MB > 20" | bc -l) )); then
             echo "::error::Binary size ${SIZE_MB}MB exceeds 20MB budget"
@@ -340,7 +340,7 @@ This workstream uses a strict **baseline → profile → prove → implement →
 - Use `hyperfine` for end-to-end CLI paths (if installed):
 
 ```bash
-hyperfine --warmup 3 --runs 10 'target/release/pi --version'
+hyperfine --warmup 3 --runs 10 'target/release/rpi --version'
 ```
 
 - Use the PiJS workload harness for deterministic extension roundtrips:

@@ -8935,20 +8935,17 @@ impl AgentSession {
 
         normalize(self.api_key_override.clone())
             .or_else(|| {
-                self.auth_storage
-                    .as_ref()
-                    .and_then(|auth| {
-                        #[cfg(test)]
-                        {
-                            if self.env_isolated {
-                                return normalize(auth.resolve_api_key_isolated(
-                                    &entry.model.provider,
-                                    None,
-                                ));
-                            }
+                self.auth_storage.as_ref().and_then(|auth| {
+                    #[cfg(test)]
+                    {
+                        if self.env_isolated {
+                            return normalize(
+                                auth.resolve_api_key_isolated(&entry.model.provider, None),
+                            );
                         }
-                        normalize(auth.resolve_api_key(&entry.model.provider, None))
-                    })
+                    }
+                    normalize(auth.resolve_api_key(&entry.model.provider, None))
+                })
             })
             .or_else(|| normalize(entry.api_key.clone()))
     }
@@ -11294,6 +11291,7 @@ mod tests {
             model: "profiled-model".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         })
@@ -11323,6 +11321,7 @@ mod tests {
             model: "profiled-model".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
+            stop_details: None,
             error_message: None,
             timestamp: 0,
         }

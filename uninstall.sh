@@ -11,7 +11,6 @@ YES=0
 QUIET=0
 NO_GUM=0
 KEEP_PATH=0
-NO_RESTORE_LEGACY=0
 PURGE_STATE=0
 
 PATH_MARKER="# pi-agent-rust installer PATH"
@@ -20,18 +19,10 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pi-agent-rust"
 STATE_FILE="$STATE_DIR/install-state.env"
 
 PIAR_INSTALL_BIN=""
-PIAR_ADOPTED_TYPESCRIPT="0"
-PIAR_LEGACY_ALIAS_PATH=""
-PIAR_LEGACY_MOVED_FROM=""
-PIAR_LEGACY_MOVED_TO=""
-PIAR_COMPAT_ALIAS_PATH=""
-PIAR_COMPAT_ALIAS_STATUS=""
 PIAR_PATH_MARKER=""
 PIAR_AGENT_SKILL_STATUS=""
 PIAR_AGENT_SKILL_CLAUDE_PATH=""
 PIAR_AGENT_SKILL_CODEX_PATH=""
-RESTORE_CONFLICT=0
-
 AGENT_SKILL_NAME="pi-agent-rust"
 AGENT_SKILL_MARKER="pi_agent_rust installer managed skill"
 
@@ -78,7 +69,6 @@ Usage: uninstall.sh [options]
 Options:
   --yes, -y            Skip confirmation prompt
   --keep-path          Keep PATH lines added by installer
-  --no-restore-legacy  Do not restore moved TypeScript pi binary
   --purge-state        Remove installer state directory when possible
   --quiet, -q          Suppress non-error output
   --no-gum             Disable gum formatting
@@ -94,10 +84,6 @@ while [ $# -gt 0 ]; do
       ;;
     --keep-path)
       KEEP_PATH=1
-      shift
-      ;;
-    --no-restore-legacy)
-      NO_RESTORE_LEGACY=1
       shift
       ;;
     --purge-state)
@@ -132,11 +118,11 @@ show_header() {
       --border-foreground 196 \
       --padding "0 1" \
       --margin "1 0" \
-      "$(gum style --foreground 196 --bold 'pi uninstaller')" \
+      "$(gum style --foreground 196 --bold 'rpi uninstaller')" \
       "$(gum style --foreground 245 'Removes installer-managed pi_agent_rust artifacts')"
   else
     echo ""
-    echo -e "\033[1;31mpi uninstaller\033[0m"
+    echo -e "\033[1;31mrpi uninstaller\033[0m"
     echo -e "\033[0;90mRemoves installer-managed pi_agent_rust artifacts\033[0m"
     echo ""
   fi
@@ -240,12 +226,6 @@ is_rust_pi_binary() {
   local out
   out="$(capture_version_line "$path")"
   is_rust_pi_output "$out"
-}
-
-is_managed_alias() {
-  local path="$1"
-  [ -f "$path" ] || return 1
-  grep -q "pi_agent_rust installer managed alias" "$path" 2>/dev/null
 }
 
 is_expected_legacy_agent_settings_path() {
@@ -543,15 +523,6 @@ remove_path_entries() {
 
 fallback_binary_candidates() {
   cat <<EOF_CAND
-$HOME/.local/bin/pi
-$HOME/.local/bin/pi-rust
-/usr/local/bin/pi
-/usr/local/bin/pi-rust
-EOF_CAND
-}
-
-fallback_alias_candidates() {
-  cat <<EOF_CAND
 $HOME/.local/bin/rpi
 /usr/local/bin/rpi
 EOF_CAND
@@ -580,78 +551,6 @@ remove_installed_binary() {
   fi
 
   return 0
-}
-
-restore_moved_typescript_pi() {
-  if [ "$NO_RESTORE_LEGACY" -eq 1 ]; then
-    return 0
-  fi
-
-  if [ "${PIAR_ADOPTED_TYPESCRIPT:-0}" != "1" ]; then
-    return 0
-  fi
-
-  if [ -z "$PIAR_LEGACY_MOVED_FROM" ] || [ -z "$PIAR_LEGACY_MOVED_TO" ]; then
-    return 0
-  fi
-
-  if [ ! -e "$PIAR_LEGACY_MOVED_TO" ]; then
-    warn "Legacy backup not found for restore: $PIAR_LEGACY_MOVED_TO"
-    return 0
-  fi
-
-  if [ -e "$PIAR_LEGACY_MOVED_FROM" ]; then
-    if is_rust_pi_binary "$PIAR_LEGACY_MOVED_FROM"; then
-      remove_file_if_exists "$PIAR_LEGACY_MOVED_FROM" || true
-    else
-      warn "Skipping restore because destination already exists: $PIAR_LEGACY_MOVED_FROM"
-      RESTORE_CONFLICT=1
-      return 0
-    fi
-  fi
-
-  mv "$PIAR_LEGACY_MOVED_TO" "$PIAR_LEGACY_MOVED_FROM"
-  ok "Restored original pi binary: $PIAR_LEGACY_MOVED_FROM"
-}
-
-remove_legacy_alias() {
-  local alias_path="$PIAR_LEGACY_ALIAS_PATH"
-  if [ -z "$alias_path" ]; then
-    return 0
-  fi
-
-  if [ ! -e "$alias_path" ]; then
-    return 0
-  fi
-
-  if is_managed_alias "$alias_path"; then
-    remove_file_if_exists "$alias_path" && ok "Removed legacy alias: $alias_path"
-  else
-    warn "Skipping non-managed alias file: $alias_path"
-  fi
-}
-
-remove_compat_alias() {
-  local removed=0
-
-  if [ -n "$PIAR_COMPAT_ALIAS_PATH" ] && [ -e "$PIAR_COMPAT_ALIAS_PATH" ]; then
-    if is_managed_alias "$PIAR_COMPAT_ALIAS_PATH"; then
-      remove_file_if_exists "$PIAR_COMPAT_ALIAS_PATH" && removed=1
-      ok "Removed compatibility alias: $PIAR_COMPAT_ALIAS_PATH"
-    else
-      warn "Skipping non-managed compatibility alias: $PIAR_COMPAT_ALIAS_PATH"
-    fi
-  fi
-
-  if [ "$removed" -eq 0 ]; then
-    while IFS= read -r cand; do
-      [ -n "$cand" ] || continue
-      if [ -e "$cand" ] && is_managed_alias "$cand"; then
-        remove_file_if_exists "$cand" && removed=1
-        ok "Removed compatibility alias: $cand"
-      fi
-    done < <(fallback_alias_candidates)
-  fi
 }
 
 remove_installed_skills() {
@@ -683,11 +582,6 @@ remove_installed_skills() {
 }
 
 remove_state() {
-  if [ "$RESTORE_CONFLICT" -eq 1 ]; then
-    warn "Keeping installer state due restore conflict. Resolve and rerun uninstall."
-    return 0
-  fi
-
   if [ -f "$STATE_FILE" ]; then
     rm -f "$STATE_FILE"
     ok "Removed installer state file"
@@ -705,20 +599,11 @@ plan_summary() {
   if [ -n "$PIAR_INSTALL_BIN" ]; then
     lines+=("Rust binary: $PIAR_INSTALL_BIN")
   fi
-  if [ -n "$PIAR_LEGACY_ALIAS_PATH" ]; then
-    lines+=("Legacy alias: $PIAR_LEGACY_ALIAS_PATH")
-  fi
-  if [ -n "$PIAR_COMPAT_ALIAS_PATH" ] || [ -n "$PIAR_COMPAT_ALIAS_STATUS" ]; then
-    lines+=("Compatibility alias: ${PIAR_COMPAT_ALIAS_PATH:-$PIAR_COMPAT_ALIAS_STATUS}")
-  fi
   if [ -n "$PIAR_AGENT_SKILL_CLAUDE_PATH" ] || [ -n "$PIAR_AGENT_SKILL_CODEX_PATH" ]; then
     lines+=("Agent skills: remove installer-managed Claude/Codex skill dirs")
   fi
   if [ -n "$PIAR_AGENT_SKILL_STATUS" ]; then
     lines+=("Recorded skill status: $PIAR_AGENT_SKILL_STATUS")
-  fi
-  if [ "${PIAR_ADOPTED_TYPESCRIPT:-0}" = "1" ] && [ "$NO_RESTORE_LEGACY" -eq 0 ]; then
-    lines+=("Restore TS pi: ${PIAR_LEGACY_MOVED_TO:-<none>} -> ${PIAR_LEGACY_MOVED_FROM:-<none>}")
   fi
   if [ "$KEEP_PATH" -eq 0 ]; then
     lines+=("PATH cleanup: remove installer PATH marker lines")
@@ -756,18 +641,15 @@ main() {
 
   cleanup_legacy_agent_settings
   remove_installed_binary
-  remove_compat_alias
-  remove_legacy_alias
   remove_installed_skills
-  restore_moved_typescript_pi
   remove_path_entries
   remove_state
 
   if [ "$QUIET" -eq 0 ]; then
     if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
-      gum style --foreground 42 --bold "pi uninstall complete"
+      gum style --foreground 42 --bold "rpi uninstall complete"
     else
-      echo -e "\033[1;32mpi uninstall complete\033[0m"
+      echo -e "\033[1;32mrpi uninstall complete\033[0m"
     fi
   fi
 }

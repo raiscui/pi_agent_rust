@@ -91,7 +91,7 @@ jobs:
           # Keep this byte-exact and aligned with the documented shipping target.
           # "<22 MiB" means 22 * 1024 * 1024 bytes is already over budget.
           MAX_BINARY_BYTES=$((22 * 1024 * 1024))
-          SIZE_BYTES=$(stat --printf="%s" target/release/pi)
+          SIZE_BYTES=$(stat --printf="%s" target/release/rpi)
           {
             echo "## Binary Size"
             echo "- Size: ${SIZE_BYTES} bytes"
@@ -112,7 +112,7 @@ jobs:
       - name: Run system benchmarks
         run: cargo bench --bench system -- --noplot
         env:
-          PI_BENCH_BINARY: target/release/pi
+          PI_BENCH_BINARY: target/release/rpi
 
       - name: Run TUI performance benchmarks (PERF-8/9)
         run: cargo bench --bench tui_perf -- --noplot --save-baseline pr

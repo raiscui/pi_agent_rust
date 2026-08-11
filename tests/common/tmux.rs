@@ -16,20 +16,20 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn resolve_pi_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_pi") {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_rpi") {
         return PathBuf::from(path);
     }
 
     if let Ok(test_exe) = std::env::current_exe()
         && let Some(target_dir) = test_exe.parent().and_then(|parent| parent.parent())
     {
-        let candidate = target_dir.join("pi");
+        let candidate = target_dir.join("rpi");
         if candidate.exists() {
             return candidate;
         }
     }
 
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/pi")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/rpi")
 }
 
 // ─── TmuxInstance ────────────────────────────────────────────────────────────

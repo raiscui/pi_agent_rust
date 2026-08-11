@@ -3831,7 +3831,7 @@ for profile_name in profile_order:
             "profile": profile_name,
             "guidance": profile_recommendation_defaults[profile_name],
             "diagnostic_command": (
-                f"./target/debug/pi --explain-extension-policy --extension-policy {profile_name}"
+                f"./target/debug/rpi --explain-extension-policy --extension-policy {profile_name}"
             ),
         }
     )

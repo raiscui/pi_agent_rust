@@ -5,7 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="${ROOT}/install.sh"
 UNINSTALLER="${ROOT}/uninstall.sh"
 SKILL_SMOKE="${ROOT}/scripts/skill-smoke.sh"
-WORK_ROOT="${TMPDIR:-/tmp}/pi-installer-regression-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT="${TMP_ROOT%/}"
+[ -n "$TMP_ROOT" ] || TMP_ROOT="/tmp"
+WORK_ROOT="${TMP_ROOT}/pi-installer-regression-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -58,20 +61,6 @@ fi
 echo "existing pi stub"
 STUB
   chmod +x "${dir}/fakebin/pi"
-}
-
-write_existing_rpi_stub() {
-  local dir="$1"
-  cat > "${dir}/fakebin/rpi" <<'STUB'
-#!/usr/bin/env bash
-set -euo pipefail
-if [ "${1:-}" = "--version" ]; then
-  echo "rpi 1.2.3 (existing-stub)"
-  exit 0
-fi
-echo "existing rpi stub"
-STUB
-  chmod +x "${dir}/fakebin/rpi"
 }
 
 write_cosign_stub() {
@@ -384,6 +373,7 @@ run_installer() {
     XDG_CONFIG_HOME="${dir}/config" \
     PATH="${path_value}" \
     SHELL="/bin/bash" \
+    PI_INSTALLER_TEST_FORCE_WSL="${PI_INSTALLER_TEST_FORCE_WSL:-0}" \
     bash "${INSTALLER}" "$@" >"${out}" 2>&1
     echo "$?" > "${rc_file}"
   )
@@ -505,7 +495,9 @@ test_release_publish_no_verify_is_secret_scoped() {
     echo "reviewed manual release --no-verify surface changed" >&2
     return 1
   }
-  grep -Fq "would expose the credential environment to package/dependency build scripts" \
+  grep -Fq "publish verification builds the package and would expose the" \
+    "${ROOT}/.github/workflows/release.yml"
+  grep -Fq "credential environment to package/dependency build scripts." \
     "${ROOT}/.github/workflows/release.yml"
   grep -Fq "Every build and dry-run happens before the real token" \
     "${ROOT}/docs/releasing.md"
@@ -535,7 +527,7 @@ test_installer_retain_temp_mode_preserves_owned_scratch() {
     --no-completions \
     --no-agent-skills
 
-  installed="${dir}/dest/pi"
+  installed="${dir}/dest/rpi"
   assert_exit_code "$dir" 0
   [ -x "$installed" ] || {
     echo "retain-temp install did not produce the requested binary" >&2
@@ -695,8 +687,8 @@ test_offline_tarball_mode_installs_local_artifact() {
 
   offline_dir="${dir}/fixtures/offline-root"
   mkdir -p "$offline_dir"
-  cp "$artifact" "${offline_dir}/pi"
-  tar -czf "${dir}/fixtures/pi-offline.tar.gz" -C "$offline_dir" pi
+  cp "$artifact" "${offline_dir}/rpi"
+  tar -czf "${dir}/fixtures/pi-offline.tar.gz" -C "$offline_dir" rpi
 
   tarball="${dir}/fixtures/pi-offline.tar.gz"
   checksum="$(sha256_file "$tarball")"
@@ -709,11 +701,43 @@ test_offline_tarball_mode_installs_local_artifact() {
     --no-completions \
     --no-agent-skills
 
-  installed="${dir}/dest/pi"
+  installed="${dir}/dest/rpi"
 
   assert_exit_code "$dir" 0
   assert_output_contains "$dir" "Offline artifact mode enabled"
   [ -x "$installed" ] || { echo "expected installed binary at ${installed}" >&2; return 1; }
+}
+
+test_offline_tarball_rejects_legacy_pi_binary() {
+  local dir artifact offline_dir tarball checksum
+  dir="$(case_dir "offline-tarball-rejects-legacy-pi")"
+  write_existing_pi_stub "$dir"
+
+  artifact="${dir}/fixtures/pi-fixture"
+  write_artifact_binary "$artifact" "unsupported"
+
+  offline_dir="${dir}/fixtures/offline-root"
+  mkdir -p "$offline_dir"
+  cp "$artifact" "${offline_dir}/pi"
+  tar -czf "${dir}/fixtures/legacy-pi.tar.gz" -C "$offline_dir" pi
+
+  tarball="${dir}/fixtures/legacy-pi.tar.gz"
+  checksum="$(sha256_file "$tarball")"
+
+  run_installer "$dir" \
+    --yes --no-gum \
+    --offline "$tarball" \
+    --dest "${dir}/dest" \
+    --checksum "$checksum" \
+    --no-completions \
+    --no-agent-skills
+
+  assert_exit_code "$dir" 1
+  assert_output_contains "$dir" "did not contain an rpi binary"
+  [ ! -e "${dir}/dest/rpi" ] || {
+    echo "legacy pi archive must not install rpi" >&2
+    return 1
+  }
 }
 
 test_offline_mode_blocks_network_artifact_urls() {
@@ -742,8 +766,8 @@ test_offline_relative_tarball_path_is_accepted() {
 
   artifact="${dir}/fixtures/pi-fixture"
   write_artifact_binary "$artifact" "unsupported"
-  cp "$artifact" "${dir}/fixtures/pi"
-  tar -czf "${dir}/fixtures/relative-offline.tar.gz" -C "${dir}/fixtures" pi
+  cp "$artifact" "${dir}/fixtures/rpi"
+  tar -czf "${dir}/fixtures/relative-offline.tar.gz" -C "${dir}/fixtures" rpi
 
   tarball="fixtures/relative-offline.tar.gz"
   checksum="$(sha256_file "${dir}/fixtures/relative-offline.tar.gz")"
@@ -759,7 +783,7 @@ test_offline_relative_tarball_path_is_accepted() {
       --no-agent-skills
   )
 
-  installed="${dir}/dest/pi"
+  installed="${dir}/dest/rpi"
   assert_exit_code "$dir" 0
   [ -x "$installed" ] || { echo "expected installed binary at ${installed}" >&2; return 1; }
 }
@@ -862,6 +886,7 @@ test_wsl_detection_warning_is_emitted() {
   local dir artifact artifact_url checksum
   dir="$(case_dir "wsl-detection-warning")"
   write_existing_pi_stub "$dir"
+  write_uname_stub "$dir" "Linux" "x86_64"
 
   artifact="${dir}/fixtures/pi-fixture"
   write_artifact_binary "$artifact" "unsupported"
@@ -882,17 +907,17 @@ test_wsl_detection_warning_is_emitted() {
   assert_output_contains "$dir" "WSL detected"
 }
 
-test_installer_creates_rpi_alias_when_available() {
-  local dir artifact artifact_url checksum install_bin compat_alias
-  dir="$(case_dir "installer-creates-rpi-alias")"
+test_installer_installs_only_rpi_without_touching_pi() {
+  local dir artifact artifact_url checksum install_bin existing_pi
+  dir="$(case_dir "installer-installs-only-rpi")"
   write_existing_pi_stub "$dir"
 
   artifact="${dir}/fixtures/pi-fixture"
   write_artifact_binary "$artifact" "unsupported"
   artifact_url="file://${artifact}"
   checksum="$(sha256_file "$artifact")"
-  install_bin="${dir}/dest/pi"
-  compat_alias="${dir}/dest/rpi"
+  install_bin="${dir}/dest/rpi"
+  existing_pi="${dir}/fakebin/pi"
 
   run_installer "$dir" \
     --yes --no-gum --offline \
@@ -904,45 +929,13 @@ test_installer_creates_rpi_alias_when_available() {
     --no-agent-skills
 
   assert_exit_code "$dir" 0
-  assert_output_contains "$dir" "Alias:     installed (rpi -> ${install_bin})"
   [ -x "$install_bin" ] || { echo "expected installed binary at ${install_bin}" >&2; return 1; }
-  [ -x "$compat_alias" ] || { echo "expected compatibility alias at ${compat_alias}" >&2; return 1; }
-  grep -Fq "pi_agent_rust installer managed alias" "$compat_alias" || {
-    echo "expected managed alias marker in ${compat_alias}" >&2
+  [ ! -e "${dir}/dest/pi" ] || {
+    echo "installer must not create a pi compatibility binary" >&2
     return 1
   }
-  "${compat_alias}" --version | grep -Fq "pi 9.9.9 (fixture)" || {
-    echo "expected compatibility alias to execute installed pi binary" >&2
-    return 1
-  }
-}
-
-test_installer_skips_rpi_alias_when_existing_command_present() {
-  local dir artifact artifact_url checksum compat_alias
-  dir="$(case_dir "installer-skips-rpi-alias-conflict")"
-  write_existing_pi_stub "$dir"
-  write_existing_rpi_stub "$dir"
-
-  artifact="${dir}/fixtures/pi-fixture"
-  write_artifact_binary "$artifact" "unsupported"
-  artifact_url="file://${artifact}"
-  checksum="$(sha256_file "$artifact")"
-  compat_alias="${dir}/dest/rpi"
-
-  run_installer "$dir" \
-    --yes --no-gum --offline \
-    --version v9.9.9 \
-    --dest "${dir}/dest" \
-    --artifact-url "${artifact_url}" \
-    --checksum "${checksum}" \
-    --no-completions \
-    --no-agent-skills
-
-  assert_exit_code "$dir" 0
-  assert_output_contains "$dir" "Existing rpi command detected at ${dir}/fakebin/rpi; skipping managed alias"
-  assert_output_contains "$dir" "Alias:     skipped (existing rpi command at ${dir}/fakebin/rpi)"
-  [ ! -e "$compat_alias" ] || {
-    echo "installer should not create rpi alias when another rpi command already exists" >&2
+  "${existing_pi}" --version | grep -Fq "pi 0.1.0 (existing-rust-stub)" || {
+    echo "installer must not modify the existing pi command" >&2
     return 1
   }
 }
@@ -952,7 +945,7 @@ test_legacy_agent_settings_cleanup_is_safe_and_idempotent() {
   dir="$(case_dir "legacy-agent-settings-cleanup")"
   write_existing_pi_stub "$dir"
 
-  install_bin="${dir}/dest/pi"
+  install_bin="${dir}/dest/rpi"
   claude_settings="${dir}/home/.claude/settings.json"
   gemini_settings="${dir}/home/.gemini/settings.json"
   mkdir -p "$(dirname "$claude_settings")" "$(dirname "$gemini_settings")"
@@ -1061,7 +1054,7 @@ test_legacy_cleanup_skips_unexpected_settings_paths() {
   dir="$(case_dir "legacy-agent-settings-unexpected-path")"
   write_existing_pi_stub "$dir"
 
-  install_bin="${dir}/dest/pi"
+  install_bin="${dir}/dest/rpi"
   unexpected_settings="${dir}/home/custom/settings.json"
   mkdir -p "$(dirname "$unexpected_settings")"
   cat > "$unexpected_settings" <<JSON
@@ -1380,33 +1373,25 @@ SKILL
   fi
 }
 
-test_uninstall_removes_recorded_rpi_alias() {
-  local dir state_dir state_file alias_path
-  dir="$(case_dir "uninstall-removes-rpi-alias")"
+test_uninstall_removes_recorded_rpi_binary() {
+  local dir state_dir state_file binary_path
+  dir="$(case_dir "uninstall-removes-rpi-binary")"
   state_dir="${dir}/state/pi-agent-rust"
   state_file="${state_dir}/install-state.env"
-  alias_path="${dir}/home/.local/bin/rpi"
-  mkdir -p "${state_dir}" "$(dirname "$alias_path")"
-
-  cat > "$alias_path" <<'ALIAS'
-#!/usr/bin/env bash
-# pi_agent_rust installer managed alias
-set -euo pipefail
-exec /tmp/pi "$@"
-ALIAS
-  chmod +x "$alias_path"
+  binary_path="${dir}/home/.local/bin/rpi"
+  mkdir -p "${state_dir}" "$(dirname "$binary_path")"
+  write_artifact_binary "$binary_path" "unsupported"
 
   cat > "$state_file" <<EOF
-PIAR_COMPAT_ALIAS_PATH=${alias_path}
-PIAR_COMPAT_ALIAS_STATUS='installed (rpi -> /tmp/pi)'
+PIAR_INSTALL_BIN=${binary_path}
 EOF
 
   run_uninstaller "$dir" --yes --no-gum
 
   assert_exit_code "$dir" 0
-  assert_output_contains "$dir" "Removed compatibility alias: ${alias_path}"
-  if [ -e "$alias_path" ]; then
-    echo "expected recorded compatibility alias to be removed" >&2
+  assert_output_contains "$dir" "Removed Rust binary: ${binary_path}"
+  if [ -e "$binary_path" ]; then
+    echo "expected recorded rpi binary to be removed" >&2
     return 1
   fi
 }
@@ -1415,7 +1400,7 @@ test_uninstall_cleans_legacy_agent_settings_hooks() {
   local dir state_file install_bin claude_settings gemini_settings
   dir="$(case_dir "uninstall-legacy-agent-settings-cleanup")"
 
-  install_bin="${dir}/dest/pi"
+  install_bin="${dir}/dest/rpi"
   claude_settings="${dir}/home/.claude/settings.json"
   gemini_settings="${dir}/home/.gemini/settings.json"
   mkdir -p "$(dirname "$claude_settings")" "$(dirname "$gemini_settings")"
@@ -1980,14 +1965,14 @@ main() {
   run_test test_missing_option_value_when_next_arg_is_flag_fails
   run_test test_custom_artifact_download_failure_does_not_source_fallback_without_version
   run_test test_offline_tarball_mode_installs_local_artifact
+  run_test test_offline_tarball_rejects_legacy_pi_binary
   run_test test_offline_mode_blocks_network_artifact_urls
   run_test test_offline_relative_tarball_path_is_accepted
   run_test test_proxy_args_are_applied_to_curl_downloads
   run_test test_linux_target_uses_supported_linux_artifact_naming
   run_test test_rosetta_prefers_arm64_artifact_naming
   run_test test_wsl_detection_warning_is_emitted
-  run_test test_installer_creates_rpi_alias_when_available
-  run_test test_installer_skips_rpi_alias_when_existing_command_present
+  run_test test_installer_installs_only_rpi_without_touching_pi
   run_test test_legacy_agent_settings_cleanup_is_safe_and_idempotent
   run_test test_legacy_cleanup_skips_unexpected_settings_paths
   run_test test_agent_skills_install_by_default
@@ -1997,7 +1982,7 @@ main() {
   run_test test_skill_copy_failure_preserves_existing_managed_skills
   run_test test_skill_custom_plus_copy_failure_reports_partial
   run_test test_uninstall_removes_only_installer_managed_skills
-  run_test test_uninstall_removes_recorded_rpi_alias
+  run_test test_uninstall_removes_recorded_rpi_binary
   run_test test_uninstall_cleans_legacy_agent_settings_hooks
   run_test test_uninstall_uses_recorded_skill_paths
   run_test test_uninstall_skips_unexpected_skill_paths

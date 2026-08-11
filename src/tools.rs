@@ -2210,7 +2210,7 @@ fn cache_dependencies_for_scoped_scan(
     mode: ToolCacheFingerprintMode,
     recursive_access: Option<RecursiveScanAccess>,
 ) -> Option<Vec<ToolCacheDependency>> {
-    let io_path = root.io_path();
+    let io_path = root.io_path().ok()?;
     let fingerprint = match mode {
         ToolCacheFingerprintMode::FileContent => fingerprint_file_content(&io_path)?,
         ToolCacheFingerprintMode::DirectoryImmediate => fingerprint_directory_immediate(&io_path)?,
@@ -2221,7 +2221,7 @@ fn cache_dependencies_for_scoped_scan(
         fingerprint,
     }];
     if let Some(access) = recursive_access {
-        let cwd_io_path = cwd_root.io_path();
+        let cwd_io_path = cwd_root.io_path().ok()?;
         let mut controls = ignore_control_cache_dependencies(&io_path, &cwd_io_path, access)?;
         for control in &mut controls {
             if let Ok(relative) = control.path.strip_prefix(&io_path) {
@@ -2361,7 +2361,7 @@ fn read_open_file_capped_at(file: &std::fs::File, max_bytes: u64) -> std::io::Re
         .unwrap_or(0)
         .min(read_limit);
     let mut contents = Vec::with_capacity(initial_capacity);
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     let mut offset = 0_u64;
 
     while contents.len() < read_limit {
@@ -2369,7 +2369,7 @@ fn read_open_file_capped_at(file: &std::fs::File, max_bytes: u64) -> std::io::Re
         let chunk_len = remaining.min(buffer.len());
         let read = loop {
             match positioned_file_read(file, &mut buffer[..chunk_len], offset) {
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 result => break result?,
             }
         };
@@ -2774,42 +2774,105 @@ impl ScopedScanRoot {
     }
 
     #[cfg(unix)]
-    fn io_path(&self) -> PathBuf {
-        use std::os::fd::AsRawFd as _;
+    fn io_path(&self) -> std::io::Result<PathBuf> {
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
 
-        let descriptor = self.handle.as_raw_fd();
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let prefix = "/proc/self/fd";
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let prefix = "/dev/fd";
-        PathBuf::from(prefix).join(descriptor.to_string()).join(".")
+            // Apple 不允许通过 `/dev/fd/<dirfd>` 遍历目录。F_GETPATH 会返回
+            // 已打开对象在 rename 后的当前路径,再用 descriptor identity 拒绝替换路径。
+            let path = rustix::fs::getpath(&self.handle).map_err(std::io::Error::from)?;
+            let path = PathBuf::from(OsString::from_vec(path.into_bytes()));
+            let path_metadata = std::fs::metadata(&path)?;
+            let handle_metadata = self.handle.metadata()?;
+            if !opened_file_matches_metadata_snapshot(&handle_metadata, &path_metadata)
+                || path_metadata.is_dir() != handle_metadata.is_dir()
+                || path_metadata.is_file() != handle_metadata.is_file()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "scan root path no longer identifies its pinned descriptor",
+                ));
+            }
+            Ok(path)
+        }
+
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            use std::os::fd::AsRawFd as _;
+
+            let descriptor = self.handle.as_raw_fd();
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let prefix = "/proc/self/fd";
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let prefix = "/dev/fd";
+            Ok(PathBuf::from(prefix).join(descriptor.to_string()).join("."))
+        }
     }
 
     #[cfg(windows)]
-    fn io_path(&self) -> PathBuf {
-        self.logical_path.clone()
+    fn io_path(&self) -> std::io::Result<PathBuf> {
+        Ok(self.logical_path.clone())
     }
 
-    #[cfg(unix)]
-    fn child_operand(&self) -> PathBuf {
-        PathBuf::from(".")
+    #[cfg(all(unix, target_vendor = "apple"))]
+    fn child_operand(&self, cwd_root: &Self) -> std::io::Result<PathBuf> {
+        let root = self.io_path()?;
+        let cwd = cwd_root.io_path()?;
+        let relative = root.strip_prefix(&cwd).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "pinned scan root moved outside the pinned working directory",
+            )
+        })?;
+        Ok(if relative.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            relative.to_path_buf()
+        })
+    }
+
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    fn child_operand(&self, _cwd_root: &Self) -> std::io::Result<PathBuf> {
+        Ok(PathBuf::from("."))
     }
 
     #[cfg(windows)]
-    fn child_operand(&self) -> PathBuf {
-        PathBuf::from(".")
+    fn child_operand(&self, _cwd_root: &Self) -> std::io::Result<PathBuf> {
+        Ok(PathBuf::from("."))
+    }
+
+    #[cfg_attr(target_vendor = "apple", allow(clippy::unused_self))]
+    fn scanner_cwd(&self, cwd_root: &Self) -> std::io::Result<PathBuf> {
+        #[cfg(target_vendor = "apple")]
+        {
+            cwd_root.io_path()
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = cwd_root;
+            self.io_path()
+        }
     }
 
     /// Path by which a child can access this root after its handle is installed
     /// as stdin. Scanner children run with their pinned scan root as cwd, so
     /// stdin remains available for the independently pinned workspace root.
     #[cfg(unix)]
+    #[cfg_attr(target_vendor = "apple", allow(clippy::unused_self))]
     fn inherited_child_operand(&self) -> PathBuf {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        let path = "/proc/self/fd/0";
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let path = "/dev/fd/0";
-        PathBuf::from(path).join(".")
+        #[cfg(target_vendor = "apple")]
+        {
+            PathBuf::from(".")
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let path = "/proc/self/fd/0";
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let path = "/dev/fd/0";
+            PathBuf::from(path).join(".")
+        }
     }
 
     #[cfg(windows)]
@@ -2827,11 +2890,16 @@ impl ScopedScanRoot {
         Ok(Stdio::null())
     }
 
-    fn map_child_output(&self, child_path: &Path) -> std::io::Result<ScopedScanOutputPath> {
+    fn map_child_output(
+        &self,
+        child_path: &Path,
+        child_root_operand: &Path,
+    ) -> std::io::Result<ScopedScanOutputPath> {
         #[cfg(unix)]
         let relative = if child_path.is_absolute() {
+            let io_path = self.io_path()?;
             child_path
-                .strip_prefix(self.io_path())
+                .strip_prefix(io_path)
                 .or_else(|_| child_path.strip_prefix(&self.logical_path))
                 .map_err(|_| {
                     std::io::Error::new(
@@ -2841,7 +2909,10 @@ impl ScopedScanRoot {
                 })?
                 .to_path_buf()
         } else {
-            child_path.to_path_buf()
+            child_path
+                .strip_prefix(child_root_operand)
+                .unwrap_or(child_path)
+                .to_path_buf()
         };
 
         #[cfg(windows)]
@@ -2860,9 +2931,24 @@ impl ScopedScanRoot {
         };
 
         let relative = normalize_scanner_relative_path(&relative)?;
+        #[cfg(unix)]
+        let root_is_file = self.handle.metadata()?.is_file();
+        #[cfg(windows)]
+        let root_is_file = std::fs::metadata(&self.logical_path)?.is_file();
+        let read_root = self.io_path()?;
+        let read_path = if root_is_file && relative.as_os_str().is_empty() {
+            read_root
+        } else {
+            read_root.join(&relative)
+        };
+        let logical_path = if root_is_file && relative.as_os_str().is_empty() {
+            self.logical_path.clone()
+        } else {
+            self.logical_path.join(&relative)
+        };
         Ok(ScopedScanOutputPath {
-            read_path: self.io_path().join(&relative),
-            logical_path: self.logical_path.join(&relative),
+            read_path,
+            logical_path,
             relative,
         })
     }
@@ -3938,15 +4024,15 @@ fn enforce_read_scope(path: &Path, cwd: &Path) -> Result<PathBuf> {
 /// string) silently degrade to an empty list so the read tool keeps its
 /// baseline cwd+agent_dir behavior.
 fn load_read_scope_allowlist() -> Vec<PathBuf> {
-    if let Ok(raw) = std::env::var("PI_READ_SCOPE_ALLOWLIST") {
-        if !raw.trim().is_empty() {
-            return raw
-                .split(':')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .collect();
-        }
+    if let Ok(raw) = std::env::var("PI_READ_SCOPE_ALLOWLIST")
+        && !raw.trim().is_empty()
+    {
+        return raw
+            .split(':')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
     }
     match crate::config::Config::load() {
         Ok(config) => config
@@ -4258,7 +4344,7 @@ where
             use std::os::unix::fs::PermissionsExt as _;
 
             // rustix st_mode is u16; std::fs::Permissions::from_mode needs u32.
-            std::fs::Permissions::from_mode(mode as u32)
+            std::fs::Permissions::from_mode(u32::from(mode))
         });
 
         // The pathname stored by `NamedTempFile` is not descriptor-relative.
@@ -4355,11 +4441,10 @@ where
                 let source_file = std::fs::File::from(source_descriptor);
                 let source_metadata = source_file.metadata()?;
                 if !source_metadata.is_file()
-                    // rustix st_dev/st_ino is i32 on this toolchain; std Metadata
-                    // returns u64. Cast at the comparison site to keep the
-                    // captured target identity tuple unchanged.
-                    || source_metadata.dev() != expected_dev as u64
-                    || source_metadata.ino() != expected_ino as u64
+                    // 设备号在当前 rustix 目标上带符号。转换失败时必须视为
+                    // identity 不匹配,不能让负值通过无符号 cast 绕过检查。
+                    || u64::try_from(expected_dev) != Ok(source_metadata.dev())
+                    || source_metadata.ino() != expected_ino
                 {
                     return Err(std::io::Error::other(
                         "file changed since it was read; re-read it and retry the edit",
@@ -7467,7 +7552,7 @@ fn process_rg_json_match_line(
 
 fn process_rg_json_match_line_with_filter(
     line_res: std::io::Result<String>,
-    scoped_root: Option<&ScopedScanRoot>,
+    scoped_scan: Option<(&ScopedScanRoot, &Path)>,
     glob_override: Option<&ignore::overrides::Override>,
     matches: &mut Vec<(PathBuf, usize)>,
     match_count: &mut usize,
@@ -7509,16 +7594,20 @@ fn process_rg_json_match_line_with_filter(
     }
 
     let file_path = path_from_rg_json(&event)?;
-    if let (Some(scoped_root), Some(glob_override)) = (scoped_root, glob_override) {
-        let mapped = scoped_root.map_child_output(&file_path).map_err(|error| {
-            Error::tool(
-                "grep",
-                format!(
-                    "ripgrep returned an invalid path: {}",
-                    error_for_line_output(&error)
-                ),
-            )
-        })?;
+    if let (Some((scoped_root, child_root_operand)), Some(glob_override)) =
+        (scoped_scan, glob_override)
+    {
+        let mapped = scoped_root
+            .map_child_output(&file_path, child_root_operand)
+            .map_err(|error| {
+                Error::tool(
+                    "grep",
+                    format!(
+                        "ripgrep returned an invalid path: {}",
+                        error_for_line_output(&error)
+                    ),
+                )
+            })?;
         if glob_override
             .matched(&mapped.logical_path, false)
             .is_ignore()
@@ -7543,7 +7632,7 @@ fn process_rg_json_match_line_with_filter(
 
 fn drain_rg_stdout(
     stdout_rx: &std::sync::mpsc::Receiver<std::io::Result<String>>,
-    scoped_root: &ScopedScanRoot,
+    scoped_scan: (&ScopedScanRoot, &Path),
     glob_override: Option<&ignore::overrides::Override>,
     matches: &mut Vec<(PathBuf, usize)>,
     match_count: &mut usize,
@@ -7553,7 +7642,7 @@ fn drain_rg_stdout(
     while let Ok(line_res) = stdout_rx.try_recv() {
         process_rg_json_match_line_with_filter(
             line_res,
-            Some(scoped_root),
+            Some(scoped_scan),
             glob_override,
             matches,
             match_count,
@@ -7715,8 +7804,6 @@ impl Tool for GrepTool {
                     ),
                 )
             })?;
-        let operation_cwd = cwd_scope.io_path();
-
         let search_dir = input.path.as_deref().unwrap_or(".");
         let lexical_search_path = resolve_read_path(search_dir, &self.cwd);
         let search_path = enforce_cwd_scope(&lexical_search_path, &self.cwd, "grep")?;
@@ -7781,7 +7868,15 @@ impl Tool for GrepTool {
                     ),
                 )
             })?;
-        let scan_io_path = scoped_root.io_path();
+        let operation_cwd = cwd_scope.io_path().map_err(|err| {
+            Error::tool(
+                "grep",
+                format!("Cannot resolve pinned working directory: {err}"),
+            )
+        })?;
+        let scan_io_path = scoped_root.io_path().map_err(|err| {
+            Error::tool("grep", format!("Cannot resolve pinned scan root: {err}"))
+        })?;
         if is_directory {
             ensure_recursive_scan_access(
                 &scan_io_path,
@@ -7854,6 +7949,9 @@ impl Tool for GrepTool {
         // slash-containing semantics.
         let glob_override =
             build_grep_glob_override(cwd_scope.logical_path(), input.glob.as_deref())?;
+        let scan_operand = scoped_root.child_operand(&cwd_scope).map_err(|err| {
+            Error::tool("grep", format!("Cannot resolve pinned scan operand: {err}"))
+        })?;
 
         // Mirror find-tool behavior: explicitly pass root/nested .gitignore files
         // so ignore rules apply consistently even outside a git worktree.
@@ -7874,7 +7972,7 @@ impl Tool for GrepTool {
                         .into_os_string(),
                 );
             }
-            let root_gitignore = scoped_root.child_operand().join(".gitignore");
+            let root_gitignore = scan_operand.join(".gitignore");
             if scoped_root.logical_path() != cwd_scope.logical_path()
                 && scan_io_path.join(".gitignore").exists()
             {
@@ -7885,7 +7983,7 @@ impl Tool for GrepTool {
 
         args.push(OsString::from("--"));
         args.push(OsString::from(&input.pattern));
-        args.push(scoped_root.child_operand().into_os_string());
+        args.push(scan_operand.clone().into_os_string());
 
         let rg_cmd = find_rg_binary().ok_or_else(|| {
             Error::tool(
@@ -7894,7 +7992,10 @@ impl Tool for GrepTool {
             )
         })?;
 
-        let mut child = command_with_default_sigpipe_in_dir(rg_cmd, &scan_io_path)
+        let scanner_cwd = scoped_root.scanner_cwd(&cwd_scope).map_err(|err| {
+            Error::tool("grep", format!("Cannot resolve pinned scanner cwd: {err}"))
+        })?;
+        let mut child = command_with_default_sigpipe_in_dir(rg_cmd, &scanner_cwd)
             .map_err(|e| {
                 Error::tool(
                     "grep",
@@ -7902,7 +8003,7 @@ impl Tool for GrepTool {
                 )
             })?
             .args(args)
-            .current_dir(&scan_io_path)
+            .current_dir(&scanner_cwd)
             .stdin(cwd_scope.child_stdin().map_err(|error| {
                 Error::tool(
                     "grep",
@@ -7969,7 +8070,7 @@ impl Tool for GrepTool {
 
             drain_rg_stdout(
                 &stdout_rx,
-                &scoped_root,
+                (&scoped_root, &scan_operand),
                 glob_override.as_ref(),
                 &mut matches,
                 &mut match_count,
@@ -7994,7 +8095,7 @@ impl Tool for GrepTool {
 
         drain_rg_stdout(
             &stdout_rx,
-            &scoped_root,
+            (&scoped_root, &scan_operand),
             glob_override.as_ref(),
             &mut matches,
             &mut match_count,
@@ -8024,7 +8125,7 @@ impl Tool for GrepTool {
             } else {
                 drain_rg_stdout(
                     &stdout_rx,
-                    &scoped_root,
+                    (&scoped_root, &scan_operand),
                     glob_override.as_ref(),
                     &mut matches,
                     &mut match_count,
@@ -8057,7 +8158,7 @@ impl Tool for GrepTool {
         } else {
             drain_rg_stdout(
                 &stdout_rx,
-                &scoped_root,
+                (&scoped_root, &scan_operand),
                 glob_override.as_ref(),
                 &mut matches,
                 &mut match_count,
@@ -8113,15 +8214,17 @@ impl Tool for GrepTool {
         let mut matches_by_file: HashMap<PathBuf, Vec<usize>> = HashMap::new();
         let mut logical_paths_by_file: HashMap<PathBuf, PathBuf> = HashMap::new();
         for (child_path, line_number) in &matches {
-            let mapped = scoped_root.map_child_output(child_path).map_err(|error| {
-                Error::tool(
-                    "grep",
-                    format!(
-                        "ripgrep returned an invalid path: {}",
-                        error_for_line_output(&error)
-                    ),
-                )
-            })?;
+            let mapped = scoped_root
+                .map_child_output(child_path, &scan_operand)
+                .map_err(|error| {
+                    Error::tool(
+                        "grep",
+                        format!(
+                            "ripgrep returned an invalid path: {}",
+                            error_for_line_output(&error)
+                        ),
+                    )
+                })?;
             if !matches_by_file.contains_key(&mapped.read_path) {
                 file_order.push(mapped.read_path.clone());
                 logical_paths_by_file.insert(mapped.read_path.clone(), mapped.logical_path.clone());
@@ -8131,6 +8234,9 @@ impl Tool for GrepTool {
                 .or_default()
                 .push(*line_number);
         }
+        let context_read_root = scoped_root.io_path().map_err(|err| {
+            Error::tool("grep", format!("Cannot resolve pinned context root: {err}"))
+        })?;
 
         for file_path in file_order {
             let Some(mut match_lines) = matches_by_file.remove(&file_path) else {
@@ -8140,7 +8246,7 @@ impl Tool for GrepTool {
                 .remove(&file_path)
                 .ok_or_else(|| Error::tool("grep", "missing logical scanner result path"))?;
             let relative_path = format_grep_path(&logical_path, cwd_scope.logical_path());
-            let lines = get_file_lines_async(&file_path, &operation_cwd).await;
+            let lines = get_file_lines_async(&file_path, &context_read_root).await;
 
             if lines.is_empty() {
                 if let Some(first_match) = match_lines.first() {
@@ -8401,8 +8507,6 @@ impl Tool for FindTool {
                     ),
                 )
             })?;
-        let operation_cwd = cwd_scope.io_path();
-
         let search_dir = input.path.as_deref().unwrap_or(".");
         let lexical_search_path = resolve_read_path(search_dir, &self.cwd);
         let search_path = enforce_cwd_scope(&lexical_search_path, &self.cwd, "find")?;
@@ -8480,7 +8584,15 @@ impl Tool for FindTool {
                     ),
                 )
             })?;
-        let scan_io_path = scoped_root.io_path();
+        let operation_cwd = cwd_scope.io_path().map_err(|err| {
+            Error::tool(
+                "find",
+                format!("Cannot resolve pinned working directory: {err}"),
+            )
+        })?;
+        let scan_io_path = scoped_root.io_path().map_err(|err| {
+            Error::tool("find", format!("Cannot resolve pinned scan root: {err}"))
+        })?;
         ensure_recursive_scan_access(
             &scan_io_path,
             &operation_cwd,
@@ -8540,6 +8652,15 @@ impl Tool for FindTool {
             OsString::from("--max-results"),
             OsString::from(scan_limit.to_string()),
         ];
+        let fd_pattern = if input.pattern.contains('/') && !input.pattern.starts_with("**/") {
+            args.push(OsString::from("--full-path"));
+            format!("**/{}", input.pattern)
+        } else {
+            input.pattern.clone()
+        };
+        let scan_operand = scoped_root.child_operand(&cwd_scope).map_err(|err| {
+            Error::tool("find", format!("Cannot resolve pinned scan operand: {err}"))
+        })?;
 
         // NOTE: We rely on fd's native .gitignore discovery. We only explicitly pass
         // the root .gitignore if it exists, to ensure it's respected even if the
@@ -8555,7 +8676,7 @@ impl Tool for FindTool {
                     .into_os_string(),
             );
         }
-        let root_gitignore = scoped_root.child_operand().join(".gitignore");
+        let root_gitignore = scan_operand.join(".gitignore");
         if scoped_root.logical_path() != cwd_scope.logical_path()
             && scan_io_path.join(".gitignore").exists()
         {
@@ -8564,10 +8685,13 @@ impl Tool for FindTool {
         }
 
         args.push(OsString::from("--"));
-        args.push(OsString::from(&input.pattern));
-        args.push(scoped_root.child_operand().into_os_string());
+        args.push(OsString::from(fd_pattern));
+        args.push(scan_operand.clone().into_os_string());
 
-        let mut child = command_with_default_sigpipe_in_dir(fd_cmd, &scan_io_path)
+        let scanner_cwd = scoped_root.scanner_cwd(&cwd_scope).map_err(|err| {
+            Error::tool("find", format!("Cannot resolve pinned scanner cwd: {err}"))
+        })?;
+        let mut child = command_with_default_sigpipe_in_dir(fd_cmd, &scanner_cwd)
             .map_err(|e| {
                 Error::tool(
                     "find",
@@ -8575,7 +8699,7 @@ impl Tool for FindTool {
                 )
             })?
             .args(args)
-            .current_dir(&scan_io_path)
+            .current_dir(&scanner_cwd)
             .stdin(cwd_scope.child_stdin().map_err(|error| {
                 Error::tool(
                     "find",
@@ -8739,15 +8863,17 @@ impl Tool for FindTool {
             #[cfg(not(unix))]
             let raw_path = PathBuf::from(String::from_utf8_lossy(raw_entry).into_owned());
 
-            let mapped = scoped_root.map_child_output(&raw_path).map_err(|error| {
-                Error::tool(
-                    "find",
-                    format!(
-                        "fd returned an invalid path: {}",
-                        error_for_line_output(&error)
-                    ),
-                )
-            })?;
+            let mapped = scoped_root
+                .map_child_output(&raw_path, &scan_operand)
+                .map_err(|error| {
+                    Error::tool(
+                        "find",
+                        format!(
+                            "fd returned an invalid path: {}",
+                            error_for_line_output(&error)
+                        ),
+                    )
+                })?;
             let rel = mapped.relative;
             let full_path = mapped.read_path;
             // fd was invoked with --no-follow. Inspect the directory entry
@@ -9064,7 +9190,9 @@ impl Tool for LsTool {
                     ),
                 )
             })?;
-        let listing_path = scoped_root.io_path();
+        let listing_path = scoped_root.io_path().map_err(|err| {
+            Error::tool("ls", format!("Cannot resolve pinned listing root: {err}"))
+        })?;
 
         let cache_key = tool_cache_key("ls", &self.cwd, &input_value);
         let cache_mode = ToolCacheFingerprintMode::DirectoryImmediate;
@@ -12070,6 +12198,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[allow(clippy::too_many_lines)]
     async fn assert_scoped_scan_roots_survive_after_open_replacement(tmp: &Path) {
         use std::os::unix::fs::symlink;
 

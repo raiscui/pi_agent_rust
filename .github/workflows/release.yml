@@ -655,7 +655,7 @@ jobs:
           key: release-${{ needs.plan.outputs.commit }}-${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked --bin pi --target "${{ matrix.target }}"
+        run: cargo build --release --locked --bin rpi --target "${{ matrix.target }}"
 
       - name: Execute native release binary smoke test
         env:
@@ -666,9 +666,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$RELEASE_RUNNER_OS" = "Windows" ]; then
-            binary="target/${RELEASE_TARGET}/release/pi.exe"
+            binary="target/${RELEASE_TARGET}/release/rpi.exe"
           else
-            binary="target/${RELEASE_TARGET}/release/pi"
+            binary="target/${RELEASE_TARGET}/release/rpi"
           fi
           output="$("$binary" --version)"
           if command -v python3 >/dev/null 2>&1; then
@@ -792,7 +792,7 @@ jobs:
           STAGE_NAME="pi-${{ needs.plan.outputs.version }}-${{ matrix.target }}"
           STAGE_DIR="${RUNNER_TEMP}/${STAGE_NAME}"
           mkdir "$STAGE_DIR"
-          cp "target/${{ matrix.target }}/release/pi" "$STAGE_DIR/"
+          cp "target/${{ matrix.target }}/release/rpi" "$STAGE_DIR/"
           cp LICENSE README.md "$STAGE_DIR/"
 
           tar -C "$RUNNER_TEMP" -cJf "dist/${{ matrix.asset }}.tar.xz" "$STAGE_NAME"
@@ -807,7 +807,7 @@ jobs:
           $stageName = "pi-${{ needs.plan.outputs.version }}-${{ matrix.target }}"
           $stageDir = Join-Path $env:RUNNER_TEMP $stageName
           New-Item -ItemType Directory -Path $stageDir
-          Copy-Item "target/${{ matrix.target }}/release/pi.exe" "$stageDir/"
+          Copy-Item "target/${{ matrix.target }}/release/rpi.exe" "$stageDir/"
           Copy-Item "LICENSE" "$stageDir/"
           Copy-Item "README.md" "$stageDir/"
 

@@ -1882,7 +1882,7 @@ jobs:
               TEST_LOG_JSONL_PATH="$SHARD_ARTIFACT_DIR/test-log.jsonl" \
               TEST_ARTIFACT_INDEX_PATH="$SHARD_ARTIFACT_DIR/artifact-index.jsonl" \
               RUST_LOG=info \
-              cargo build --locked --bin pi
+              cargo build --locked --bin rpi
               TEST_LOG_JSONL_PATH="$SHARD_ARTIFACT_DIR/test-log.jsonl" \
               TEST_ARTIFACT_INDEX_PATH="$SHARD_ARTIFACT_DIR/artifact-index.jsonl" \
               RUST_LOG=info \

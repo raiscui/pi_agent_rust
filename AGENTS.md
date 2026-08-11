@@ -66,6 +66,9 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | File | Purpose | Read When |
 |------|---------|-----------|
 | `EXPERIENCE.md` | Project-specific lessons learned from verified fixes and workflow incidents. | Before changing terminal/TUI behavior, config defaults, cleanup paths, context-file writing rules, or provider/model profile schemas. |
+| `CONTEXT.md` | Pi Agent Rust 的产品名、CLI 命令和 library crate 术语边界。 | Before changing executable naming, installation behavior, release artifacts, or user command documentation. |
+| `docs/adr/0001-rpi-cli-binary.md` | `rpi` 是唯一 shipping CLI 的决策记录。 | Before changing Cargo binary targets, installer naming, release artifact names, or binary command examples. |
+| `docs/solutions/security-issues/macos-system-alias-source-binding.md` | macOS `/var`、`/tmp` 系统 alias 的最窄 source-binding 放行规则。 | Before changing semantic graph 的 repository path canonicalization 或 symlink trust boundary. |
 | `archive/manifests/ARCHIVE_MANIFEST__2026-06-19__continuous-learning.md` | 2026-06-19 持续学习归档清单 + 六文件摘要 (默认主线 + 6 个支线组)。 | When reviewing the minicpm5_* / rdog-control-bash / git_commit 收尾 trail, or before declaring "this is the first time we saw X". |
 | `archive/branch_contexts/<topic>/` | 未轮转旧支线归档, 包含 `task_plan__<topic>.md` 等。 | When files named `__<topic>` appear in the project but default `task_plan.md` doesn't reference them. |
 | `archive/default_history/` | 默认主线六文件的历史版本 (e.g. `task_plan_2026-06-10_163200.md`)。 | When you need to backtrack default-main history before a specific checkpoint. |

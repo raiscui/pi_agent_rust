@@ -23,7 +23,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_pi"))
+    PathBuf::from(env!("CARGO_BIN_EXE_rpi"))
 }
 
 fn test_workspace(name: &str) -> TestResult<PathBuf> {

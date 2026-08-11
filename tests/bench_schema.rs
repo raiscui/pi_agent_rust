@@ -130,7 +130,7 @@ const PERF_CLAIM_READINESS_BLOCKER_CODES: &[&str] = &[
     "strict_mode_disabled",
 ];
 const PERF_BUDGET_V0_2_0_INVENTORY_SHA256: &str =
-    "96e3147ef23e1c634d56265581975a2b619ac9a701f4839ef6f3f4b3987226ad";
+    "ba299455435c1d5e950bf44586b72af44597529f896d854e15365060eedf524c";
 
 /// Known JSONL schemas with version and description.
 const SCHEMAS: &[(&str, &str)] = &[
@@ -788,7 +788,7 @@ fn install_fake_orchestrate_staging_artifacts(target_dir: &Path) {
         r#"{"schema":"pi.semantic_context.performance_budget.v1"}"#,
     );
 
-    let release_pi = target_dir.join("release/pi");
+    let release_pi = target_dir.join("release/rpi");
     fs::create_dir_all(release_pi.parent().expect("release path has parent"))
         .expect("create fake release parent");
     write_executable(&release_pi, "#!/usr/bin/env sh\nexit 0\n");
@@ -7731,7 +7731,7 @@ fn generate_schema_doc() {
 
     md.push_str("### `pi.perf.budget_summary.v2`\n\n");
     md.push_str(
-        "Each `budgets` entry requires `name`, `category`, `metric`, `unit`, `threshold`, `comparison`, `ci_enforced`, and `methodology`. `comparison` is the exact enum `maximum` (`actual <= threshold`) or `minimum` (`actual >= threshold`); consumers must never infer direction from a budget name. Blanket performance claims are authorized only when strict, source-bound, same-run evidence gives every declared budget data and PASS status with zero data-contract failures; aggregate `budget_data_missing` and `budget_failed` blockers prevent non-CI results from escaping that rule. Incomplete lineage produces a canonical all-`NO_DATA` blocked sentinel without inspecting ambient artifacts, target paths, or mtimes. Inventory SHA-256 uses compact JSON in producer declaration order and the listed field order, with every threshold rendered using exactly six decimal places. The canonical v0.2.0 digest is `96e3147ef23e1c634d56265581975a2b619ac9a701f4839ef6f3f4b3987226ad`.\n\n",
+        "Each `budgets` entry requires `name`, `category`, `metric`, `unit`, `threshold`, `comparison`, `ci_enforced`, and `methodology`. `comparison` is the exact enum `maximum` (`actual <= threshold`) or `minimum` (`actual >= threshold`); consumers must never infer direction from a budget name. Blanket performance claims are authorized only when strict, source-bound, same-run evidence gives every declared budget data and PASS status with zero data-contract failures; aggregate `budget_data_missing` and `budget_failed` blockers prevent non-CI results from escaping that rule. Incomplete lineage produces a canonical all-`NO_DATA` blocked sentinel without inspecting ambient artifacts, target paths, or mtimes. Inventory SHA-256 uses compact JSON in producer declaration order and the listed field order, with every threshold rendered using exactly six decimal places. The canonical v0.2.0 digest is `ba299455435c1d5e950bf44586b72af44597529f896d854e15365060eedf524c`.\n\n",
     );
 
     let protocol_contract = canonical_protocol_contract();

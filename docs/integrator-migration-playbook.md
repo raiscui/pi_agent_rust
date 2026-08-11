@@ -29,7 +29,7 @@ If `docs/evidence/dropin-certification-verdict.json` is missing or not `overall_
 
 A migration is complete only when all are true:
 
-1. Rust Pi is installed and callable through the intended command (`pi` or `pi-rust`).
+1. Rust Pi is installed and callable as `rpi`.
 2. Required execution surfaces pass validation (interactive, print, JSON mode, RPC, SDK where used).
 3. Provider/auth/config behavior matches your production expectations.
 4. Evidence artifacts are stored so another engineer can reproduce the same result.
@@ -62,21 +62,15 @@ Session storage expectations:
 
 ## Phase 1: Install and Command Strategy
 
-Use one of these rollout options:
-
-1. Canonical replacement (preferred): Rust Pi becomes `pi`, legacy preserved as `legacy-pi`.
-2. Side-by-side canary: keep TypeScript `pi`, install Rust as `pi-rust`.
+Rust Pi is installed as `rpi`. Existing TypeScript `pi` installations remain
+available under their original command name.
 
 Verification commands:
 
 ```bash
-command -v pi
-pi --version
-pi --help >/dev/null
-
-# If side-by-side migration is used
-command -v legacy-pi || true
-command -v pi-rust || true
+command -v rpi
+rpi --version
+rpi --help >/dev/null
 ```
 
 ## Phase 2: Configuration and Credential Migration
@@ -214,7 +208,7 @@ Recommended gate policy:
 
 If compatibility fails in canary or production:
 
-1. Switch command aliasing back to legacy (`legacy-pi` or TypeScript `pi`).
+1. Stop invoking `rpi` and continue using the existing TypeScript `pi` command.
 2. Restore prior config snapshot.
 3. Record failing command/event transcript.
 4. Map failure to a parity gap entry (or create one) before retrying migration.

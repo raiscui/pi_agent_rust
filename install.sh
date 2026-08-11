@@ -8,8 +8,7 @@
 # Highlights:
 # - Installs latest (or requested) GitHub release binary for your platform
 # - Verifies artifact checksum via SHA256SUMS
-# - Detects existing TypeScript pi and can migrate to Rust canonical `pi`
-# - Creates `legacy-pi` alias for the preserved TypeScript CLI when migrated
+# - Installs the Rust CLI as `rpi`, without taking over an existing `pi`
 # - Writes installer state for idempotent re-runs and clean uninstall
 
 set -euo pipefail
@@ -22,7 +21,6 @@ VERSION="${VERSION:-}"
 
 DEST_DEFAULT="$HOME/.local/bin"
 DEST="$DEST_DEFAULT"
-DEST_EXPLICIT=0
 SYSTEM=0
 
 EASY=0
@@ -51,11 +49,6 @@ PROXY_ARGS=()
 PROXY_SOURCE=""
 WSL_DETECTED=0
 
-# ask|yes|no
-ADOPT_MODE="ask"
-LEGACY_ALIAS_NAME="${LEGACY_ALIAS_NAME:-legacy-pi}"
-COMPAT_ALIAS_NAME="${COMPAT_ALIAS_NAME:-rpi}"
-
 OS=""
 ARCH=""
 TARGET=""
@@ -64,21 +57,8 @@ ASSET_PLATFORM=""
 ASSET_NAME=""
 SHA_URL=""
 
-CURRENT_PI_PATH=""
-CURRENT_PI_VERSION=""
-TS_PI_DETECTED=0
-ADOPT_TS=0
-ADOPT_CANONICAL=0
-
-FINAL_BIN_NAME="pi"
+FINAL_BIN_NAME="rpi"
 INSTALL_BIN_PATH=""
-
-LEGACY_ALIAS_PATH=""
-LEGACY_TARGET_PATH=""
-LEGACY_MOVED_FROM=""
-LEGACY_MOVED_TO=""
-COMPAT_ALIAS_PATH=""
-COMPAT_ALIAS_STATUS="pending"
 
 PATH_MARKER="# pi-agent-rust installer PATH"
 PATH_UPDATED_FILES=""
@@ -96,8 +76,6 @@ STATE_VERSION="1"
 TMP=""
 LOCK_DIR="${PI_INSTALLER_LOCK_DIR:-/tmp/pi-agent-rust-install.lock.d}"
 LOCKED=0
-MIGRATION_MOVED=0
-INSTALL_COMMITTED=0
 INSTALL_SOURCE="release"
 CHECKSUM_STATUS="pending"
 SIGSTORE_STATUS="pending"
@@ -252,12 +230,6 @@ capture_version_line() {
   out="$(run_command_with_timeout_capture 2 "$bin_path" --version || true)"
   out="$(printf '%s\n' "$out" | head -1)"
   printf '%s\n' "$out"
-}
-
-is_managed_alias() {
-  local path="$1"
-  [ -f "$path" ] || return 1
-  grep -q "pi_agent_rust installer managed alias" "$path" 2>/dev/null
 }
 
 setup_proxy() {
@@ -657,16 +629,13 @@ Options:
                           a platform has no prebuilt binary (e.g. FreeBSD).
                           Compatible with --offline because no network is
                           needed once the source is on disk.
-  --verify               Run `pi --version` after install
+  --verify               Run `rpi --version` after install
   --no-verify            Skip checksum + signature verification
   --offline [TARBALL]    Offline mode; optional local artifact path
   --completions SHELL    Install shell completions for auto|off|bash|zsh|fish
   --no-completions       Skip shell completion installation
   --no-agent-skills      Skip installing AI agent skill files for Claude/Codex
   --yes, -y              Non-interactive yes to prompts
-  --adopt                Auto-adopt Rust as canonical `pi` when TS pi is detected
-  --keep-existing-pi     Do not replace existing `pi`; install as `pi-rust`
-  --legacy-alias NAME    Alias name for migrated TypeScript pi (default: legacy-pi)
   --force                Reinstall even if same version is already installed
   --quiet, -q            Suppress non-error output
   --no-gum               Disable gum formatting
@@ -692,13 +661,11 @@ while [ $# -gt 0 ]; do
         exit 1
       fi
       DEST="$2"
-      DEST_EXPLICIT=1
       shift 2
       ;;
     --system)
       SYSTEM=1
       DEST="/usr/local/bin"
-      DEST_EXPLICIT=1
       shift
       ;;
     --easy-mode)
@@ -792,23 +759,6 @@ while [ $# -gt 0 ]; do
     --yes|-y)
       YES=1
       shift
-      ;;
-    --adopt)
-      ADOPT_MODE="yes"
-      shift
-      ;;
-    --keep-existing-pi)
-      ADOPT_MODE="no"
-      shift
-      ;;
-    --legacy-alias)
-      if [ $# -lt 2 ] || [[ "$2" == -* ]]; then
-        err "Option --legacy-alias requires a value"
-        usage
-        exit 1
-      fi
-      LEGACY_ALIAS_NAME="$2"
-      shift 2
       ;;
     --force)
       FORCE_INSTALL=1
@@ -1338,13 +1288,6 @@ acquire_lock() {
 cleanup() {
   local exit_code=$?
 
-  if [ "$exit_code" -ne 0 ] && [ "$MIGRATION_MOVED" -eq 1 ] && [ "$INSTALL_COMMITTED" -eq 0 ]; then
-    if [ -n "$LEGACY_MOVED_FROM" ] && [ -n "$LEGACY_MOVED_TO" ] && [ -e "$LEGACY_MOVED_TO" ] && [ ! -e "$LEGACY_MOVED_FROM" ]; then
-      mv "$LEGACY_MOVED_TO" "$LEGACY_MOVED_FROM" 2>/dev/null || true
-      warn "Rolled back legacy pi preservation due to installer failure"
-    fi
-  fi
-
   if [ "$RETAIN_TEMP" -eq 1 ]; then
     if [ -n "$TMP" ] && [ -d "$TMP" ]; then
       warn "Retaining installer temporary directory: $TMP"
@@ -1371,137 +1314,6 @@ trap cleanup EXIT
 is_rust_pi_output() {
   local out="$1"
   [[ "$out" =~ ^pi[[:space:]][0-9]+\.[0-9]+\.[0-9]+[[:space:]]\( ]]
-}
-
-looks_like_node_script() {
-  local path="$1"
-  [ -f "$path" ] || return 1
-
-  if [[ "$path" == *.js ]] || [[ "$path" == *node_modules* ]]; then
-    return 0
-  fi
-
-  local head_line
-  head_line=$(head -n 1 "$path" 2>/dev/null || true)
-  if [[ "$head_line" == *node* ]]; then
-    return 0
-  fi
-
-  return 1
-}
-
-detect_existing_pi() {
-  CURRENT_PI_PATH=$(command -v pi 2>/dev/null || true)
-  CURRENT_PI_VERSION=""
-  TS_PI_DETECTED=0
-
-  if [ -z "$CURRENT_PI_PATH" ]; then
-    return 0
-  fi
-
-  CURRENT_PI_VERSION="$(capture_version_line "$CURRENT_PI_PATH")"
-
-  if is_rust_pi_output "$CURRENT_PI_VERSION"; then
-    TS_PI_DETECTED=0
-    return 0
-  fi
-
-  if looks_like_node_script "$CURRENT_PI_PATH"; then
-    TS_PI_DETECTED=1
-    return 0
-  fi
-
-  if command -v npm >/dev/null 2>&1; then
-    if npm list -g --depth=0 @mariozechner/pi-coding-agent >/dev/null 2>&1; then
-      TS_PI_DETECTED=1
-      return 0
-    fi
-  fi
-
-  if [ -n "$CURRENT_PI_VERSION" ] && ! is_rust_pi_output "$CURRENT_PI_VERSION"; then
-    TS_PI_DETECTED=1
-  fi
-}
-
-choose_adoption_mode() {
-  ADOPT_TS=0
-  ADOPT_CANONICAL=0
-  FINAL_BIN_NAME="pi"
-
-  if [ "$TS_PI_DETECTED" -eq 0 ]; then
-    return 0
-  fi
-
-  info "Detected existing non-Rust pi command at: $CURRENT_PI_PATH"
-  if [ -n "$CURRENT_PI_VERSION" ]; then
-    info "Existing pi reports: $CURRENT_PI_VERSION"
-  fi
-
-  local decision=""
-  case "$ADOPT_MODE" in
-    yes)
-      decision="yes"
-      ;;
-    no)
-      decision="no"
-      ;;
-    ask)
-      if prompt_confirm "Install Rust Pi as canonical 'pi' and preserve existing one as '${LEGACY_ALIAS_NAME}'?" 0; then
-        decision="yes"
-      else
-        decision="no"
-      fi
-      ;;
-    *)
-      decision="no"
-      ;;
-  esac
-
-  if [ "$decision" = "yes" ]; then
-    ADOPT_TS=1
-    ADOPT_CANONICAL=1
-  else
-    ADOPT_TS=0
-    ADOPT_CANONICAL=0
-    FINAL_BIN_NAME="pi-rust"
-    warn "Keeping existing pi untouched; Rust binary will be installed as ${FINAL_BIN_NAME}"
-  fi
-}
-
-choose_dest_for_adoption() {
-  if [ "$ADOPT_TS" -ne 1 ]; then
-    return 0
-  fi
-
-  local current_dir=""
-  if [ -n "$CURRENT_PI_PATH" ]; then
-    current_dir=$(dirname "$CURRENT_PI_PATH")
-  fi
-
-  if [ "$DEST_EXPLICIT" -eq 1 ]; then
-    if [ -n "$current_dir" ] && [ "$DEST" = "$current_dir" ]; then
-      ADOPT_CANONICAL=1
-    else
-      ADOPT_CANONICAL=0
-    fi
-    return 0
-  fi
-
-  if [ -z "$CURRENT_PI_PATH" ]; then
-    return 0
-  fi
-
-  if [ -w "$current_dir" ]; then
-    DEST="$current_dir"
-    ADOPT_CANONICAL=1
-    info "Using existing pi directory for canonical replacement: $DEST"
-    return 0
-  fi
-
-  ADOPT_CANONICAL=0
-  warn "Cannot write to existing pi directory: $current_dir"
-  warn "Will install to default destination: $DEST"
-  warn "Enable --easy-mode to prepend that path for future shells"
 }
 
 ensure_install_target() {
@@ -1687,9 +1499,9 @@ extract_release_artifact() {
       return 1
     fi
     local found_bin=""
-    found_bin="$(find "$extract_dir" -type f \( -name "pi${EXE_EXT}" -o -name "pi" -o -name "pi.exe" \) | head -1)"
+    found_bin="$(find "$extract_dir" -type f -name "rpi${EXE_EXT}" | head -1)"
     if [ -z "$found_bin" ]; then
-      warn "archive '$candidate' did not contain a pi binary"
+      warn "archive '$candidate' did not contain an rpi binary"
       return 1
     fi
     chmod +x "$found_bin" 2>/dev/null || true
@@ -1709,9 +1521,9 @@ extract_release_artifact() {
       return 1
     fi
     local found_bin=""
-    found_bin="$(find "$extract_dir" -type f \( -name "pi${EXE_EXT}" -o -name "pi" -o -name "pi.exe" \) | head -1)"
+    found_bin="$(find "$extract_dir" -type f -name "rpi${EXE_EXT}" | head -1)"
     if [ -z "$found_bin" ]; then
-      warn "archive '$candidate' did not contain a pi binary"
+      warn "archive '$candidate' did not contain an rpi binary"
       return 1
     fi
     chmod +x "$found_bin" 2>/dev/null || true
@@ -1731,9 +1543,9 @@ extract_release_artifact() {
       return 1
     fi
     local found_bin=""
-    found_bin="$(find "$extract_dir" -type f \( -name "pi${EXE_EXT}" -o -name "pi" -o -name "pi.exe" \) | head -1)"
+    found_bin="$(find "$extract_dir" -type f -name "rpi${EXE_EXT}" | head -1)"
     if [ -z "$found_bin" ]; then
-      warn "archive '$candidate' did not contain a pi binary"
+      warn "archive '$candidate' did not contain an rpi binary"
       return 1
     fi
     chmod +x "$found_bin" 2>/dev/null || true
@@ -1856,9 +1668,9 @@ build_from_source() {
     git clone --depth 1 --branch "$VERSION" "https://github.com/${OWNER}/${REPO}.git" "$src_dir" >&2
   fi
 
-  (cd "$src_dir" && cargo build --release --locked --bin pi >&2)
+  (cd "$src_dir" && cargo build --release --locked --bin rpi >&2)
 
-  local built_bin="$src_dir/target/release/pi${EXE_EXT}"
+  local built_bin="$src_dir/target/release/rpi${EXE_EXT}"
   if [ ! -x "$built_bin" ]; then
     err "Source build succeeded but binary was not found: $built_bin"
     return 1
@@ -1871,143 +1683,6 @@ install_binary_file() {
   local source_bin="$1"
   install -m 0755 "$source_bin" "$INSTALL_BIN_PATH"
   ok "Installed $FINAL_BIN_NAME to $INSTALL_BIN_PATH"
-}
-
-create_managed_alias_wrapper() {
-  local alias_path="$1"
-  local target_path="$2"
-  local label="$3"
-
-  if [ -z "$alias_path" ] || [ -z "$target_path" ] || [ -z "$label" ]; then
-    return 1
-  fi
-
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf '# pi_agent_rust installer managed alias\n'
-    printf 'set -euo pipefail\n'
-    printf 'exec %q "$@"\n' "$target_path"
-  } > "$alias_path"
-  chmod 0755 "$alias_path"
-  ok "Created ${label} alias: $alias_path"
-}
-
-choose_legacy_alias_path() {
-  local candidate="$DEST/$LEGACY_ALIAS_NAME"
-  if [ ! -e "$candidate" ]; then
-    LEGACY_ALIAS_PATH="$candidate"
-    return 0
-  fi
-
-  if grep -q "pi_agent_rust installer managed alias" "$candidate" 2>/dev/null; then
-    LEGACY_ALIAS_PATH="$candidate"
-    return 0
-  fi
-
-  local alt="$DEST/${LEGACY_ALIAS_NAME}-ts"
-  if [ ! -e "$alt" ]; then
-    warn "Existing $candidate is not installer-managed; using ${LEGACY_ALIAS_NAME}-ts instead"
-    LEGACY_ALIAS_PATH="$alt"
-    return 0
-  fi
-
-  local idx=1
-  while :; do
-    alt="$DEST/${LEGACY_ALIAS_NAME}-ts-${idx}"
-    if [ ! -e "$alt" ]; then
-      warn "Using alternate legacy alias: $(basename "$alt")"
-      LEGACY_ALIAS_PATH="$alt"
-      return 0
-    fi
-    idx=$((idx + 1))
-  done
-}
-
-create_legacy_alias_wrapper() {
-  local alias_path="$1"
-  local target_path="$2"
-
-  if [ -z "$alias_path" ] || [ -z "$target_path" ]; then
-    return 1
-  fi
-
-  create_managed_alias_wrapper "$alias_path" "$target_path" "legacy"
-}
-
-prepare_typescript_migration() {
-  MIGRATION_MOVED=0
-  LEGACY_ALIAS_PATH=""
-  LEGACY_TARGET_PATH=""
-  LEGACY_MOVED_FROM=""
-  LEGACY_MOVED_TO=""
-
-  if [ "$ADOPT_TS" -ne 1 ]; then
-    return 0
-  fi
-
-  choose_legacy_alias_path
-
-  if [ -z "$CURRENT_PI_PATH" ]; then
-    warn "No existing pi command path found; skipping legacy alias creation"
-    return 0
-  fi
-
-  local current_real="$CURRENT_PI_PATH"
-  if [ "$current_real" = "$INSTALL_BIN_PATH" ] && [ -e "$current_real" ]; then
-    local preserve_candidate="$DEST/.pi-legacy-typescript"
-    if [ -e "$preserve_candidate" ]; then
-      local stamp
-      stamp=$(date +%Y%m%d%H%M%S)
-      preserve_candidate="$DEST/.pi-legacy-typescript.${stamp}"
-    fi
-
-    mv "$current_real" "$preserve_candidate"
-    LEGACY_MOVED_FROM="$current_real"
-    LEGACY_MOVED_TO="$preserve_candidate"
-    LEGACY_TARGET_PATH="$preserve_candidate"
-    MIGRATION_MOVED=1
-    ok "Preserved existing pi binary at: $preserve_candidate"
-  else
-    LEGACY_TARGET_PATH="$current_real"
-    info "Existing pi remains at: $current_real"
-  fi
-
-  create_legacy_alias_wrapper "$LEGACY_ALIAS_PATH" "$LEGACY_TARGET_PATH"
-}
-
-ensure_compat_alias() {
-  COMPAT_ALIAS_PATH=""
-
-  if [ -n "$EXE_EXT" ]; then
-    COMPAT_ALIAS_STATUS="skipped (managed ${COMPAT_ALIAS_NAME} alias is unix-only)"
-    return 0
-  fi
-
-  if [ -z "$COMPAT_ALIAS_NAME" ] || [ "$COMPAT_ALIAS_NAME" = "$FINAL_BIN_NAME" ]; then
-    COMPAT_ALIAS_STATUS="skipped (no secondary alias requested)"
-    return 0
-  fi
-
-  local alias_path="$DEST/$COMPAT_ALIAS_NAME"
-  if [ -e "$alias_path" ] && ! is_managed_alias "$alias_path"; then
-    COMPAT_ALIAS_STATUS="skipped (existing non-managed ${COMPAT_ALIAS_NAME} at ${alias_path})"
-    warn "Existing ${COMPAT_ALIAS_NAME} at ${alias_path} is not installer-managed; leaving it untouched"
-    return 0
-  fi
-
-  if [ ! -e "$alias_path" ]; then
-    local existing_command=""
-    existing_command=$(command -v "$COMPAT_ALIAS_NAME" 2>/dev/null || true)
-    if [ -n "$existing_command" ] && [ "$existing_command" != "$alias_path" ]; then
-      COMPAT_ALIAS_STATUS="skipped (existing ${COMPAT_ALIAS_NAME} command at ${existing_command})"
-      warn "Existing ${COMPAT_ALIAS_NAME} command detected at ${existing_command}; skipping managed alias"
-      return 0
-    fi
-  fi
-
-  create_managed_alias_wrapper "$alias_path" "$INSTALL_BIN_PATH" "$COMPAT_ALIAS_NAME"
-  COMPAT_ALIAS_PATH="$alias_path"
-  COMPAT_ALIAS_STATUS="installed (${COMPAT_ALIAS_NAME} -> $INSTALL_BIN_PATH)"
 }
 
 maybe_add_path() {
@@ -3333,13 +3008,6 @@ write_state() {
     printf 'PIAR_AGENT_SKILL_STATUS=%q\n' "$AGENT_SKILL_STATUS"
     printf 'PIAR_AGENT_SKILL_CLAUDE_PATH=%q\n' "$AGENT_SKILL_CLAUDE_PATH"
     printf 'PIAR_AGENT_SKILL_CODEX_PATH=%q\n' "$AGENT_SKILL_CODEX_PATH"
-    printf 'PIAR_ADOPTED_TYPESCRIPT=%q\n' "$ADOPT_TS"
-    printf 'PIAR_LEGACY_ALIAS_PATH=%q\n' "$LEGACY_ALIAS_PATH"
-    printf 'PIAR_LEGACY_TARGET_PATH=%q\n' "$LEGACY_TARGET_PATH"
-    printf 'PIAR_LEGACY_MOVED_FROM=%q\n' "$LEGACY_MOVED_FROM"
-    printf 'PIAR_LEGACY_MOVED_TO=%q\n' "$LEGACY_MOVED_TO"
-    printf 'PIAR_COMPAT_ALIAS_PATH=%q\n' "$COMPAT_ALIAS_PATH"
-    printf 'PIAR_COMPAT_ALIAS_STATUS=%q\n' "$COMPAT_ALIAS_STATUS"
     printf 'PIAR_PATH_MARKER=%q\n' "$PATH_MARKER"
     printf 'PIAR_PATH_UPDATED_FILES=%q\n' "$PATH_UPDATED_FILES"
     printf 'PIAR_INSTALLED_AT_UTC=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -3384,9 +3052,6 @@ print_summary() {
   if [ "$WSL_DETECTED" -eq 1 ]; then
     lines+=("Platform:  WSL detected")
   fi
-  if [ "$COMPAT_ALIAS_STATUS" != "pending" ]; then
-    lines+=("Alias:     $COMPAT_ALIAS_STATUS")
-  fi
   lines+=("Skills:    $AGENT_SKILL_STATUS")
   if [ -n "$AGENT_SKILL_CLAUDE_PATH" ] && [ -f "$AGENT_SKILL_CLAUDE_PATH/SKILL.md" ]; then
     lines+=("Claude:    $AGENT_SKILL_CLAUDE_PATH")
@@ -3395,22 +3060,9 @@ print_summary() {
     lines+=("Codex:     $AGENT_SKILL_CODEX_PATH")
   fi
 
-  if [ "$ADOPT_TS" -eq 1 ]; then
-    if [ "$ADOPT_CANONICAL" -eq 1 ]; then
-      lines+=("Mode:      Rust is canonical 'pi'")
-    else
-      lines+=("Mode:      Adoption requested; ensure '$DEST' precedes existing pi in PATH")
-    fi
-    if [ -n "$LEGACY_ALIAS_PATH" ]; then
-      lines+=("Legacy:    $(basename "$LEGACY_ALIAS_PATH") -> $LEGACY_TARGET_PATH")
-    fi
-  elif [ "$FINAL_BIN_NAME" = "pi-rust" ]; then
-    lines+=("Mode:      Existing pi kept; Rust installed as pi-rust")
-  fi
-
   if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
     {
-      gum style --foreground 42 --bold "pi installed successfully"
+      gum style --foreground 42 --bold "rpi installed successfully"
       echo ""
       for line in "${lines[@]}"; do
         gum style --foreground 245 "$line"
@@ -3439,10 +3091,6 @@ main() {
   if [ "$OFFLINE" -eq 1 ] && [ -n "$OFFLINE_TARBALL" ]; then
     info "Offline artifact mode enabled: $OFFLINE_TARBALL"
   fi
-  detect_existing_pi
-  choose_adoption_mode
-  choose_dest_for_adoption
-
   detect_platform
   prepare_asset_urls
   ensure_dest_dir
@@ -3454,23 +3102,7 @@ main() {
     INSTALL_SOURCE="existing (no reinstall)"
     CHECKSUM_STATUS="not run (already installed)"
     SIGSTORE_STATUS="not run (already installed)"
-    ok "pi ${VERSION} already installed at $INSTALL_BIN_PATH"
-    if [ "$ADOPT_TS" -eq 1 ]; then
-      local refresh_legacy=0
-      if [ -z "${PIAR_LEGACY_ALIAS_PATH:-}" ]; then
-        refresh_legacy=1
-      elif [ ! -f "${PIAR_LEGACY_ALIAS_PATH}" ]; then
-        refresh_legacy=1
-      elif ! grep -q "pi_agent_rust installer managed alias" "${PIAR_LEGACY_ALIAS_PATH}" 2>/dev/null; then
-        refresh_legacy=1
-      fi
-
-      if [ "$refresh_legacy" -eq 1 ]; then
-        prepare_typescript_migration
-        write_state
-      fi
-    fi
-    ensure_compat_alias
+    ok "rpi ${VERSION} already installed at $INSTALL_BIN_PATH"
     maybe_add_path
     maybe_install_completions
     cleanup_legacy_agent_settings
@@ -3481,14 +3113,14 @@ main() {
   fi
 
   acquire_lock
-  TMP=$(mktemp -d)
+  TMP=$(mktemp -d "${TMPDIR:-/tmp}/pi-agent-rust.XXXXXX")
 
   local source_bin=""
   if [ "$FROM_SOURCE" -eq 1 ]; then
     INSTALL_SOURCE="source"
     CHECKSUM_STATUS="not applicable (source build)"
     SIGSTORE_STATUS="not applicable (source build)"
-    run_with_spinner "Building pi from source" build_from_source > "$TMP/source_bin_path"
+    run_with_spinner "Building rpi from source" build_from_source > "$TMP/source_bin_path"
     source_bin=$(cat "$TMP/source_bin_path")
   else
     INSTALL_SOURCE="release"
@@ -3520,22 +3152,16 @@ main() {
       CHECKSUM_STATUS="not applicable (source fallback)"
       SIGSTORE_STATUS="not applicable (source fallback)"
       check_dependencies
-      run_with_spinner "Building pi from source" build_from_source > "$TMP/source_bin_path"
+      run_with_spinner "Building rpi from source" build_from_source > "$TMP/source_bin_path"
       source_bin=$(cat "$TMP/source_bin_path")
     fi
   fi
 
-  prepare_typescript_migration
   install_binary_file "$source_bin"
-  ensure_compat_alias
 
   if [ "$VERIFY" -eq 1 ]; then
     "$INSTALL_BIN_PATH" --version >/dev/null
     ok "Verification passed ($FINAL_BIN_NAME --version)"
-    if [ -n "$COMPAT_ALIAS_PATH" ]; then
-      "$COMPAT_ALIAS_PATH" --version >/dev/null
-      ok "Verification passed ($(basename "$COMPAT_ALIAS_PATH") --version)"
-    fi
   fi
 
   maybe_add_path
@@ -3543,7 +3169,6 @@ main() {
   cleanup_legacy_agent_settings
   install_agent_skills
   write_state
-  INSTALL_COMMITTED=1
   print_summary
 }
 

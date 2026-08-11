@@ -240,9 +240,8 @@ The terminal UI uses rich_rust for all output formatting, providing the same vis
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/pi_agent_rust/main/install.sh?$(date +%s)" | bash
 ```
 
-If you already have the original TypeScript `pi` installed, the installer asks
-whether to make Rust Pi canonical as `pi` and automatically create `legacy-pi`
-for the old command.
+The installer always installs this project as `rpi` and leaves an existing
+TypeScript `pi` command unchanged.
 
 ### 2. Configure API Key
 
@@ -518,7 +517,7 @@ This project validates extension compatibility with a three-track pipeline:
 
 - **Vendored corpus (224)**: deterministic conformance, compatibility matrix, and scenario suites.
 - **Unvendored corpus (777)**: source acquisition and onboarding prioritization.
-- **Release-binary live-provider E2E**: real `target/release/pi` execution against a non-mocked provider/model path.
+- **Release-binary live-provider E2E**: real `target/release/rpi` execution against a non-mocked provider/model path.
 
 ### Why this exists
 
@@ -561,8 +560,8 @@ This project validates extension compatibility with a three-track pipeline:
 3. **Run dev-firstset live-provider gate (must pass before release build)**
    - Binary: `ext_release_binary_e2e`
    - Typical command:
-     - `cargo build --bin pi --bin ext_release_binary_e2e`
-     - `PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/debug/ext_release_binary_e2e --pi-bin target/debug/pi --provider ollama --model qwen2.5:0.5b --jobs 10 --timeout-secs 600 --max-cases 20 --extension-policy balanced --out-json tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.json --out-md tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.md`
+     - `cargo build --bin rpi --bin ext_release_binary_e2e`
+     - `PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/debug/ext_release_binary_e2e --pi-bin target/debug/rpi --provider ollama --model qwen2.5:0.5b --jobs 10 --timeout-secs 600 --max-cases 20 --extension-policy balanced --out-json tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.json --out-md tests/ext_conformance/reports/release_binary_e2e/ollama_firstset_dev_20260219_jobs10_timeout600.md`
    - Purpose:
      - Proves the current codepath works end-to-end on a representative first-set before paying release-build cost.
      - Serves as the promotion gate to full release-binary validation.
@@ -575,10 +574,10 @@ This project validates extension compatibility with a three-track pipeline:
 4. **Run full release-binary live-provider E2E (after step 3 passes)**
    - Binary: `ext_release_binary_e2e`
    - Typical command:
-     - `cargo build --release --bin pi --bin ext_release_binary_e2e`
-     - `PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/release/ext_release_binary_e2e --pi-bin target/release/pi --provider ollama --model qwen2.5:0.5b --jobs 10 --timeout-secs 600 --extension-policy balanced --out-json tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.json --out-md tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.md`
+     - `cargo build --release --bin rpi --bin ext_release_binary_e2e`
+     - `PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/release/ext_release_binary_e2e --pi-bin target/release/rpi --provider ollama --model qwen2.5:0.5b --jobs 10 --timeout-secs 600 --extension-policy balanced --out-json tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.json --out-md tests/ext_conformance/reports/release_binary_e2e/ollama_full_release_20260219_jobs10_timeout600.md`
    - Purpose:
-     - Executes `target/release/pi` directly for each selected extension case.
+     - Executes `target/release/rpi` directly for each selected extension case.
      - Uses a live provider/model path (default `ollama` + `qwen2.5:0.5b`) to exercise non-mocked end-to-end behavior.
      - Emits per-case stdout/stderr captures plus summary artifacts (`pi.ext.release_binary_e2e.v1`).
    - Artifacts:
@@ -669,11 +668,10 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/pi_agent_rust/ma
   bash -s -- --yes --no-completions
 ```
 
-The installer is idempotent and supports a migration path from TypeScript Pi:
-- Detect existing TS `pi` command
-- Prompt to install Rust Pi as canonical `pi`
-- Preserve old CLI behind `legacy-pi`
-- Record state for clean uninstall/restore
+The installer is idempotent and uses one command name:
+- Install Rust Pi as `rpi`
+- Leave any existing `pi` command untouched
+- Record the installed `rpi` path for clean uninstall
 
 Notable installer flags:
 - `--offline [TARBALL]`: enforce offline mode; optional local artifact path (`.tar.gz`, `.tar.xz`, `.zip`, or raw binary)
@@ -704,10 +702,8 @@ For migration adoption, packaging and invocation compatibility follows this cont
 
 - This section covers packaging/invocation behavior only. Strict functional-parity claims are governed by `docs/contracts/dropin-certification-contract.json` and a provenance-matched `docs/evidence/dropin-certification-verdict.json`; `docs/parity-certification.json` is informational progress evidence only.
 
-- Canonical executable name is `pi` across release assets and installer-managed installs.
-- Installer-managed installs also create an `rpi` compatibility launcher when no conflicting `rpi` command already exists on your PATH.
-- Existing TypeScript `pi` installs can be migrated in place; the prior command is preserved as `legacy-pi`.
-- If you keep TypeScript `pi` as canonical (`--keep-existing-pi`), Rust Pi is installed as `pi-rust`.
+- Canonical executable name is `rpi` across compiled artifacts and installer-managed installs.
+- The installer never replaces, wraps, or relocates an existing `pi` command.
 - On Apple Silicon, the installer prefers the native arm64 artifact even when launched from a Rosetta-translated shell.
 - Version-pinned installs are supported via `install.sh --version vX.Y.Z` for deterministic rollouts.
 - Every GitHub release ships platform binaries plus `SHA256SUMS` for integrity validation.
@@ -716,12 +712,9 @@ Representative smoke checks:
 
 ```bash
 # Canonical command should exist and execute
-command -v pi
-pi --version
-pi --help >/dev/null
-
-# If a TS migration was performed, legacy command remains available
-command -v legacy-pi && legacy-pi --version
+command -v rpi
+rpi --version
+rpi --help >/dev/null
 ```
 
 ### From Source
@@ -739,11 +732,11 @@ git clone https://github.com/Dicklesworthstone/pi_agent_rust.git
 cd pi_agent_rust
 cargo build --release
 
-# Binary is at target/release/pi
-./target/release/pi --version
+# Binary is at target/release/rpi
+./target/release/rpi --version
 
 # To install system-wide (--locked ensures reproducible dependency resolution)
-cargo install --path . --bin pi --locked
+cargo install --path . --bin rpi --locked
 ```
 
 ### Dependencies
@@ -2594,16 +2587,16 @@ Policy preset quick-start:
 
 ```bash
 # Inspect current effective policy
-pi --explain-extension-policy
+rpi --explain-extension-policy
 
 # Switch profile for one command (safe | balanced | permissive)
-pi --extension-policy balanced --explain-extension-policy
+rpi --extension-policy balanced --explain-extension-policy
 
 # Legacy alias is still accepted:
-pi --extension-policy standard --explain-extension-policy
+rpi --extension-policy standard --explain-extension-policy
 
 # Narrow dangerous-capability opt-in (preferred over permissive)
-PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced --explain-extension-policy
+PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced --explain-extension-policy
 ```
 
 Operator rollout playbook (compatibility-first local defaults + explicit lock-down):
@@ -2832,17 +2825,17 @@ Focused validation tools:
 
 ```bash
 # Dev-firstset gate before release build
-rch exec -- cargo build --bin pi --bin ext_release_binary_e2e
+rch exec -- cargo build --bin rpi --bin ext_release_binary_e2e
 PI_HTTP_REQUEST_TIMEOUT_SECS=0 rch exec -- \
   cargo run --example ext_release_binary_e2e -- \
-  --pi-bin target/debug/pi \
+  --pi-bin target/debug/rpi \
   --provider ollama --model qwen2.5:0.5b \
   --jobs 10 --timeout-secs 600 --max-cases 20 --extension-policy balanced
 
 # Full optimized release-binary run after gate passes
-rch exec -- cargo build --release --bin pi --bin ext_release_binary_e2e
+rch exec -- cargo build --release --bin rpi --bin ext_release_binary_e2e
 PI_HTTP_REQUEST_TIMEOUT_SECS=0 target/release/ext_release_binary_e2e \
-  --pi-bin target/release/pi \
+  --pi-bin target/release/rpi \
   --provider ollama --model qwen2.5:0.5b \
   --jobs 10 --timeout-secs 600 --extension-policy balanced
 

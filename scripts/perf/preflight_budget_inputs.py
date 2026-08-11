@@ -882,8 +882,8 @@ def binary_candidates(
     if release_override:
         paths.append(Path(release_override).expanduser())
     for evidence_dir in perf_evidence_dirs(repo_root):
-        paths.extend((evidence_dir / "release" / "pi", evidence_dir / "perf" / "pi"))
-    paths.extend((target_dir / "release" / "pi", target_dir / "perf" / "pi"))
+        paths.extend((evidence_dir / "release" / "rpi", evidence_dir / "perf" / "rpi"))
+    paths.extend((target_dir / "release" / "rpi", target_dir / "perf" / "rpi"))
     return dedupe_paths(paths)
 
 
@@ -1075,10 +1075,10 @@ def artifact_groups(repo_root: Path, target_dir: Path) -> list[ArtifactGroup]:
                 os.environ.get("PERF_RELEASE_BINARY_PATH"),
             ),
             suggested_commands=(
-                f"{bench_prefix} build --bin pi --release",
+                f"{bench_prefix} build --bin rpi --release",
             ),
             reason="release pi binary required for binary_size_release budget",
-            expected_outputs=(target_dir / "release/pi", repo_root / "tests/perf/reports/release/pi"),
+            expected_outputs=(target_dir / "release/rpi", repo_root / "tests/perf/reports/release/rpi"),
         ),
         ArtifactGroup(
             contract_id="extension_criterion_protocol",
@@ -1550,7 +1550,7 @@ def run_self_test() -> int:
             '{"schema":"pi.perf.workload.v1","iterations":2000,"tool_calls_per_iteration":1,"total_calls":2000,"build_profile_verified":true}\n',
             encoding="utf-8",
         )
-        (root / "target/release/pi").write_bytes(b"binary")
+        (root / "target/release/rpi").write_bytes(b"binary")
         (root / "tests/perf/reports/extension_benchmark_stratification.json").write_text(
             '{"schema":"pi.perf.extension_benchmark_stratification.v1"}',
             encoding="utf-8",

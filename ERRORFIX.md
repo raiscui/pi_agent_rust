@@ -209,3 +209,94 @@
 - `cargo fmt --check`: passed。
 - `cargo check --all-targets`: 0 errors, 1 third-party `proc-macro-error2 v2.0.1` future-incompat warning。
 - `cargo clippy --all-targets -- -D warnings`: 0 errors, 1 third-party future-incompat warning。
+
+## [2026-08-11 12:55:00] [Session ID: omx-1786418643597-4bz6s9] 修复: merge 后 ToolUseProfile 加载缺失和 test-target 编译失败
+
+### 现象
+- `ModelEntry.tool_use_profile` 始终为 `None`,models.json 的 `toolUseProfiles` 和 `toolUseProfile` 未进入加载路径。
+- `cargo check --bin pi` 通过,但首次 `cargo test --lib` 报 10 个编译错误。
+
+### 原因
+- merge 后 `src/models.rs` 只恢复了早期 ToolUseProfile 类型,未恢复加载、校验、继承逻辑。
+- 同一文件还遗漏后续已合入的 `tools`、`skills`、`extensions` 字段和测试隔离加载入口,导致 lib test target 与其他模块契约不一致。
+
+### 修复
+- 在 `ModelsConfig`、`ProviderConfig`、`ModelConfig` 恢复 profile 配置字段。
+- 在统一配置加载入口验证全部引用,在统一 custom model 应用路径解析 provider 默认和 model 覆盖。
+- generated catalog 的临时 `ModelsConfig` 明确使用空 profile 表。
+- 恢复 3 个 profile 扩展字段、`load_isolated` 及其他 test-target 构造器遗漏字段。
+
+### 验证
+- red: provider default 测试在 profile 为 `None` 时失败。
+- green: provider default、model override、unknown reference、empty reference 共 4 条定向测试通过。
+- 完整 fmt/check/clippy/workspace 结果待阶段4追加。
+
+## [2026-08-11 13:48:42] [Session ID: omx-1786418643597-4bz6s9] 调查中: release_readiness 缺少编译期 evidence
+
+### 现象
+- `cargo check --all-targets -j 2` 在 `tests/release_readiness.rs:4804` 和 `tests/release_readiness.rs:7421` 失败。
+- `include_str!` 引用的 `tests/perf/reports/budget_summary.json` 与 `tests/full_suite_gate/full_suite_verdict.json` 不存在。
+
+### 候选假设
+- 主假设: 这两个文件是被 `.gitignore` 排除的生成产物,本地未运行对应生成链,因此 all-target 编译依赖了缺失的外部 artifact。
+- 备选解释: merge 删除了本应存在的受控 fixture,或者测试错误地把运行期 artifact 设成编译期硬依赖。
+- 推翻主假设的证据: Git 历史显示文件本应受版本控制,或测试契约明确要求仓库 checkout 自带这两个文件。
+
+### 验证计划
+- 检查文件历史、`.gitignore`、`release_readiness` 的断言语义和 workflow/测试生成链。
+- 只接受真实生成结果或正确的测试边界修复,不创建空内容和伪造认证 evidence。
+
+## [2026-08-11 14:23:00] [Session ID: omx-1786418643597-4bz6s9] 修复: release_readiness 编译期依赖 ignored evidence
+
+### 原因
+- 两条独立历史线在 merge 后形成不一致契约: 一侧停止跟踪生成目录,另一侧新增 `include_str!` 编译期引用。
+- 因此 clean checkout 即使不运行 release gate,编译 `release_readiness` test target 也会失败。
+
+### 修复
+- 性能 claim fixture 改为代码内构造 canonical 19 项预算定义与通过结果,保留 schema、inventory hash、计数和 source-binding 校验。
+- full-suite fixture 改为代码内构造 20 个 gate,保留原 `17/20` 失败汇总断言。
+- 没有恢复 ignored artifact,也没有伪造 release evidence。
+
+### 验证
+- `cargo test --package pi_agent_rust --test release_readiness -j 2 -- performance_budget_v2_claim_ready_contract_passes --exact`: 1 passed。
+- `cargo test --package pi_agent_rust --test release_readiness -j 2 -- full_suite_gate_reads_current_total_gates_field --exact`: 1 passed。
+
+## [2026-08-11 14:47:00] [Session ID: omx-1786418643597-4bz6s9] 追加修复: semantic graph 的 sibling evidence 引用
+
+### 现象
+- all-target check 继续报缺少 `tests/perf/reports/budget_summary.json`,位置为 `tests/semantic_workspace_graph_builder.rs:1021`。
+
+### 原因修正
+- 上一轮只处理了最初编译器报告的两个调用点,没有先用多行模式搜索全部 `include_str!` sibling。
+- semantic graph 与 release readiness 都依赖完整 canonical budget inventory,直接复制定义会制造第二份测试真相源。
+
+### 修复计划
+- 将 canonical budget definitions 放入共享 test-support 模块,两份 integration test 共同调用。
+- 保留各自对 result、claim readiness、inventory hash 和防伪行为的独立测试。
+
+## [2026-08-11 21:42:00] [Session ID: omx-1786418643597-4bz6s9] 调查中: all-target clippy 的 10 个 merge 后错误
+
+### 现象
+- all-target check 已通过,但 clippy 在 `-D warnings` 下报 10 个错误。
+- 错误集中于 `src/interactive.rs` 与 `src/tools.rs`,不是 `ToolUseProfile` 新逻辑产生。
+
+### 验证计划
+- 逐处读取调用上下文,优先采用等价标准库写法和正确类型转换。
+- 对只因测试体量触发的 `too_many_lines`,在确认无法通过小幅重排降低复杂度后使用最窄范围 allow。
+- 修复后重跑 fmt、相关定向测试、all-target check 和 clippy。
+
+## [2026-08-12 00:34:40] [Session ID: omx-1786418643597-4bz6s9] 修复: rpi 迁移后 drop-in lane fixture 失配
+
+### 现象
+- `canonical_dropin_verdict_uses_release_gate_age_limit` 预期 `Current`,实际为 `Malformed`。
+
+### 原因
+- 自包含 fixture 的 `opportunity_matrix_integrity` gate 名称为 `Opportunity matrix integrity`。
+- production 的严格契约要求 `Opportunity matrix artifact integrity`,任何 identity 字段不一致都会产生 `dropin_verdict_source_lane_invalid`。
+
+### 修复
+- 只修正 fixture 的 gate 名称,不放宽 `validate_dropin_certification_lane`。
+
+### 验证
+- 修复前: 同一精确测试失败为 `Some(Malformed)`。
+- 修复后: age-limit、用户 symlink 拒绝、performance source binding 三条 semantic graph 精确测试均通过。

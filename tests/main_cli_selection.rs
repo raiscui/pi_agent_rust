@@ -34,7 +34,7 @@ fn make_registry(harness: &TestHarness, creds: &[(&str, &str)]) -> ModelRegistry
     }
     // 隔离环境变量: 本机 OPENAI_API_KEY 会让 openai 模型误判为"已配置",
     // 破坏"只有 anthropic 有 key"的回退语义
-    ModelRegistry::load_with_key_resolver(&auth, None, |auth, provider| {
+    ModelRegistry::load_with_credential_resolver(None, |provider| {
         auth.resolve_api_key_with_env(provider, None, |_| None)
     })
 }
@@ -978,7 +978,7 @@ fn cli_no_tools_returns_empty() {
 }
 
 fn cli_flag_parity_result(flag_args: &[&str]) -> Result<(), String> {
-    let args = std::iter::once("pi")
+    let args = std::iter::once("rpi")
         .chain(flag_args.iter().copied())
         .collect::<Vec<_>>();
     match cli::Cli::try_parse_from(args) {

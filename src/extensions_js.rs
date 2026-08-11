@@ -15312,7 +15312,7 @@ export const versions = p.versions || {};
 export const pid = p.pid || 1;
 export const ppid = p.ppid || 0;
 export const title = p.title || 'pi';
-export const execPath = p.execPath || '/usr/bin/pi';
+export const execPath = p.execPath || '/usr/bin/rpi';
 export const execArgv = p.execArgv || [];
 export const stdout = p.stdout || { write() {} };
 export const stderr = p.stderr || { write() {} };
@@ -18377,7 +18377,7 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                     "__pi_process_execpath_native",
                     Func::from(move |_ctx: Ctx<'_>| -> rquickjs::Result<String> {
                         Ok(std::env::current_exe().map_or_else(
-                            |_| "/usr/bin/pi".to_string(),
+                            |_| "/usr/bin/rpi".to_string(),
                             |p| p.to_string_lossy().into_owned(),
                         ))
                     }),
@@ -23315,7 +23315,7 @@ if (typeof globalThis.process === 'undefined') {
         title: 'pi',
         execPath: (typeof __pi_process_execpath_native === 'function')
             ? __pi_process_execpath_native()
-            : '/usr/bin/pi',
+            : '/usr/bin/rpi',
         execArgv: [],
         stdout: makeWritable('log'),
         stderr: makeWritable('error'),

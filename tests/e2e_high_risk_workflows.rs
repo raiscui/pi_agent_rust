@@ -173,7 +173,7 @@ fn write_jsonl_artifacts(harness: &TestHarness, test_name: &str) {
 }
 
 fn cli_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_pi"))
+    PathBuf::from(env!("CARGO_BIN_EXE_rpi"))
 }
 
 fn isolated_cli_env(harness: &TestHarness) -> BTreeMap<String, String> {

@@ -12,6 +12,9 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
+#[path = "support/performance_budget_fixture.rs"]
+mod performance_budget_fixture;
+
 const REPORT_SCHEMA: &str = "pi.release_readiness.v1";
 const CONFORMANCE_SUMMARY_SCHEMA: &str = "pi.ext.conformance_summary.v2";
 const CONFORMANCE_SUMMARY_PATH: &str = "tests/ext_conformance/reports/conformance_summary.json";
@@ -37,7 +40,7 @@ const PERF_BUDGET_SUMMARY_SCHEMA: &str = "pi.perf.budget_summary.v2";
 const PERF_BUDGET_SUMMARY_PATH: &str = "tests/perf/reports/budget_summary.json";
 const PERF_CANONICAL_BUDGET_COUNT: usize = 19;
 const PERF_CANONICAL_BUDGET_INVENTORY_SHA256: &str =
-    "96e3147ef23e1c634d56265581975a2b619ac9a701f4839ef6f3f4b3987226ad";
+    "ba299455435c1d5e950bf44586b72af44597529f896d854e15365060eedf524c";
 const PERF_MAX_EVIDENCE_AGE_HOURS: i64 = 168;
 const PERF_TOP_LEVEL_FIELDS: &[&str] = &[
     "schema",
@@ -4801,11 +4804,7 @@ fn performance_dimension_has_data() {
 }
 
 fn claim_ready_performance_budget_fixture(source_commit: &str) -> V {
-    let mut summary: V = serde_json::from_str(include_str!("perf/reports/budget_summary.json"))
-        .expect("parse canonical performance budget fixture");
-    let budgets = summary["budgets"]
-        .as_array()
-        .expect("canonical budgets array");
+    let budgets = performance_budget_fixture::canonical_budgets();
     let total = u64::try_from(budgets.len()).expect("fixture budget count fits u64");
     let ci_enforced = u64::try_from(
         budgets
@@ -4814,40 +4813,48 @@ fn claim_ready_performance_budget_fixture(source_commit: &str) -> V {
             .count(),
     )
     .expect("fixture CI budget count fits u64");
-    for result in summary["budget_results"]
-        .as_array_mut()
-        .expect("canonical budget results array")
-    {
-        result["actual"] = result["threshold"].clone();
-        result["status"] = serde_json::json!("PASS");
-        result["source"] = serde_json::json!("release-readiness claim fixture");
-        result
-            .as_object_mut()
-            .expect("budget result object")
-            .remove("failure_reason");
-    }
-    summary["generated_at"] =
-        serde_json::json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-    summary["source_commit"] = serde_json::json!(source_commit);
-    summary["run_id"] = serde_json::json!("perf-run-123");
-    summary["correlation_id"] = serde_json::json!("perf-run-123");
-    summary["strict_mode"] = serde_json::json!(true);
-    summary["total_budgets"] = serde_json::json!(total);
-    summary["pass"] = serde_json::json!(total);
-    summary["fail"] = serde_json::json!(0);
-    summary["no_data"] = serde_json::json!(0);
-    summary["ci_enforced"] = serde_json::json!(ci_enforced);
-    summary["ci_with_data"] = serde_json::json!(ci_enforced);
-    summary["ci_fail"] = serde_json::json!(0);
-    summary["ci_no_data"] = serde_json::json!(0);
-    summary["data_contract_failures_count"] = serde_json::json!(0);
-    summary["failing_data_contracts"] = serde_json::json!([]);
-    summary["claim_readiness"] = serde_json::json!({
-        "status": "claim_ready",
-        "performance_claims_authorized": true,
-        "blocking_reason_codes": []
-    });
-    summary
+    let budget_results = budgets
+        .iter()
+        .map(|budget| {
+            serde_json::json!({
+                "budget_name": budget["name"],
+                "category": budget["category"],
+                "threshold": budget["threshold"],
+                "comparison": budget["comparison"],
+                "unit": budget["unit"],
+                "actual": budget["threshold"],
+                "status": "PASS",
+                "source": "release-readiness claim fixture",
+                "ci_enforced": budget["ci_enforced"],
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "schema": PERF_BUDGET_SUMMARY_SCHEMA,
+        "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "source_commit": source_commit,
+        "run_id": "perf-run-123",
+        "correlation_id": "perf-run-123",
+        "strict_mode": true,
+        "total_budgets": total,
+        "ci_enforced": ci_enforced,
+        "ci_with_data": ci_enforced,
+        "ci_fail": 0,
+        "ci_no_data": 0,
+        "pass": total,
+        "fail": 0,
+        "no_data": 0,
+        "data_contract_failures_count": 0,
+        "failing_data_contracts": [],
+        "budgets": budgets,
+        "budget_results": budget_results,
+        "claim_readiness": {
+            "status": "claim_ready",
+            "performance_claims_authorized": true,
+            "blocking_reason_codes": [],
+        },
+    })
 }
 
 fn run_performance_fixture_git(root: &Path, args: &[&str]) -> String {
@@ -7418,8 +7425,29 @@ fn certification_signal_does_not_turn_partial_no_data_into_pass() {
 
 #[test]
 fn full_suite_gate_reads_current_total_gates_field() {
-    let gate: V = serde_json::from_str(include_str!("full_suite_gate/full_suite_verdict.json"))
-        .expect("parse checked-in full-suite verdict");
+    let gates = (0..20)
+        .map(|index| {
+            serde_json::json!({
+                "status": if matches!(index, 0 | 1 | 14) { "fail" } else { "pass" },
+                "blocking": index < 14,
+            })
+        })
+        .collect::<Vec<_>>();
+    let gate = serde_json::json!({
+        "schema": FULL_SUITE_GATE_SCHEMA,
+        "verdict": "fail",
+        "gates": gates,
+        "summary": {
+            "total_gates": 20,
+            "passed": 17,
+            "failed": 3,
+            "warned": 0,
+            "skipped": 0,
+            "blocking_pass": 12,
+            "blocking_total": 14,
+            "all_blocking_pass": false,
+        },
+    });
 
     let (signal, detail) = validate_full_suite_gate(&gate);
     assert_eq!(signal, Signal::Fail, "{detail}");

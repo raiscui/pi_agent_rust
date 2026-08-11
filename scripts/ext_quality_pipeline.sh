@@ -226,7 +226,7 @@ run_step "cargo-fmt" cargo fmt --check
 
 # Stage 2: Clippy
 run_compile_step "clippy-lib" clippy --locked --lib -- -D warnings
-run_compile_step "clippy-bin" clippy --locked --bin pi -- -D warnings
+run_compile_step "clippy-bin" clippy --locked --bin rpi -- -D warnings
 
 # Stage 3: Cargo check (catches compilation errors in test files). The
 # ext_conformance target executes the internal legacy-capture binary, so the

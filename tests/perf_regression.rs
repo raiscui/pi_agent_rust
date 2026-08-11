@@ -129,7 +129,7 @@ fn format_candidate_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-fn build_pi_binary_candidates(
+fn build_rpi_binary_candidates(
     target_dir: &Path,
     cargo_bin_override: Option<PathBuf>,
     detected_profile: &str,
@@ -142,28 +142,28 @@ fn build_pi_binary_candidates(
     }
 
     if !normalized_profile.is_empty() {
-        candidates.push(target_dir.join(normalized_profile).join("pi"));
+        candidates.push(target_dir.join(normalized_profile).join("rpi"));
     }
 
-    candidates.push(target_dir.join("release/pi"));
-    candidates.push(target_dir.join("perf/pi"));
-    candidates.push(target_dir.join("debug/pi"));
+    candidates.push(target_dir.join("release/rpi"));
+    candidates.push(target_dir.join("perf/rpi"));
+    candidates.push(target_dir.join("debug/rpi"));
 
     let mut dedup = HashSet::new();
     candidates.retain(|path| dedup.insert(path.clone()));
     candidates
 }
 
-fn pi_binary_candidates() -> Vec<PathBuf> {
+fn rpi_binary_candidates() -> Vec<PathBuf> {
     let target_dir = target_dir();
-    let cargo_bin_override = std::env::var_os("CARGO_BIN_EXE_pi").map(PathBuf::from);
+    let cargo_bin_override = std::env::var_os("CARGO_BIN_EXE_rpi").map(PathBuf::from);
     let detected_profile = perf_build::detect_build_profile();
-    build_pi_binary_candidates(&target_dir, cargo_bin_override, &detected_profile)
+    build_rpi_binary_candidates(&target_dir, cargo_bin_override, &detected_profile)
 }
 
-/// Find the first available `pi` binary from test/build-profile candidates.
-fn pi_binary() -> Option<PathBuf> {
-    first_existing_candidate(pi_binary_candidates())
+/// Find the first available `rpi` binary from test/build-profile candidates.
+fn rpi_binary() -> Option<PathBuf> {
+    first_existing_candidate(rpi_binary_candidates())
 }
 
 fn binary_size_release_override() -> Option<PathBuf> {
@@ -184,7 +184,7 @@ fn build_binary_size_candidates(
         candidates.push(path);
     }
     // Budget methodology is explicitly release-only; do not fall back to perf/debug.
-    candidates.push(target_dir.join("release/pi"));
+    candidates.push(target_dir.join("release/rpi"));
 
     let mut dedup = HashSet::new();
     candidates.retain(|path| dedup.insert(path.clone()));
@@ -205,7 +205,7 @@ fn binary_size_binary() -> Option<PathBuf> {
 fn binary_size_missing_release_outcome(strict_mode: bool, checked: &str) -> Result<(), String> {
     if strict_mode {
         Err(format!(
-            "release binary not found (checked: {checked}); strict mode requires a release artifact via {PERF_RELEASE_BINARY_PATH_ENV} or target/release/pi"
+            "release binary not found (checked: {checked}); strict mode requires a release artifact via {PERF_RELEASE_BINARY_PATH_ENV} or target/release/rpi"
         ))
     } else {
         Ok(())
@@ -449,17 +449,17 @@ fn startup_version_latency() {
     let _guard = perf_guard();
     let harness = TestHarness::new("startup_version_latency");
 
-    let Some(binary) = pi_binary() else {
-        let candidates = pi_binary_candidates();
+    let Some(binary) = rpi_binary() else {
+        let candidates = rpi_binary_candidates();
         let checked = format_candidate_paths(&candidates);
         harness.log().info_ctx(
             "skip",
-            "pi binary not found; skipping startup latency test",
+            "rpi binary not found; skipping startup latency test",
             |ctx| {
                 ctx.push(("checked_candidates".into(), checked.clone()));
             },
         );
-        eprintln!("[perf_regression] SKIP: pi binary not found (checked: {checked})");
+        eprintln!("[perf_regression] SKIP: rpi binary not found (checked: {checked})");
         return;
     };
 
@@ -474,7 +474,7 @@ fn startup_version_latency() {
     let samples = measure_startup(&binary, &["--version"], startup_runs(), warmup_runs());
     assert!(
         !samples.is_empty(),
-        "pi --version produced no successful runs"
+        "rpi --version produced no successful runs"
     );
 
     let stats = compute_stats(&samples);
@@ -544,21 +544,24 @@ fn startup_help_latency() {
     let _guard = perf_guard();
     let harness = TestHarness::new("startup_help_latency");
 
-    let Some(binary) = pi_binary() else {
-        let checked = format_candidate_paths(&pi_binary_candidates());
+    let Some(binary) = rpi_binary() else {
+        let checked = format_candidate_paths(&rpi_binary_candidates());
         harness
             .log()
-            .info_ctx("skip", "pi binary not found", |ctx| {
+            .info_ctx("skip", "rpi binary not found", |ctx| {
                 ctx.push(("checked_candidates".into(), checked.clone()));
             });
-        eprintln!("[perf_regression] SKIP: pi binary not found (checked: {checked})");
+        eprintln!("[perf_regression] SKIP: rpi binary not found (checked: {checked})");
         return;
     };
 
     harness.log().info("measure", "Measuring --help startup");
 
     let samples = measure_startup(&binary, &["--help"], startup_runs(), warmup_runs());
-    assert!(!samples.is_empty(), "pi --help produced no successful runs");
+    assert!(
+        !samples.is_empty(),
+        "rpi --help produced no successful runs"
+    );
 
     let stats = compute_stats(&samples);
     let p95 = stats.p95_ms;
@@ -609,22 +612,22 @@ fn idle_memory_rss() {
     let _guard = perf_guard();
     let harness = TestHarness::new("idle_memory_rss");
 
-    let Some(binary) = pi_binary() else {
-        let checked = format_candidate_paths(&pi_binary_candidates());
+    let Some(binary) = rpi_binary() else {
+        let checked = format_candidate_paths(&rpi_binary_candidates());
         harness
             .log()
-            .info_ctx("skip", "pi binary not found", |ctx| {
+            .info_ctx("skip", "rpi binary not found", |ctx| {
                 ctx.push(("checked_candidates".into(), checked.clone()));
             });
-        eprintln!("[perf_regression] SKIP: pi binary not found (checked: {checked})");
+        eprintln!("[perf_regression] SKIP: rpi binary not found (checked: {checked})");
         return;
     };
 
     harness
         .log()
-        .info("measure", "Measuring idle RSS of pi process");
+        .info("measure", "Measuring idle RSS of rpi process");
 
-    // Spawn pi --version and measure its peak RSS
+    // Spawn rpi --version and measure its peak RSS.
     // We use /usr/bin/time if available for accurate maxrss
     let rss_mb = measure_process_rss(&binary, &["--version"]);
 
@@ -1319,58 +1322,58 @@ fn append_jsonl(path: &Path, line: &str) {
 }
 
 #[test]
-fn pi_binary_candidate_builder_default_order_is_release_perf_debug() {
+fn rpi_binary_candidate_builder_default_order_is_release_perf_debug() {
     let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_pi_binary_candidates(root, None, "");
+    let candidates = build_rpi_binary_candidates(root, None, "");
     assert_eq!(
         candidates,
         vec![
-            root.join("release/pi"),
-            root.join("perf/pi"),
-            root.join("debug/pi"),
+            root.join("release/rpi"),
+            root.join("perf/rpi"),
+            root.join("debug/rpi"),
         ]
     );
 }
 
 #[test]
-fn pi_binary_candidate_builder_includes_profile_before_release() {
+fn rpi_binary_candidate_builder_includes_profile_before_release() {
     let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_pi_binary_candidates(root, None, "bench-profile");
-    assert_eq!(candidates[0], root.join("bench-profile/pi"));
-    assert_eq!(candidates[1], root.join("release/pi"));
-    assert_eq!(candidates[2], root.join("perf/pi"));
-    assert_eq!(candidates[3], root.join("debug/pi"));
+    let candidates = build_rpi_binary_candidates(root, None, "bench-profile");
+    assert_eq!(candidates[0], root.join("bench-profile/rpi"));
+    assert_eq!(candidates[1], root.join("release/rpi"));
+    assert_eq!(candidates[2], root.join("perf/rpi"));
+    assert_eq!(candidates[3], root.join("debug/rpi"));
 }
 
 #[test]
-fn pi_binary_candidate_builder_trims_detected_profile() {
+fn rpi_binary_candidate_builder_trims_detected_profile() {
     let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_pi_binary_candidates(root, None, "  bench-profile  ");
-    assert_eq!(candidates[0], root.join("bench-profile/pi"));
-    assert_eq!(candidates[1], root.join("release/pi"));
-    assert_eq!(candidates[2], root.join("perf/pi"));
-    assert_eq!(candidates[3], root.join("debug/pi"));
+    let candidates = build_rpi_binary_candidates(root, None, "  bench-profile  ");
+    assert_eq!(candidates[0], root.join("bench-profile/rpi"));
+    assert_eq!(candidates[1], root.join("release/rpi"));
+    assert_eq!(candidates[2], root.join("perf/rpi"));
+    assert_eq!(candidates[3], root.join("debug/rpi"));
 }
 
 #[test]
-fn pi_binary_candidate_builder_ignores_whitespace_only_profile() {
+fn rpi_binary_candidate_builder_ignores_whitespace_only_profile() {
     let root = Path::new("/tmp/pi-agent-target");
-    let candidates = build_pi_binary_candidates(root, None, " \t ");
+    let candidates = build_rpi_binary_candidates(root, None, " \t ");
     assert_eq!(
         candidates,
         vec![
-            root.join("release/pi"),
-            root.join("perf/pi"),
-            root.join("debug/pi"),
+            root.join("release/rpi"),
+            root.join("perf/rpi"),
+            root.join("debug/rpi"),
         ]
     );
 }
 
 #[test]
-fn pi_binary_candidate_builder_env_override_wins_and_dedups() {
+fn rpi_binary_candidate_builder_env_override_wins_and_dedups() {
     let root = Path::new("/tmp/pi-agent-target");
-    let override_path = root.join("release/pi");
-    let candidates = build_pi_binary_candidates(root, Some(override_path.clone()), "release");
+    let override_path = root.join("release/rpi");
+    let candidates = build_rpi_binary_candidates(root, Some(override_path.clone()), "release");
 
     assert_eq!(candidates.first(), Some(&override_path));
     assert_eq!(
@@ -1382,7 +1385,7 @@ fn pi_binary_candidate_builder_env_override_wins_and_dedups() {
     );
     assert_eq!(
         candidates,
-        vec![override_path, root.join("perf/pi"), root.join("debug/pi")]
+        vec![override_path, root.join("perf/rpi"), root.join("debug/rpi")]
     );
 }
 
@@ -1390,21 +1393,21 @@ fn pi_binary_candidate_builder_env_override_wins_and_dedups() {
 fn binary_size_candidate_builder_release_only_default() {
     let root = Path::new("/tmp/pi-agent-target");
     let candidates = build_binary_size_candidates(root, None, "bench-profile");
-    assert_eq!(candidates, vec![root.join("release/pi")]);
+    assert_eq!(candidates, vec![root.join("release/rpi")]);
 }
 
 #[test]
 fn binary_size_candidate_builder_prefers_release_override_then_release_default() {
     let root = Path::new("/tmp/pi-agent-target");
-    let override_path = root.join("custom-release/pi");
+    let override_path = root.join("custom-release/rpi");
     let candidates = build_binary_size_candidates(root, Some(override_path.clone()), "debug");
-    assert_eq!(candidates, vec![override_path, root.join("release/pi")]);
+    assert_eq!(candidates, vec![override_path, root.join("release/rpi")]);
 }
 
 #[test]
 fn binary_size_candidate_builder_dedups_override_matching_release() {
     let root = Path::new("/tmp/pi-agent-target");
-    let release = root.join("release/pi");
+    let release = root.join("release/rpi");
     let candidates = build_binary_size_candidates(root, Some(release.clone()), "release");
     assert_eq!(candidates, vec![release]);
 }
@@ -1413,8 +1416,8 @@ fn binary_size_candidate_builder_dedups_override_matching_release() {
 fn binary_size_candidate_selector_prefers_existing_release_override() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let root = temp.path();
-    let release = root.join("release/pi");
-    let override_path = root.join("custom-release/pi");
+    let release = root.join("release/rpi");
+    let override_path = root.join("custom-release/rpi");
 
     std::fs::create_dir_all(release.parent().expect("release parent")).expect("mkdir release");
     std::fs::create_dir_all(override_path.parent().expect("override parent"))
@@ -1434,8 +1437,8 @@ fn binary_size_candidate_selector_prefers_existing_release_override() {
 fn binary_size_candidate_selector_falls_back_to_release_when_override_missing() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let root = temp.path();
-    let release = root.join("release/pi");
-    let override_path = root.join("custom-release/pi");
+    let release = root.join("release/rpi");
+    let override_path = root.join("custom-release/rpi");
 
     std::fs::create_dir_all(release.parent().expect("release parent")).expect("mkdir release");
     std::fs::write(&release, b"release").expect("write release binary");
@@ -1452,7 +1455,7 @@ fn binary_size_candidate_selector_falls_back_to_release_when_override_missing() 
 fn binary_size_candidate_selector_returns_none_when_release_candidates_missing() {
     let temp = tempfile::tempdir().expect("create temp dir");
     let root = temp.path();
-    let override_path = root.join("custom-release/pi");
+    let override_path = root.join("custom-release/rpi");
 
     let selected = first_existing_candidate(build_binary_size_candidates(
         root,
@@ -1469,10 +1472,10 @@ fn binary_size_missing_release_outcome_skips_when_not_strict() {
 
 #[test]
 fn binary_size_missing_release_outcome_fails_closed_when_strict() {
-    let err = binary_size_missing_release_outcome(true, "x/y/release/pi")
+    let err = binary_size_missing_release_outcome(true, "x/y/release/rpi")
         .expect_err("strict mode must fail when release binary is missing");
     assert!(
-        err.contains("x/y/release/pi"),
+        err.contains("x/y/release/rpi"),
         "error should contain checked candidate paths: {err}"
     );
     assert!(

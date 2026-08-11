@@ -1964,7 +1964,7 @@ fn rpc_binary_sigint_exits_orderly_and_preserves_session() -> std::io::Result<()
     std::fs::create_dir_all(&agent_dir)?;
     std::fs::create_dir_all(&package_dir)?;
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pi")); // ubs:ignore Cargo-provided test binary path, not user input.
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rpi")); // ubs:ignore Cargo-provided test binary path, not user input.
     command
         .args([
             "--rpc",

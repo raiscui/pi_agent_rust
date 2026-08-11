@@ -970,7 +970,9 @@ pub(crate) fn resolve_api_key_isolated(
     entry: &ModelEntry,
 ) -> Result<Option<String>> {
     let key = normalize_api_key_opt(cli.api_key.clone())
-        .or_else(|| normalize_api_key_opt(auth.resolve_api_key_isolated(&entry.model.provider, None)))
+        .or_else(|| {
+            normalize_api_key_opt(auth.resolve_api_key_isolated(&entry.model.provider, None))
+        })
         .or_else(|| normalize_api_key_opt(entry.api_key.clone()));
 
     if model_requires_configured_credential(entry) && key.is_none() {

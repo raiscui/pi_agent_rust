@@ -623,3 +623,30 @@
 - 96 UU/DU 冲突里 33 UU 是双方都改 (本地 88 commits vs origin 96 commits), 优先级 origin 优先是因为 origin 是 Dicklesworthstone 上游最新
 - "merge 优先" 不是 "本地代码优先", 而是 "本地时间线优先"。本地独有 commit (29 + 2) 保留, 但本地独有代码改动 (src/*.rs 等) 被 origin 覆盖是合理的
 - 不用 cargo check 验证是已知风险, 后续 agent 在低负载时应该跑一次 cargo check
+
+## [2026-08-12 00:37:54] [Session ID: omx-1786418643597-4bz6s9] 任务名称: rpi shipping binary 迁移与认证回归收尾
+
+### 任务内容
+- 将唯一 shipping binary 从 `pi` 改为 `rpi`,不保留旧命令 alias。
+- 同步 Cargo、CI/release、安装器、卸载器、测试、性能预算、运行脚本和当前用户文档。
+- 修复 rpi 迁移过程中暴露的 semantic graph source binding 与自包含 certification lane fixture 回归。
+
+### 完成过程
+- 在 `Cargo.toml` 将唯一 shipping `[[bin]]` 改为 `rpi`,保留产品名 `Pi`、library crate `pi` 和 feature-gated 内部 `pi_legacy_capture`。
+- 安装器与卸载器只管理 `rpi`;移除了将 Rust CLI 接管为 `pi` 的 adoption、legacy alias 和 compatibility alias 分支。offline archive 只接受 `rpi` / `rpi.exe`。
+- QuickJS `process.execPath` 的无 native executable fallback 改为 `/usr/bin/rpi`。
+- macOS source binding 只放行 root 持有且固定解析到 `/private/var` 或 `/private/tmp` 的 `/var`、`/tmp` 系统 alias,用户 symlink 继续拒绝。
+- 将缺失 ignored artifact 的 certification lane fixture 改为自包含 20-gate 形式,并修正一个严格 gate 名称。
+- 完成 Capture 到 `docs/solutions/security-issues/macos-system-alias-source-binding.md`,并将超过 1000 行的 `task_plan.md` 非删除式续档。
+
+### 验证
+- 3 条 semantic workspace graph 精确测试通过。
+- `bash -n install.sh uninstall.sh tests/installer_regression.sh` 通过;installer regression 40 项通过。
+- `cargo test -j 2 --test perf_budgets` 通过;`perf_regression` 为 142 passed。
+- `cargo fmt --check`、`cargo check -j 2 --all-targets`、`cargo clippy -j 2 --all-targets -- -D warnings` 通过。
+- shipping-binary 静态扫描无旧 `pi` target、环境变量或产物路径残留。
+
+### 总结感悟
+- 二进制改名要以 Cargo target 为唯一真相源,再沿安装、打包、测试 harness、自动化脚本和 runtime fallback 逐层收敛。
+- 认证 fixture 不能依赖 ignored 生成产物。测试数据必须自行满足 production 的严格 schema,不能为通过测试放宽 release gate。
+- 目录 alias 的安全例外必须固定在路径、owner 与 canonical target 三个条件上。只放行稳定 OS alias,不接受用户控制的泛化 symlink。

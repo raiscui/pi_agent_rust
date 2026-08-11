@@ -221,3 +221,13 @@
 ### 索引
 - 完整上下文见 `archive/branch_contexts/secret_cleanup/INDEX.md`
 - 当前树 + Git 历史已隔离; 唯一遗留项是这 4 条授权动作。
+
+## [2026-08-12 00:37:54] [Session ID: omx-1786418643597-4bz6s9] 后续说明: rpi 本地安装迁移
+
+### 当前事实
+- 项目的 shipping CLI 已更名为 `rpi`。之后从源码安装应使用 `cargo install --path . --bin rpi`。
+- 旧的 `~/.cargo/bin/pi` 可能来自此前版本,本轮没有删除任何本地文件。
+
+### 边界
+- 用户已安装的 `/Users/cuiluming/Library/pnpm/pi` 不在本仓库管理范围,不会被安装器、卸载器或本轮变更触碰。
+- 若需要删除旧 Cargo `pi` 文件,这是文件删除操作,必须由用户明确书面授权后单独处理。

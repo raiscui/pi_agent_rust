@@ -405,3 +405,63 @@
 - 是否产生 `rdog control` bash/tool 调用。
 - 如果产生调用, 是否因权限/unsupported command 失败。
 - 如果完全不调用, 则问题在弱模型 tool/skill 采纳能力, 而不是 rdog 外部环境。
+
+## [2026-08-11 12:55:00] [Session ID: omx-1786418643597-4bz6s9] 笔记: ToolUseProfile 加载流程
+
+### 静态发现
+- `load_models_config` 被 registry load 和 model catalog route 共同复用,在此处校验能保证无效引用 fail-closed,不会部分写入注册表。
+- `apply_custom_models_with_provider_headers` 同时覆盖自定义 provider/model 和 built-in provider override,是解析 `ToolUseProfile` 的唯一正确落点。
+- generated catalog 使用独立严格 schema,只能提供模型 membership。本轮构造 generated `ModelsConfig` 时保持 `tool_use_profiles` 为空,不扩展其权限边界。
+
+### 动态发现
+- 有效 red 测试在 custom model 已加载后因 profile 为 `None` 失败,证明被测路径和状态一致。
+- 接入后 4 个定向测试通过,覆盖 provider 继承、model 覆盖、未知引用和空引用。
+- `cargo test --lib` 最初暴露 10 个 merge 遗留编译错误。恢复既有 profile 扩展字段和 test-only helper 后,定向测试成功编译运行。
+
+### 结论
+- profile 名称只存在于 `ModelsConfig` 解析阶段;运行期单一真相源仍是 `ModelEntry.tool_use_profile: Option<ToolUseProfile>`。
+- 校验先于应用,未知或空引用不会退化成无 profile 模型。
+
+## [2026-08-11 22:01:00] [Session ID: omx-1786418643597-4bz6s9] 笔记: macOS scoped scan descriptor 路径
+
+### 现象
+- `ScopedScanRoot::io_path()` 在 macOS 生成 `/dev/fd/<fd>/.`,目录 fd 的 `fstat` 有效,但该路径不能用于 `read_dir` 或子进程 cwd。
+- 精确缓存测试在 `ensure_recursive_scan_access()` 阶段返回 `ENOENT`,scanner 尚未启动。
+
+### 假设验证
+- shell `test . -ef /dev/fd/0` 实验返回 false,不能作为可靠的 child identity guard,该候选方案已推翻。
+- `rustix 1.1.4` 已提供安全的 `rustix::fs::getpath`,底层是 Apple `F_GETPATH`,无需新增依赖或项目内 unsafe。
+- race 测试明确要求打开后的 cwd、目录和单文件在 pathname 被外部 symlink 替换后继续访问原 inode,因此简单 fail-closed 会破坏既有安全不变量。
+
+### 当前结论
+- Apple 分支应从已打开 fd 动态取得当前路径,并将路径 metadata 与 handle metadata 做 identity 校验。
+- 目录 scanner 使用该路径作为 cwd 和 `.` operand。单文件不能作为 cwd,应使用 pinned workspace cwd,把已验证的文件路径作为 operand。
+- Linux/Android 继续使用 `/proc/self/fd`,不改变其 descriptor 语义。
+
+## [2026-08-11 23:10:46] [Session ID: omx-1786418643597-4bz6s9] 笔记: rpi 调用面分类
+
+### 静态证据
+- `Cargo.toml` 已将唯一 shipping target 声明为 `[[bin]] name = "rpi"`,library crate 仍为 `pi`。
+- `tests/perf_budgets.rs`、`tests/perf_regression.rs` 仍有 `release/pi`、`perf/pi`、`debug/pi` 与 `custom-release/pi` 的断言,这些必须改为实际产物路径。
+- `.github/workflows/ci.yml`、`bench.yml`、`release.yml` 仍构建或打包 `pi`,会在 CI 或发布阶段失败。
+- `install.sh` 仍围绕 TypeScript `pi` 的 adoption 和 `rpi` wrapper alias 设计,与唯一 rpi binary 契约冲突。
+
+### 边界结论
+- 当前运行文档、安装器回归和性能命令属于本次迁移范围。
+- `docs/evidence/dropin-differential-evidence-suite.json` 与 benchmark comparison 记录历史证据,不改写其过去的 `pi` 路径或命令。
+- TypeScript 项目及 extension JS API 的 `pi` 命名不属于 Rust binary 迁移范围。
+
+## [2026-08-12 00:24:21] [Session ID: omx-1786418643597-4bz6s9] 笔记: drop-in lane 自包含 fixture
+
+### 现象
+- `canonical_dropin_verdict_uses_release_gate_age_limit` 在修复前返回 `Malformed`,而预期为 `Current`。
+- freshness 元数据已将失败归类为 `dropin_verdict_source_lane_invalid`。
+
+### 静态证据
+- `validate_dropin_certification_lane` 按顺序严格比对每个 gate 的 `id`、`name`、`bead`、`blocking`、`artifact_path` 和可选 `reproduce_command`。
+- production 的 `opportunity_matrix_integrity` 名称是 `Opportunity matrix artifact integrity`;测试 fixture 少了 `artifact`。
+
+### 动态证据与结论
+- 修正该名称前,精确测试失败为 `Some(Malformed)`。
+- 只修正该字符串后,同一条精确测试通过,证明 fixture 与 production 契约的这一精确字段不一致参与了失败路径。
+- 本轮没有放宽 source lane 校验,用户 symlink 的 fail-closed 边界仍需由后续精确测试复验。

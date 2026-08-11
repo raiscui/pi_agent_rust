@@ -31,6 +31,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 use tempfile::TempDir;
 
+#[path = "support/performance_budget_fixture.rs"]
+mod performance_budget_fixture;
+
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 fn reference_time() -> TestResult<DateTime<Utc>> {
@@ -118,24 +121,50 @@ fn canonical_dropin_contract_fixture() -> serde_json::Value {
 }
 
 fn canonical_certification_lane_fixture(generated_at: &str) -> TestResult<serde_json::Value> {
-    let canonical_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/full_suite_gate/certification_verdict.json");
-    let canonical: serde_json::Value = serde_json::from_slice(&fs::read(canonical_path)?)?;
-    let mut gates = canonical["gates"]
-        .as_array()
-        .ok_or("canonical certification lane gates must be an array")?
-        .clone();
-    for gate in &mut gates {
-        gate["status"] = json!("pass");
-        gate.as_object_mut()
-            .ok_or("canonical certification lane gate must be an object")?
-            .remove("detail");
-    }
+    // fixture 必须自包含,不能依赖被 gitignore 排除的真实认证产物。
+    let gates = [
+        ("non_mock_unit", "Non-mock unit compliance", "bd-1f42.2.6", true, "docs/non-mock-rubric.json", Some("cargo test --test non_mock_compliance_gate -- --nocapture")),
+        ("e2e_log_contract", "E2E log contract and transcripts", "bd-1f42.3.6", false, "tests/e2e_results", None),
+        ("ext_must_pass", "Extension must-pass gate", "bd-1f42.4.4", true, "tests/ext_conformance/reports/gate/must_pass_gate_verdict.json", Some("cargo test --test ext_conformance_generated --features ext-conformance -- conformance_must_pass_gate --nocapture --exact")),
+        ("ext_provider_compat", "Extension provider compatibility matrix", "bd-1f42.4.6", false, "tests/ext_conformance/reports/provider_compat/provider_compat_report.json", Some("cargo test --test ext_conformance_generated --features ext-conformance -- conformance_provider_compat_matrix --nocapture --exact")),
+        ("evidence_bundle", "Unified evidence bundle", "bd-1f42.6.8", false, "tests/evidence_bundle/index.json", Some("cargo test --test ci_evidence_bundle -- build_evidence_bundle --nocapture --exact")),
+        ("cross_platform", "Cross-platform matrix validation", "bd-1f42.6.7", true, "tests/cross_platform_reports/linux/platform_report.json", Some("cargo test --test ci_cross_platform_matrix -- cross_platform_matrix --nocapture --exact")),
+        ("conformance_regression", "Conformance regression gate", "bd-1f42.4", true, "tests/ext_conformance/reports/regression_verdict.json", Some("cargo test --test conformance_regression_gate -- --nocapture")),
+        ("conformance_pass_rate", "Conformance pass rate >= 80%", "bd-1f42.4", true, "tests/ext_conformance/reports/conformance_summary.json", Some("cargo test --test conformance_report -- --nocapture")),
+        ("suite_classification", "Suite classification guard", "bd-1f42.6.1", true, "tests/suite_classification.toml", None),
+        ("traceability_matrix", "Requirement traceability matrix", "bd-1f42.6.4", false, "docs/traceability_matrix.json", None),
+        ("e2e_scenario_matrix", "Canonical E2E scenario matrix", "bd-1f42.8.5.1", false, "docs/e2e_scenario_matrix.json", Some("python3 scripts/check_traceability_matrix.py")),
+        ("provider_gap_matrix", "Provider gap test matrix coverage", "bd-3uqg.11.11.5", false, "docs/provider-gaps-test-matrix.json", Some("cargo test --test provider_native_contract --test e2e_provider_scenarios -- --nocapture")),
+        ("sec_conformance", "SEC-6.4 security compatibility conformance", "bd-1a2cu", true, "tests/full_suite_gate/sec_conformance_verdict.json", Some("cargo test --test sec_compatibility_conformance -- --nocapture")),
+        ("perf3x_bead_coverage", "PERF-3X bead-to-artifact coverage audit", "bd-3ar8v.6.11", true, "tests/full_suite_gate/perf3x_bead_coverage_audit.json", Some("cargo test --test ci_full_suite_gate -- perf3x_bead_coverage_contract_is_well_formed --nocapture --exact")),
+        ("practical_finish_checkpoint", "Practical-finish checkpoint (docs-only residual filter)", "bd-3ar8v.6.9", true, "tests/full_suite_gate/practical_finish_checkpoint.json", Some("cargo test --test ci_full_suite_gate -- practical_finish_report_fails_when_technical_open_issues_remain --nocapture --exact")),
+        ("extension_remediation_backlog", "Extension remediation backlog artifact integrity", "bd-3ar8v.6.8", true, "tests/full_suite_gate/extension_remediation_backlog.json", Some("cargo test --test qa_certification_dossier -- certification_dossier --nocapture --exact")),
+        ("opportunity_matrix_integrity", "Opportunity matrix artifact integrity", "bd-3ar8v.6.1", true, "tests/perf/reports/opportunity_matrix.json", Some("cargo test --test release_evidence_gate -- phase1_weighted_attribution_contract_links_phase5_consumers --nocapture --exact")),
+        ("parameter_sweeps_integrity", "Parameter sweeps artifact integrity", "bd-3ar8v.6.2", true, "tests/perf/reports/parameter_sweeps.json", Some("cargo test --test release_evidence_gate -- parameter_sweeps_contract_links_phase1_matrix_and_readiness --nocapture --exact")),
+        ("conformance_stress_lineage", "Conformance+stress lineage coherence", "bd-3ar8v.6.3", true, "tests/ext_conformance/reports/conformance_summary.json", Some("cargo test --test ci_full_suite_gate -- conformance_stress_lineage_passes_with_valid_artifacts --nocapture --exact")),
+        ("waiver_lifecycle", "Waiver lifecycle compliance", "bd-1f42.8.8.1", true, "tests/full_suite_gate/waiver_audit.json", Some("cargo test --test ci_full_suite_gate -- waiver_lifecycle_audit --nocapture --exact")),
+    ]
+    .into_iter()
+    .map(|(id, name, bead, blocking, artifact_path, reproduce_command)| {
+        let mut gate = json!({
+            "id": id,
+            "name": name,
+            "bead": bead,
+            "status": "pass",
+            "blocking": blocking,
+            "artifact_path": artifact_path,
+        });
+        if let Some(reproduce_command) = reproduce_command {
+            gate["reproduce_command"] = json!(reproduce_command);
+        }
+        gate
+    })
+    .collect::<Vec<_>>();
+    let gate_count = gates.len();
     let blocking_total = gates
         .iter()
         .filter(|gate| gate["blocking"].as_bool() == Some(true))
         .count();
-    let total_gates = gates.len();
     Ok(json!({
         "schema": "pi.ci.certification_lane.v1",
         "lane": "full",
@@ -156,8 +185,8 @@ fn canonical_certification_lane_fixture(generated_at: &str) -> TestResult<serde_
         },
         "waivers_applied": [],
         "summary": {
-            "total_gates": total_gates,
-            "passed": total_gates,
+            "total_gates": gate_count,
+            "passed": gate_count,
             "failed": 0,
             "warned": 0,
             "skipped": 0,
@@ -1017,13 +1046,7 @@ fn graph_cache_validation_enforces_scope_ttl_and_path_policy() -> TestResult {
 }
 
 fn semantic_perf_budget_fixture() -> serde_json::Value {
-    let checked_in: serde_json::Value =
-        serde_json::from_str(include_str!("perf/reports/budget_summary.json"))
-            .expect("checked-in performance summary must be valid JSON");
-    let budgets = checked_in["budgets"]
-        .as_array()
-        .cloned()
-        .expect("checked-in performance summary must contain canonical budgets");
+    let budgets = performance_budget_fixture::canonical_budgets();
     let budget_results = budgets
         .iter()
         .map(|budget| {
@@ -1161,7 +1184,9 @@ fn canonical_dropin_verdict_admits_only_complete_source_bound_contract_evidence(
     )?;
     assert_eq!(
         verdict.freshness_status,
-        Some(EvidenceFreshnessStatus::Current)
+        Some(EvidenceFreshnessStatus::Current),
+        "freshness reason: {:?}",
+        verdict.metadata.get("freshness_reason")
     );
     assert_eq!(
         verdict.metadata.get("release_claim_allowed"),
@@ -2293,7 +2318,9 @@ fn performance_budget_freshness_accepts_clean_head_bound_artifact() -> TestResul
 
     assert_eq!(
         perf_budget.freshness_status,
-        Some(EvidenceFreshnessStatus::Current)
+        Some(EvidenceFreshnessStatus::Current),
+        "freshness reason: {:?}",
+        perf_budget.metadata.get("freshness_reason")
     );
     assert_eq!(
         perf_budget.metadata.get("release_claim_allowed"),

@@ -526,7 +526,7 @@ struct RunnerPaths {
 
 impl RunnerPaths {
     fn discover() -> anyhow::Result<Self> {
-        let rust_pi = PathBuf::from(env!("CARGO_BIN_EXE_pi"));
+        let rust_pi = PathBuf::from(env!("CARGO_BIN_EXE_rpi"));
         if !rust_pi.is_file() {
             anyhow::bail!("missing Rust Pi test binary: {}", rust_pi.display());
         }
@@ -712,7 +712,9 @@ fn run_pi_mono_rpc_sequence(
             .and_then(|paths| {
                 std::env::split_paths(&paths).find_map(|dir| {
                     let candidate = dir.join("node");
-                    candidate.is_file().then(|| candidate.to_string_lossy().into_owned())
+                    candidate
+                        .is_file()
+                        .then(|| candidate.to_string_lossy().into_owned())
                 })
             })
             .unwrap_or_else(|| "/usr/bin/node".to_string())

@@ -2278,7 +2278,7 @@ const DROPIN_VERDICT_REQUIRED_FIELDS: &[&str] = &[
     "evidence_index",
 ];
 const PERF_CANONICAL_BUDGET_INVENTORY_SHA256: &str =
-    "96e3147ef23e1c634d56265581975a2b619ac9a701f4839ef6f3f4b3987226ad";
+    "ba299455435c1d5e950bf44586b72af44597529f896d854e15365060eedf524c";
 const PERF_TOP_LEVEL_FIELDS: &[&str] = &[
     "schema",
     "generated_at",
@@ -3088,6 +3088,26 @@ fn trusted_git_executable() -> Option<PathBuf> {
     None
 }
 
+#[cfg(target_os = "macos")]
+fn is_macos_system_directory_alias(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    // macOS 将这两个稳定的系统入口重定向到 /private 下的真实目录。
+    let expected_target = match path.as_os_str().as_encoded_bytes() {
+        b"/var" => Path::new("/private/var"),
+        b"/tmp" => Path::new("/private/tmp"),
+        _ => return false,
+    };
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+
+    // 只信任 root 持有且解析结果固定的系统别名,用户创建的任意别名继续拒绝。
+    metadata.uid() == 0
+        && metadata.file_type().is_symlink()
+        && fs::canonicalize(path).ok().as_deref() == Some(expected_target)
+}
+
 fn canonical_real_directory(path: &Path) -> Option<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -3107,7 +3127,21 @@ fn canonical_real_directory(path: &Path) -> Option<PathBuf> {
             Component::Normal(segment) => {
                 lexical.push(segment);
                 let metadata = fs::symlink_metadata(&lexical).ok()?;
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                let is_trusted_system_alias = {
+                    #[cfg(target_os = "macos")]
+                    {
+                        is_macos_system_directory_alias(&lexical)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        false
+                    }
+                };
+                if metadata.file_type().is_symlink() {
+                    if !is_trusted_system_alias {
+                        return None;
+                    }
+                } else if !metadata.is_dir() {
                     return None;
                 }
             }

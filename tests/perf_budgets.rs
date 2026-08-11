@@ -91,7 +91,7 @@ const BUDGETS: &[Budget] = &[
         unit: "ms",
         threshold: 100.0,
         comparison: BudgetComparison::Maximum,
-        methodology: "hyperfine: `pi --version` (10 runs, 3 warmup)",
+        methodology: "hyperfine: `rpi --version` (10 runs, 3 warmup)",
         ci_enforced: true,
     },
     Budget {
@@ -101,7 +101,7 @@ const BUDGETS: &[Budget] = &[
         unit: "ms",
         threshold: 200.0,
         comparison: BudgetComparison::Maximum,
-        methodology: "hyperfine: `pi --print '.'` with full init (10 runs, 3 warmup)",
+        methodology: "hyperfine: `rpi --print '.'` with full init (10 runs, 3 warmup)",
         ci_enforced: false, // Requires API key or VCR
     },
     // ── Extension Loading ────────────────────────────────────────────────
@@ -268,7 +268,7 @@ const BUDGETS: &[Budget] = &[
         unit: "MB",
         threshold: BINARY_SIZE_RELEASE_BUDGET_MB,
         comparison: BudgetComparison::Maximum,
-        methodology: "ls -la target/release/pi (stripped)",
+        methodology: "ls -la target/release/rpi (stripped)",
         ci_enforced: true,
     },
     // ── Protocol Parsing ─────────────────────────────────────────────────
@@ -975,11 +975,11 @@ fn build_binary_size_candidate_paths(
     if let Some(path) = release_binary_override {
         paths.push(path);
     }
-    paths.push(target_dir.join("release/pi"));
+    paths.push(target_dir.join("release/rpi"));
     if !normalized_profile.is_empty() && !normalized_profile.eq_ignore_ascii_case("debug") {
-        paths.push(target_dir.join(normalized_profile).join("pi"));
+        paths.push(target_dir.join(normalized_profile).join("rpi"));
     }
-    paths.push(target_dir.join("perf/pi"));
+    paths.push(target_dir.join("perf/rpi"));
 
     let mut dedup = std::collections::HashSet::new();
     paths.retain(|path| dedup.insert(path.clone()));
@@ -3052,7 +3052,7 @@ fn budget_inventory_has_stable_cross_language_serialization() {
     ));
     assert_eq!(
         budget_inventory_sha256(),
-        "96e3147ef23e1c634d56265581975a2b619ac9a701f4839ef6f3f4b3987226ad",
+        "ba299455435c1d5e950bf44586b72af44597529f896d854e15365060eedf524c",
         "canonical v0.2.0 budget inventory drifted"
     );
 }
@@ -4514,21 +4514,21 @@ fn binary_size_candidate_builder_defaults_to_release_then_perf() {
     let candidates = build_binary_size_candidate_paths(target_dir, None, "");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
 #[test]
 fn binary_size_candidate_builder_prefers_release_override_then_release_then_perf() {
     let target_dir = Path::new("/tmp/pi-agent-target");
-    let override_path = target_dir.join("custom-release/pi");
+    let override_path = target_dir.join("custom-release/rpi");
     let candidates = build_binary_size_candidate_paths(target_dir, Some(override_path.clone()), "");
     assert_eq!(
         candidates,
         vec![
             override_path,
-            target_dir.join("release/pi"),
-            target_dir.join("perf/pi"),
+            target_dir.join("release/rpi"),
+            target_dir.join("perf/rpi"),
         ]
     );
 }
@@ -4540,9 +4540,9 @@ fn binary_size_candidate_builder_includes_non_debug_profile_before_perf() {
     assert_eq!(
         candidates,
         vec![
-            target_dir.join("release/pi"),
-            target_dir.join("bench-profile/pi"),
-            target_dir.join("perf/pi"),
+            target_dir.join("release/rpi"),
+            target_dir.join("bench-profile/rpi"),
+            target_dir.join("perf/rpi"),
         ]
     );
 }
@@ -4553,7 +4553,7 @@ fn binary_size_candidate_builder_ignores_debug_profile() {
     let candidates = build_binary_size_candidate_paths(target_dir, None, "debug");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
@@ -4563,7 +4563,7 @@ fn binary_size_candidate_builder_ignores_debug_profile_case_insensitive() {
     let candidates = build_binary_size_candidate_paths(target_dir, None, "DeBuG");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
@@ -4573,7 +4573,7 @@ fn binary_size_candidate_builder_ignores_padded_debug_profile_case_insensitive()
     let candidates = build_binary_size_candidate_paths(target_dir, None, "  DeBuG\t");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
@@ -4583,7 +4583,7 @@ fn binary_size_candidate_builder_dedups_perf_profile() {
     let candidates = build_binary_size_candidate_paths(target_dir, None, "perf");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
@@ -4593,17 +4593,17 @@ fn binary_size_candidate_builder_dedups_release_profile() {
     let candidates = build_binary_size_candidate_paths(target_dir, None, "release");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
 #[test]
 fn binary_size_candidate_builder_dedups_override_matching_release() {
     let target_dir = Path::new("/tmp/pi-agent-target");
-    let release = target_dir.join("release/pi");
+    let release = target_dir.join("release/rpi");
     let candidates =
         build_binary_size_candidate_paths(target_dir, Some(release.clone()), "release");
-    assert_eq!(candidates, vec![release, target_dir.join("perf/pi")]);
+    assert_eq!(candidates, vec![release, target_dir.join("perf/rpi")]);
 }
 
 #[test]
@@ -4612,7 +4612,7 @@ fn binary_size_candidate_builder_ignores_whitespace_only_profile() {
     let candidates = build_binary_size_candidate_paths(target_dir, None, " \t ");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
@@ -4622,7 +4622,7 @@ fn binary_size_candidate_builder_trims_profile_before_dedup() {
     let candidates = build_binary_size_candidate_paths(target_dir, None, " release ");
     assert_eq!(
         candidates,
-        vec![target_dir.join("release/pi"), target_dir.join("perf/pi")]
+        vec![target_dir.join("release/rpi"), target_dir.join("perf/rpi")]
     );
 }
 
