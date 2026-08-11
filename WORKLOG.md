@@ -650,3 +650,9 @@
 - 二进制改名要以 Cargo target 为唯一真相源,再沿安装、打包、测试 harness、自动化脚本和 runtime fallback 逐层收敛。
 - 认证 fixture 不能依赖 ignored 生成产物。测试数据必须自行满足 production 的严格 schema,不能为通过测试放宽 release gate。
 - 目录 alias 的安全例外必须固定在路径、owner 与 canonical target 三个条件上。只放行稳定 OS alias,不接受用户控制的泛化 symlink。
+
+### 最终交付
+- Commit: `700cd779 feat(cli): rename shipping binary to rpi`。
+- 已执行 `git pull --rebase my main`、`git push my main` 与 `git push my main:master`。
+- `HEAD`、`my/main`、`my/master` 最终一致。
+- 其他会话的 3 组未跟踪产物保持原样,没有进入 commit。

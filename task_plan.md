@@ -47,3 +47,25 @@
 ### 当前状态
 
 **正在运行提交前质量门** - 质量门通过后再暂存本轮已审查文件。
+
+## [2026-08-12 00:45:01] [Session ID: omx-1786418643597-4bz6s9] 阶段 5 完成: 提交与远端同步
+
+### 完成结果
+
+- beads ledger reconciliation 通过,没有 orphan ledger gap 或失配的 gap-tracking bead。
+- staged UBS 在 60 秒内完成且没有 finding;staged `git diff --check` 通过。
+- 本轮 66 个文件已提交为 `700cd779 feat(cli): rename shipping binary to rpi`。
+- `git pull --rebase my main` 成功;`git push my main` 和 `git push my main:master` 成功。
+- `HEAD`、`my/main` 与 `my/master` 均为 `700cd779f52a9f61cc3900586ae3cd023b09902a`。
+
+### 保留状态
+
+- 未跟踪的 `legacy_pi_mono_code/pi-mono/pnpm-lock.yaml`、`tests/cross_platform_reports/macos/`、`tests/evidence_bundle/` 是其他会话产物,未修改也未提交。
+
+### 最终待办
+
+- [x] 检查最终 diff,运行 ledger 与 staged UBS,只 stage 本轮文件并提交推送 `my/main`。
+
+### 当前状态
+
+**任务完成** - rpi binary 迁移、认证回归修复、质量门、知识 Capture、上下文续档和远端同步均已完成。
