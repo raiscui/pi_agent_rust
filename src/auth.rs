@@ -1,6 +1,6 @@
 //! Authentication storage and API key resolution.
 //!
-//! Auth file: ~/.pi/agent/auth.json
+//! Auth file: ~/.rpi/agent/auth.json
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -253,7 +253,7 @@ pub enum AuthCredential {
     },
     /// OAuth credential, serialized in the shape upstream TS pi
     /// (`@earendil-works/pi-coding-agent`) reads and writes to the shared
-    /// `~/.pi/agent/auth.json`: `{"type":"oauth","access":..,"refresh":..,"expires":..}`
+    /// `~/.rpi/agent/auth.json`: `{"type":"oauth","access":..,"refresh":..,"expires":..}`
     /// (see `pi-ai` `dist/auth/types.d.ts` `OAuthCredential`). The variant tag and
     /// field names carry `alias`es for the historical pi_agent_rust shape
     /// (`o_auth` / `access_token` / `refresh_token`) so previously-written
@@ -1136,7 +1136,7 @@ where
 impl AuthStorage {
     fn allow_external_provider_lookup(&self) -> bool {
         // External credential auto-detection is intended for Pi's global auth
-        // file (typically `~/.pi/agent/auth.json`). Scoping it this way keeps
+        // file (typically `~/.rpi/agent/auth.json`). Scoping it this way keeps
         // tests and custom auth sandboxes deterministic.
         self.path.eq(&Config::auth_path())
     }
@@ -4544,31 +4544,24 @@ fn sanitize_ascii_header_value(value: &str, fallback: &str) -> String {
     }
 }
 
-fn kimi_device_id_paths() -> Option<(PathBuf, PathBuf)> {
-    let primary = kimi_share_dir()?.join("device_id");
-    let legacy = home_dir().map_or_else(
-        || primary.clone(),
-        |home| home.join(".pi").join("agent").join("kimi-device-id"),
-    );
-    Some((primary, legacy))
+fn kimi_device_id_path() -> Option<PathBuf> {
+    Some(kimi_share_dir()?.join("device_id"))
 }
 
 fn kimi_device_id() -> String {
     let generated = uuid::Uuid::new_v4().simple().to_string();
-    let Some((primary, legacy)) = kimi_device_id_paths() else {
+    let Some(path) = kimi_device_id_path() else {
         return generated;
     };
 
-    for path in [&primary, &legacy] {
-        if let Ok(existing) = fs::read_to_string(path) {
-            let existing = existing.trim();
-            if !existing.is_empty() {
-                return existing.to_string();
-            }
+    if let Ok(existing) = fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if !existing.is_empty() {
+            return existing.to_string();
         }
     }
 
-    if let Some(parent) = primary.parent()
+    if let Some(parent) = path.parent()
         && let Err(err) = fs::create_dir_all(parent)
     {
         tracing::debug!(
@@ -4587,11 +4580,11 @@ fn kimi_device_id() -> String {
         options.mode(0o600);
     }
 
-    if let Ok(mut file) = options.open(&primary)
+    if let Ok(mut file) = options.open(&path)
         && let Err(err) = file.write_all(generated.as_bytes())
     {
         tracing::debug!(
-            path = ?primary,
+            path = ?path,
             error = %err,
             "Failed to write generated credential data to file"
         );

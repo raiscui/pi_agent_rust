@@ -663,7 +663,7 @@ command, and artifact pointers together so triage can be reproduced exactly.
 #### Swarm coordination troubleshooting
 
 - Preflight command:
-  `pi doctor --only swarm --format json`
+  `rpi doctor --only swarm --format json`
 - Confirms:
   Beads JSONL health, stale `in_progress` work, Agent Mail status/inbox/reservations,
   git dirty-state, `rch status`, and `CARGO_TARGET_DIR`/`TMPDIR` headroom.

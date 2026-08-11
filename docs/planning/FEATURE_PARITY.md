@@ -394,7 +394,7 @@ Fixtures are JSON files in `tests/conformance/fixtures/` with this structure:
 
 | Metric | Target | Current | Status |
 |--------|--------|---------|--------|
-| Startup time | <100ms | 13ms (`pi --version`) | ✅ |
+| Startup time | <100ms | 13ms (`rpi --version`) | ✅ |
 | Binary size (release) | <20MB | 8.3MB | ✅ |
 | TUI framerate | 60fps | Instrumented (PERF-3: frame timing telemetry) | ✅ |
 | Frame budget | <16ms | Enforced (PERF-4: auto-degrades when exceeded) | ✅ |

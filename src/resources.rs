@@ -343,7 +343,7 @@ impl ResourceLoader {
         // Extension entries:
         // - `--no-extensions` disables configured + auto discovery but still allows CLI `-e` sources.
         // - Deduplicate by canonical extension ID so that transpiled cache copies
-        //   in `~/.pi/agent/cache/modules/` don't cause command collisions with
+        //   in `~/.rpi/agent/cache/modules/` don't cause command collisions with
         //   the original source `.ts` extensions (Issue #37).
         let extension_entries = dedupe_extension_entries_by_id(merge_resource_paths(
             &[],
@@ -1983,7 +1983,7 @@ fn module_cache_dir() -> Option<PathBuf> {
             Some(PathBuf::from(raw))
         };
     }
-    dirs::home_dir().map(|home| home.join(".pi").join("agent").join("cache").join("modules"))
+    Some(Config::global_dir().join("cache").join("modules"))
 }
 
 fn is_cache_module_path_with_cache_dir(path: &Path, cache_dir: Option<&Path>) -> bool {
@@ -2026,7 +2026,7 @@ fn extension_dedupe_key_from_path(path: &Path) -> Option<String> {
 /// entries over transpiled cache copies (Issue #37).
 ///
 /// When both a source `.ts` extension and its transpiled cache copy in
-/// `~/.pi/agent/cache/modules/` are discovered, the cache entry is dropped to
+/// `~/.rpi/agent/cache/modules/` are discovered, the cache entry is dropped to
 /// prevent command collisions at load time.
 fn dedupe_extension_entries_by_id(entries: Vec<PathBuf>) -> Vec<PathBuf> {
     let cache_dir = module_cache_dir();

@@ -28,7 +28,7 @@ This crosswalk maps every user-visible provider name (including upstream aliases
 
 **Total**: 94 registered canonical provider IDs and 51 aliases. Registration
 coverage is not a claim that every ID has an executable native route; use
-`pi --list-providers` and the implementation-mode evidence for runtime status.
+`rpi --list-providers` and the implementation-mode evidence for runtime status.
 
 ### Native providers (dedicated adapter)
 
@@ -390,7 +390,7 @@ The `AuthDiagnosticCode` enum (`src/error.rs:67-81`) provides stable machine cod
 | Rate limit | 429 | `{"type":"error","error":{"type":"rate_limit_error","message":"..."}}` | — | `verify_anthropic_error_rate_limit_429.json` |
 | Bad request | 400 | `{"type":"error","error":{"type":"invalid_request_error","message":"..."}}` | — | `verify_anthropic_error_bad_request_400.json` |
 
-**User-facing message**: `"Missing API key for Anthropic. Set ANTHROPIC_API_KEY or use 'pi auth'."`
+**User-facing message**: `"Missing API key for Anthropic. Set ANTHROPIC_API_KEY or use 'rpi auth'."`
 **Source**: `src/providers/anthropic.rs:158-167`
 
 ### OpenAI
@@ -544,10 +544,10 @@ The auth system (`src/auth.rs`) resolves credentials in this order:
 
 1. **Explicit override** — `--api-key` flag or per-request key
 2. **Stored OAuth or bearer token** — an unexpired OAuth access token or a
-   `BearerToken` entry in `~/.pi/agent/auth.json`
+   `BearerToken` entry in `~/.rpi/agent/auth.json`
 3. **Environment variables** — provider-specific vars from
    `provider_auth_env_keys()`, in their documented order
-4. **Stored API key** — an `ApiKey` entry in `~/.pi/agent/auth.json`
+4. **Stored API key** — an `ApiKey` entry in `~/.rpi/agent/auth.json`
 5. **External coding-CLI credential** — supported credentials auto-detected
    from another local coding CLI, only when using Pi's global auth storage
 

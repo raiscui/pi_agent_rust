@@ -656,3 +656,23 @@
 - 已执行 `git pull --rebase my main`、`git push my main` 与 `git push my main:master`。
 - `HEAD`、`my/main`、`my/master` 最终一致。
 - 其他会话的 3 组未跟踪产物保持原样,没有进入 commit。
+
+## [2026-08-12 02:17:00] [Session ID: omx-1786418643597-4bz6s9] 任务名称: 默认 agent 目录迁移到 `.rpi/agent`
+
+### 任务内容
+- 将默认全局 agent 根目录从 `~/.pi/agent` 改为 `~/.rpi/agent`,不保留旧目录 fallback。
+- 收敛 Rust shipping CLI `rpi` 的 SDK、运行文档、规划规范、provider 示例与 swarm fixture 调用面。
+
+### 完成过程
+- `Config::global_dir()` 作为唯一默认路径来源;资源缓存与 QuickJS 模块缓存都通过它派生。
+- 移除 Kimi 读取旧目录的 device-id fallback。
+- 静态扫描发现并补齐 provider JSON、规划文档和 golden 中遗漏的 `pi` 命令。
+- 保留 TypeScript Pi、library crate `pi`、schema、项目级 `.pi/` 和历史/外部材料。
+
+### 验证
+- `cli_metadata_uses_rpi`、`global_dir_defaults_to_rpi_agent` 与 swarm replay fixture 精确测试通过。
+- `cargo fmt --check`、`cargo check -j 2 --all-targets`、`cargo clippy -j 2 --all-targets -- -D warnings` 通过。
+- 修改后的 JSON 均通过 `jq empty`;运行面扫描没有旧全局目录或 Rust `pi` 命令残留。
+
+### 总结感悟
+- 二进制改名和配置目录改名需要以运行面扫描收口,仅依赖最初命中列表容易漏掉 provider 示例、规划规范和 fixture。

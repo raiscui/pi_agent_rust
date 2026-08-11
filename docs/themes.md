@@ -14,7 +14,7 @@ If something described here doesn’t match what you see, check `src/theme.rs` a
 
 Pi discovers custom themes by scanning these directories for `*.json` files:
 
-- Global: `~/.pi/agent/themes/`
+- Global: `~/.rpi/agent/themes/`
 - Project: `<cwd>/.pi/themes/`
 
 Discovery is by file extension only; Pi loads each JSON file and uses the `name` field inside it.
@@ -32,7 +32,7 @@ Note: `/settings` includes a Theme entry that opens the picker. `/theme` remains
 
 Set `theme` in your settings JSON:
 
-- Global: `~/.pi/agent/settings.json`
+- Global: `~/.rpi/agent/settings.json`
 - Project: `<cwd>/.pi/settings.json`
 
 Example:

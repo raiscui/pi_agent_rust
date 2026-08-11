@@ -6,7 +6,7 @@ Pi supports a headless RPC mode for integration with IDEs and other tools.
 
 Start Pi in RPC mode:
 ```bash
-pi --mode rpc
+rpi --mode rpc
 ```
 
 Communication is via **JSON Lines** over stdin/stdout. Each line must be a valid JSON object.

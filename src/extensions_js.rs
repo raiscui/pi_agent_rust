@@ -23,6 +23,7 @@
 //!   drain microtasks (Promises .then chains)
 //! ```
 
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::hostcall_io_uring_lane::{
     HostcallCapabilityClass, HostcallIoHint, IoUringLaneDecisionInput,
@@ -4580,7 +4581,7 @@ pub struct PiJsRuntimeConfig {
     ///
     /// When set, transpiled module sources are cached on disk keyed by a
     /// content-aware hash so that SWC transpilation is skipped across process
-    /// restarts. Defaults to `~/.pi/agent/cache/modules/` (overridden by
+    /// restarts. Defaults to `~/.rpi/agent/cache/modules/` (overridden by
     /// `PIJS_MODULE_CACHE_DIR`). Set to `None` to disable.
     pub disk_cache_dir: Option<PathBuf>,
 }
@@ -4617,7 +4618,7 @@ impl Default for PiJsRuntimeConfig {
 
 /// Resolve the persistent module disk cache directory.
 ///
-/// Priority: `PIJS_MODULE_CACHE_DIR` env var > `~/.pi/agent/cache/modules/`.
+/// Priority: `PIJS_MODULE_CACHE_DIR` env var > `~/.rpi/agent/cache/modules/`.
 /// Set `PIJS_MODULE_CACHE_DIR=""` to explicitly disable the disk cache.
 fn runtime_disk_cache_dir() -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os("PIJS_MODULE_CACHE_DIR") {
@@ -4627,7 +4628,7 @@ fn runtime_disk_cache_dir() -> Option<PathBuf> {
             Some(PathBuf::from(raw))
         };
     }
-    dirs::home_dir().map(|home| home.join(".pi").join("agent").join("cache").join("modules"))
+    Some(Config::global_dir().join("cache").join("modules"))
 }
 
 #[derive(Debug)]
@@ -9386,7 +9387,7 @@ export function getAgentDir() {
     globalThis.pi && globalThis.pi.env && typeof globalThis.pi.env.get === "function"
       ? globalThis.pi.env.get("HOME")
       : undefined;
-  return home ? `${home}/.pi/agent` : "/home/unknown/.pi/agent";
+  return home ? `${home}/.rpi/agent` : "/home/unknown/.rpi/agent";
 }
 
 // Canonical upstream action IDs used by extension-facing key hints. Keep the

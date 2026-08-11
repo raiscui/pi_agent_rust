@@ -212,7 +212,7 @@
               "sha256": "fixture-doctor-sha256",
               "captured_at": "2026-05-13T17:33:00Z",
               "generated_at": "2026-05-13T17:33:00Z",
-              "command": "pi doctor --only swarm --format json",
+              "command": "rpi doctor --only swarm --format json",
               "git_commit": "fixture",
               "workspace_root": "/data/projects/pi_agent_rust"
             },

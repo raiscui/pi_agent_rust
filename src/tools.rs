@@ -3958,7 +3958,7 @@ async fn ensure_parent_allows_creation(path: &Path) -> std::io::Result<()> {
 
 /// Same scoping contract as `enforce_cwd_scope`, but also accepts paths under
 /// the configured pi-agent directory (`Config::global_dir()`, default
-/// `~/.pi/agent/`, override via `PI_CODING_AGENT_DIR`).
+/// `~/.rpi/agent/`, override via `PI_CODING_AGENT_DIR`).
 ///
 /// Read access is broadened so the model can fetch the bodies of skill files,
 /// prompt templates, and other resources that ship under the agent dir
@@ -3968,11 +3968,11 @@ async fn ensure_parent_allows_creation(path: &Path) -> std::io::Result<()> {
 /// risk surface than the read case warrants. See pi_agent_rust#71.
 ///
 /// Symlink escapes remain blocked because `safe_canonicalize` resolves
-/// symlinks before the prefix check, so e.g. `~/.pi/agent/skills/foo/SKILL.md`
+/// symlinks before the prefix check, so e.g. `~/.rpi/agent/skills/foo/SKILL.md`
 /// pointing at `/etc/passwd` resolves to `/etc/passwd` and fails the prefix
 /// test against both cwd and agent dir. `extra_roots` adds further trusted
 /// canonical roots (e.g. a project's repo dir that the agent's skill
-/// symlinks into `~/.pi/agent/skills/`).
+/// symlinks into `~/.rpi/agent/skills/`).
 fn enforce_read_scope_with_roots(
     path: &Path,
     cwd: &Path,
@@ -13387,7 +13387,7 @@ mod tests {
     }
 
     /// Issue #71: skill files, prompt templates, and themes live under the
-    /// agent dir (`~/.pi/agent/`, default). The agent legitimately needs to
+    /// agent dir (`~/.rpi/agent/`, default). The agent legitimately needs to
     /// read these even when cwd is a user project on a different path.
     /// Ensure `enforce_read_scope_with_roots` accepts the agent dir as a
     /// second valid root without breaking the cwd-only contract for paths
@@ -13457,7 +13457,7 @@ mod tests {
     }
 
     /// Extra roots must allow reads outside both cwd and agent dir.
-    /// This is the primary use case for skill symlinks: `~/.pi/agent/skills/rdog-control/SKILL.md`
+    /// This is the primary use case for skill symlinks: `~/.rpi/agent/skills/rdog-control/SKILL.md`
     /// symlinks to a path under `/Users/.../rustdog/.codex/...`; the rustdog
     /// repo root must be in the allowlist for the read to succeed.
     #[test]
@@ -13524,7 +13524,7 @@ mod tests {
 
     /// Symlink under agent_dir that resolves to a path under extra_root must be allowed.
     /// This is the precise scenario the user reported: skill file at
-    /// `~/.pi/agent/skills/rdog-control/SKILL.md` symlinks to
+    /// `~/.rpi/agent/skills/rdog-control/SKILL.md` symlinks to
     /// `/Users/.../rustdog/.codex/skills/rdog-control/SKILL.md`.
     #[test]
     fn test_enforce_read_scope_allows_symlink_via_extra_root() {

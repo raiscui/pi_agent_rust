@@ -75,7 +75,7 @@ Before starting a swarm or a heavyweight all-target gate, inspect the host
 resource budget:
 
 ```bash
-pi doctor --only swarm --format json
+rpi doctor --only swarm --format json
 ```
 
 The `pi.doctor.swarm_resource_preflight.v1` finding reports cgroup CPU quota,

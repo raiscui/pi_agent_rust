@@ -8,19 +8,19 @@ Pi loads settings from (up to) two files:
 
 | Location | Scope |
 |----------|-------|
-| `~/.pi/agent/settings.json` | Global (all projects) |
+| `~/.rpi/agent/settings.json` | Global (all projects) |
 | `.pi/settings.json` | Project (current directory) |
 
 You can override the path entirely with `PI_CONFIG_PATH` (see below).
 
-Run `pi config` to print the effective paths and precedence.
+Run `rpi config` to print the effective paths and precedence.
 
 ## Precedence (highest → lowest)
 
 1. CLI flags
 2. Environment variables
 3. Project settings (`.pi/settings.json`)
-4. Global settings (`~/.pi/agent/settings.json`)
+4. Global settings (`~/.rpi/agent/settings.json`)
 5. Built-in defaults
 
 ## `PI_CONFIG_PATH` (single-file mode)
@@ -41,7 +41,7 @@ Within a single file, missing nested keys fall back to built-in defaults when ac
 Example:
 
 ```json
-// ~/.pi/agent/settings.json (global)
+// ~/.rpi/agent/settings.json (global)
 { "compaction": { "enabled": false, "reserve_tokens": 16384 } }
 ```
 

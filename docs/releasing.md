@@ -3,13 +3,13 @@
 This repo ships:
 - A crates.io package: `pi_agent_rust` (Cargo `[package].name`)
 - A library crate: `pi` (Cargo `[lib].name`)
-- A binary: `pi` (Cargo `[[bin]].name`)
+- A binary: `rpi` (Cargo `[[bin]].name`)
 
 The Cargo source package also retains the internal `pi_legacy_capture`
 conformance utility because integration tests execute it through
 `CARGO_BIN_EXE_pi_legacy_capture`. It is gated by the non-default
 `internal-legacy-capture` feature and is not a supported release artifact.
-Ordinary `cargo install pi_agent_rust --locked` therefore installs only `pi`;
+Ordinary `cargo install pi_agent_rust --locked` therefore installs only `rpi`;
 repository gates that cover the utility explicitly enable its internal feature.
 
 ## Versioning + tags (source of truth)
@@ -17,7 +17,7 @@ repository gates that cover the utility explicitly enable its internal feature.
 
 - **Tag format:** `vX.Y.Z` (SemVer). Example: `v0.2.0`.
 - **Pre-releases:** `vX.Y.Z-rc.1` (or similar). Example: `v0.2.0-rc.1`.
-- **Coupling:** `pi_agent_rust` (crate), `pi` (lib), and `pi` (binary) are all built from the same package, so they share one version number.
+- **Coupling:** `pi_agent_rust` (crate), `pi` (lib), and `rpi` (binary) are all built from the same package, so they share one version number.
 - **Sibling repos:** `asupersync`, `rich_rust`, `charmed_rust`, `sqlmodel_rust` are versioned independently in their own repos.
 
 ### Publishing to crates.io
@@ -54,7 +54,7 @@ versions, registry sources, and checksums rather than unrelated repository HEADs
 ### Publishing GitHub Releases binaries
 `.github/workflows/release.yml` is triggered on tag pushes matching `v*` and will:
 - run the full frozen-SHA format/check/clippy/test and release-evidence gates
-- build `pi` for Linux/macOS/Windows and reject every native binary whose raw
+- build `rpi` for Linux/macOS/Windows and reject every native binary whose raw
   executable size is greater than or equal to 22 MiB (23,068,672 bytes)
 - attach platform archives, per-target build manifests, and `SHA256SUMS` to a
   verified draft, preserving matching assets and adding only missing ones on a
@@ -124,7 +124,7 @@ Run this matrix before declaring distribution parity complete for a release cand
    - `command -v rpi && rpi --version && rpi --help >/dev/null`
 2. Host with an existing TypeScript `pi`:
    - `curl .../install.sh | bash`
-   - `pi --version` remains the existing command
+   - `pi --version` remains the existing TypeScript command
    - `rpi --version` resolves to the Rust build
 3. Pinned enterprise/CI rollout:
    - `install.sh --version vX.Y.Z`
@@ -1391,7 +1391,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
        --run-id "$DSR_BUILD_RUN_ID" \
        --state-dir "$PRESERVED_DSR_STATE_DIR" \
        --output-dir "$RAW_RELEASE_DIR" -- \
-       build pi --version 0.2.0 \
+       build rpi --version 0.2.0 \
        --targets linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64 \
        --only-native --jobs 1 > "$build_receipt"
    )

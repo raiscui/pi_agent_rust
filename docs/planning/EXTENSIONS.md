@@ -1095,7 +1095,7 @@ schema exactly. One log entry per line.
 - Stable IDs (like `scenario_id`) must be deterministic and **not** randomized.
 
 **Log sinks (documented contract):**
-- **Runtime:** `~/.pi/agent/logs/extensions/<session_id>.jsonl`
+- **Runtime:** `~/.rpi/agent/logs/extensions/<session_id>.jsonl`
   (override with `PI_EXTENSION_LOG_DIR`).
 - **Capture:** `tests/ext_conformance/capture/<ext>/<scenario>/extension.log.jsonl`
 - **Harness:** `target/ext_conformance/logs/<scenario_id>.jsonl`
@@ -1317,10 +1317,10 @@ Pi exposes user-facing presets through `extensionPolicy.profile` and
 To inspect exactly why each capability is allowed/prompted/denied, run:
 
 ```bash
-pi --explain-extension-policy
-pi --explain-extension-policy --extension-policy safe
-pi --explain-extension-policy --extension-policy balanced
-PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced --explain-extension-policy
+rpi --explain-extension-policy
+rpi --explain-extension-policy --extension-policy safe
+rpi --explain-extension-policy --extension-policy balanced
+PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced --explain-extension-policy
 ```
 
 `--explain-extension-policy` emits:
@@ -1331,7 +1331,7 @@ PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced --explain-extensio
 ### 4.2 Operator Rollout Playbooks (Local + CI)
 
 Recommended rollout order:
-1. Start in `safe` and inspect decisions (`pi --explain-extension-policy`).
+1. Start in `safe` and inspect decisions (`rpi --explain-extension-policy`).
 2. Move to `balanced` to validate prompt-mode UX while dangerous caps remain denied.
 3. Use `PI_EXTENSION_ALLOW_DANGEROUS=1` only for runs that require dangerous caps.
 4. Use `permissive` only as a short-lived debugging override, then revert.
@@ -1350,27 +1350,27 @@ Local operator baseline (`settings.json`):
 Local verification:
 
 ```bash
-pi --explain-extension-policy
-pi --extension-policy balanced --explain-extension-policy
-PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced --explain-extension-policy
+rpi --explain-extension-policy
+rpi --extension-policy balanced --explain-extension-policy
+PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced --explain-extension-policy
 ```
 
 CI baseline (default deny posture):
 
 ```bash
-pi --extension-policy safe --explain-extension-policy
+rpi --extension-policy safe --explain-extension-policy
 ```
 
 CI opt-in job (only for suites that require dangerous capabilities):
 
 ```bash
-PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced --explain-extension-policy
+PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced --explain-extension-policy
 ```
 
 Rollback:
 - remove `PI_EXTENSION_ALLOW_DANGEROUS` from the environment,
 - set `extensionPolicy.profile` to `safe`,
-- re-run `pi --explain-extension-policy` and verify dangerous capability decisions are `deny`.
+- re-run `rpi --explain-extension-policy` and verify dangerous capability decisions are `deny`.
 
 ### 4.3 Audit Expectations for Dangerous-Capability Runs
 

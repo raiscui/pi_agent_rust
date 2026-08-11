@@ -237,14 +237,14 @@
         "action": "Use VCR debug mode for request/response inspection",
         "safe": true,
         "details": "Set VCR_DEBUG_BODY=1 to see redacted request/response bodies. All sensitive fields are replaced with [REDACTED] before output.",
-        "example": "VCR_MODE=record VCR_DEBUG_BODY=1 pi --model claude-sonnet-4-5 -p 'test'"
+        "example": "VCR_MODE=record VCR_DEBUG_BODY=1 rpi --model claude-sonnet-4-5 -p 'test'"
       },
       {
         "step": 5,
         "action": "Save debug output to file for support",
         "safe": true,
         "details": "Use VCR_DEBUG_BODY_FILE=path to write redacted debug data to a file. Safe to share with support — all credentials are replaced with [REDACTED].",
-        "example": "VCR_MODE=record VCR_DEBUG_BODY_FILE=/tmp/debug.json pi -p 'test'"
+        "example": "VCR_MODE=record VCR_DEBUG_BODY_FILE=/tmp/debug.json rpi -p 'test'"
       },
       {
         "step": 6,
@@ -258,7 +258,7 @@
         "action": "Check auth.json credential status (existence only)",
         "safe": true,
         "details": "Verify auth.json has an entry for the provider without reading the key value.",
-        "example": "jq 'keys' ~/.pi/agent/auth.json  # shows provider names, not key values"
+        "example": "jq 'keys' ~/.rpi/agent/auth.json  # shows provider names, not key values"
       }
     ],
     "anti_patterns": [
@@ -268,9 +268,9 @@
         "safe_alternative": "echo ${ANTHROPIC_API_KEY:0:7}... (prefix only)"
       },
       {
-        "bad": "cat ~/.pi/agent/auth.json",
+        "bad": "cat ~/.rpi/agent/auth.json",
         "why": "Dumps all stored credentials to terminal",
-        "safe_alternative": "jq 'keys' ~/.pi/agent/auth.json (provider names only)"
+        "safe_alternative": "jq 'keys' ~/.rpi/agent/auth.json (provider names only)"
       },
       {
         "bad": "curl -v https://api.anthropic.com/...",

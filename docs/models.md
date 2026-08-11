@@ -6,8 +6,8 @@ Pi loads available models from a built-in registry and an optional user-defined 
 
 | Path | Description |
 |------|-------------|
-| `~/.pi/agent/models.json` | User-defined model overrides and custom providers |
-| `~/.pi/agent/models.fetched.json` | Generated v2 live-catalog membership; managed only by `--persist-models` |
+| `~/.rpi/agent/models.json` | User-defined model overrides and custom providers |
+| `~/.rpi/agent/models.fetched.json` | Generated v2 live-catalog membership; managed only by `--persist-models` |
 
 Do not hand-edit `models.fetched.json`. Its provider/model IDs are bound to the
 fetching endpoint and transport shape by a non-secret fingerprint and timestamp. The
@@ -336,8 +336,8 @@ out-of-the-box without a `models.json` entry:
 
 ```bash
 # Defaults: llama-server -> http://127.0.0.1:8080/v1, mistral.rs -> http://127.0.0.1:1234/v1
-pi --provider llamacpp  --model ggml-org/gemma-4-E4B-it-GGUF -p "hi"
-pi --provider mistralrs --model default -p "hi"
+rpi --provider llamacpp  --model ggml-org/gemma-4-E4B-it-GGUF -p "hi"
+rpi --provider mistralrs --model default -p "hi"
 ```
 
 Provider aliases are accepted: `llama.cpp` / `llama-cpp` / `llama-server` ->

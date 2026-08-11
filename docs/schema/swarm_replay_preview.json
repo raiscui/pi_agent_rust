@@ -36,7 +36,7 @@
       ],
       "properties": {
         "invocation": {
-          "const": "pi swarm-replay-preview"
+          "const": "rpi swarm-replay-preview"
         },
         "cwd": {
           "type": "string",

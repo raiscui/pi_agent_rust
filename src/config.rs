@@ -49,12 +49,12 @@ pub struct Config {
 
     /// Extra roots the read tool is allowed to read in addition to cwd and agent dir.
     ///
-    /// Symlinks under `~/.pi/agent/skills/` (or other agent-controlled paths) may
+    /// Symlinks under `~/.rpi/agent/skills/` (or other agent-controlled paths) may
     /// canonicalize to locations outside both cwd and agent dir. Add those
     /// canonical root paths here so the read tool scope check accepts them.
     ///
     /// Example: `"readScopeAllowlist": ["/Users/me/projects/rustdog"]` allows
-    /// `~/.pi/agent/skills/rdog-control/SKILL.md` to be read even though it
+    /// `~/.rpi/agent/skills/rdog-control/SKILL.md` to be read even though it
     /// symlinks to `/Users/me/projects/rustdog/.codex/skills/rdog-control/SKILL.md`.
     ///
     /// Env override: `PI_READ_SCOPE_ALLOWLIST` (colon-separated paths, overrides config).
@@ -1046,7 +1046,7 @@ where
         || {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join(".pi")
+                .join(".rpi")
                 .join("agent")
         },
         PathBuf::from,
@@ -1638,6 +1638,12 @@ mod tests {
             extension_index,
             PathBuf::from("root-dir").join("extension-index.json")
         );
+    }
+
+    #[test]
+    fn global_dir_defaults_to_rpi_agent() {
+        let global = global_dir_from_env(|_| None);
+        assert!(global.ends_with(PathBuf::from(".rpi").join("agent")));
     }
 
     #[test]

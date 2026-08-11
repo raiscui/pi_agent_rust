@@ -120,7 +120,7 @@ fn canonical_dropin_contract_fixture() -> serde_json::Value {
     })
 }
 
-fn canonical_certification_lane_fixture(generated_at: &str) -> TestResult<serde_json::Value> {
+fn canonical_certification_lane_fixture(generated_at: &str) -> serde_json::Value {
     // fixture 必须自包含,不能依赖被 gitignore 排除的真实认证产物。
     let gates = [
         ("non_mock_unit", "Non-mock unit compliance", "bd-1f42.2.6", true, "docs/non-mock-rubric.json", Some("cargo test --test non_mock_compliance_gate -- --nocapture")),
@@ -165,7 +165,7 @@ fn canonical_certification_lane_fixture(generated_at: &str) -> TestResult<serde_
         .iter()
         .filter(|gate| gate["blocking"].as_bool() == Some(true))
         .count();
-    Ok(json!({
+    json!({
         "schema": "pi.ci.certification_lane.v1",
         "lane": "full",
         "generated_at": generated_at,
@@ -206,7 +206,7 @@ fn canonical_certification_lane_fixture(generated_at: &str) -> TestResult<serde_
             "full_command": "cargo test --test ci_full_suite_gate -- full_certification --nocapture --exact",
             "single_gate_template": "See reproduce_command field on each gate"
         }
-    }))
+    })
 }
 
 fn commit_fixture_path(root: &Path, path: &str, message: &str) -> TestResult {
@@ -216,7 +216,7 @@ fn commit_fixture_path(root: &Path, path: &str, message: &str) -> TestResult {
 }
 
 fn install_canonical_dropin_claim_fixture(root: &Path) -> TestResult {
-    let lane = canonical_certification_lane_fixture("2026-05-13T00:00:00.000Z")?;
+    let lane = canonical_certification_lane_fixture("2026-05-13T00:00:00.000Z");
     install_canonical_dropin_claim_fixture_with_lane(root, &lane)
 }
 
@@ -1495,7 +1495,7 @@ fn canonical_dropin_verdict_uses_release_gate_age_limit() -> TestResult {
         ),
     ] {
         let temp = fixture_workspace()?;
-        let lane = canonical_certification_lane_fixture(lane_generated_at)?;
+        let lane = canonical_certification_lane_fixture(lane_generated_at);
         install_canonical_dropin_claim_fixture_with_lane(temp.path(), &lane)?;
         let path = temp
             .path()
@@ -1541,7 +1541,7 @@ fn canonical_dropin_verdict_requires_actual_passing_lane_bytes() -> TestResult {
         "invented_waiver",
     ] {
         let temp = fixture_workspace()?;
-        let mut lane = canonical_certification_lane_fixture("2026-05-13T00:00:00.000Z")?;
+        let mut lane = canonical_certification_lane_fixture("2026-05-13T00:00:00.000Z");
         match mutation {
             "minimal_pass" => {
                 lane = json!({
@@ -1682,7 +1682,7 @@ fn canonical_dropin_lane_uses_exact_168_hour_age_boundary() -> TestResult {
         ),
     ] {
         let temp = fixture_workspace()?;
-        let lane = canonical_certification_lane_fixture(generated_at)?;
+        let lane = canonical_certification_lane_fixture(generated_at);
         install_canonical_dropin_claim_fixture_with_lane(temp.path(), &lane)?;
         let verdict_path = temp
             .path()
@@ -1725,7 +1725,7 @@ fn canonical_dropin_verdict_and_lane_timestamps_must_describe_the_same_run() -> 
         ),
     ] {
         let temp = fixture_workspace()?;
-        let lane = canonical_certification_lane_fixture(lane_generated_at)?;
+        let lane = canonical_certification_lane_fixture(lane_generated_at);
         install_canonical_dropin_claim_fixture_with_lane(temp.path(), &lane)?;
 
         let graph = build_fixture_graph(temp.path())?;

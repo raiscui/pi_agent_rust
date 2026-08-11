@@ -16,13 +16,13 @@ Pi supports three types of package sources:
 
 Install a package globally (user scope):
 ```bash
-pi install npm:pi-skills
-pi install git:github.com/someuser/my-tools
+rpi install npm:pi-skills
+rpi install git:github.com/someuser/my-tools
 ```
 
 Install locally for the current project:
 ```bash
-pi install --local npm:@org/project-utils
+rpi install --local npm:@org/project-utils
 ```
 
 This adds the package to your `settings.json` (global or project) and installs it.
@@ -31,16 +31,16 @@ This adds the package to your `settings.json` (global or project) and installs i
 
 Remove a package:
 ```bash
-pi remove npm:pi-skills
-pi remove --local npm:@org/project-utils
+rpi remove npm:pi-skills
+rpi remove --local npm:@org/project-utils
 ```
 
 ### Update
 
 Update all packages (or a specific one):
 ```bash
-pi update
-pi update npm:pi-skills
+rpi update
+rpi update npm:pi-skills
 ```
 
 Packages with pinned versions (e.g. `npm:pkg@1.2.3` or `git:repo@v1`) are skipped unless the command arguments explicitly change the version.
@@ -49,7 +49,7 @@ Packages with pinned versions (e.g. `npm:pkg@1.2.3` or `git:repo@v1`) are skippe
 
 List installed packages:
 ```bash
-pi list
+rpi list
 ```
 
 ## Resource Discovery
@@ -132,7 +132,7 @@ Example:
 Pi writes a deterministic package lockfile after successful install/update verification:
 
 - Project scope: `.pi/packages.lock.json`
-- User scope: `~/.pi/agent/packages.lock.json`
+- User scope: `~/.rpi/agent/packages.lock.json`
 
 Lock entries are sorted deterministically and include:
 
@@ -150,14 +150,14 @@ By default, install/update is fail-closed when trusted provenance or digest does
 - pinned git installs must match pinned ref/commit resolution
 - trusted digest/provenance mismatches block install/update
 
-For unpinned `pi update`, provenance/digest rotation is allowed and re-recorded as a trusted update.
+For unpinned `rpi update`, provenance/digest rotation is allowed and re-recorded as a trusted update.
 
 ### Trust Transition Audit Artifact
 
 Pi appends trust-state transitions as JSONL audit events:
 
 - Project scope: `.pi/package-trust-audit.jsonl`
-- User scope: `~/.pi/agent/package-trust-audit.jsonl`
+- User scope: `~/.rpi/agent/package-trust-audit.jsonl`
 
 Each event records action (`install`, `update`, `remove`), scope, identity, source,
 `from_state`, `to_state`, deterministic reason codes, and optional remediation guidance.

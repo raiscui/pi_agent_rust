@@ -300,3 +300,38 @@
 ### 验证
 - 修复前: 同一精确测试失败为 `Some(Malformed)`。
 - 修复后: age-limit、用户 symlink 拒绝、performance source binding 三条 semantic graph 精确测试均通过。
+
+## [2026-08-12 01:30:34] [Session ID: omx-1786418643597-4bz6s9] 修复: clippy 拒绝无错误路径的测试 fixture
+
+### 问题
+
+- `cargo clippy -j 2 --all-targets -- -D warnings` 报 `tests/semantic_workspace_graph_builder.rs:123` 的 `clippy::unnecessary_wraps`。
+
+### 原因
+
+- `canonical_certification_lane_fixture()` 仅构造 `serde_json::Value`,没有任何可能返回错误的操作,但返回类型仍是 `TestResult<serde_json::Value>`。
+- 5 个调用点都用 `?` 解包一个永远成功的结果,使测试辅助函数的错误边界与真实行为不一致。
+
+### 修复
+
+- 函数直接返回 `serde_json::Value`。
+- 调用点移除对应的 `?`,保留 fixture JSON 和所有断言不变。
+
+### 验证
+
+- `cargo test -j 2 --test semantic_workspace_graph_builder canonical_dropin_verdict_uses_release_gate_age_limit -- --exact`: 1 passed。
+- `cargo clippy -j 2 --all-targets -- -D warnings`: passed。
+
+## [2026-08-12 02:17:00] [Session ID: omx-1786418643597-4bz6s9] 修复: 默认目录与 shipping CLI 文档残留
+
+### 现象
+- 默认目录已改为 `~/.rpi/agent`,但静态扫描仍发现少量现行 Rust CLI 文档、provider 示例和 swarm fixture 使用旧路径或 `pi` 命令。
+
+### 原因
+- 前一轮扫描范围只覆盖了核心 source 与部分文档,没有覆盖所有 provider JSON 和规划规范。
+
+### 修复
+- 统一当前运行面到 `~/.rpi/agent` 与 `rpi`,并保留 TypeScript、crate/schema、项目 `.pi/` 和历史材料。
+
+### 验证
+- 精确 Rust 测试、fmt、all-target check、严格 clippy、JSON 解析和分类静态扫描均通过。

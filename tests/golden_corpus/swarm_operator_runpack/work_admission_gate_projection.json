@@ -237,7 +237,7 @@
       },
       {
         "classification": "would_execute",
-        "command": "pi doctor --only swarm --format json",
+        "command": "rpi doctor --only swarm --format json",
         "command_purpose": "Refresh swarm resource preflight",
         "dry_run_only": true,
         "evidence_paths": [

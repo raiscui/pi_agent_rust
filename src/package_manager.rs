@@ -4,7 +4,7 @@
 //! - Sources: `npm:pkg`, `git:host/owner/repo[@ref]`, local paths
 //! - Scopes: user (global) and project (local)
 //! - Global npm installs use `npm install -g` (npm-managed global root)
-//! - Git installs are under Pi's agent/project directories (`~/.pi/agent/git`, `./.pi/git`)
+//! - Git installs are under Pi's agent/project directories (`~/.rpi/agent/git`, `./.pi/git`)
 
 use crate::agent_cx::AgentCx;
 use crate::config::Config;
@@ -1190,7 +1190,7 @@ impl PackageManager {
                             "Missing package.json version for installed npm package at {}",
                             installed_path.display()
                         ),
-                        "Reinstall the package (`pi remove <source>` then `pi install <source>`) and retry.",
+                        "Reinstall the package (`rpi remove <source>` then `rpi install <source>`) and retry.",
                     )
                 })?;
 
@@ -3845,7 +3845,7 @@ fn npm_exact_version(value: &str) -> Option<semver::Version> {
 /// Whether an npm spec's version fragment pins the source.
 ///
 /// Mirrors upstream pi's `isExactNpmVersion`: only exact versions pin, so
-/// `pi update` refreshes ranges and dist-tags while leaving pins alone.
+/// `rpi update` refreshes ranges and dist-tags while leaving pins alone.
 /// Local file/link/workspace references are additionally treated as pinned
 /// so update keeps leaving them untouched (unchanged behavior).
 fn npm_version_pins_source(version: &str) -> bool {
@@ -4028,7 +4028,7 @@ pub fn evaluate_lock_transition(
                 candidate.source_kind
             ),
             remediation: format!(
-                "Review the source change, then run `pi remove {}` and `pi install {}` to re-establish trust.",
+                "Review the source change, then run `rpi remove {}` and `rpi install {}` to re-establish trust.",
                 candidate.source, candidate.source
             ),
         });
@@ -4045,7 +4045,7 @@ pub fn evaluate_lock_transition(
                 candidate.identity
             ),
             remediation: format!(
-                "Use `pi update {}` for unpinned sources, or reinstall after intentional provenance changes.",
+                "Use `rpi update {}` for unpinned sources, or reinstall after intentional provenance changes.",
                 candidate.source
             ),
         });
@@ -4059,7 +4059,7 @@ pub fn evaluate_lock_transition(
                 candidate.identity, existing.digest_sha256, candidate.digest_sha256
             ),
             remediation: format!(
-                "Inspect upstream changes. If expected, run `pi remove {}` then `pi install {}` to trust the new digest.",
+                "Inspect upstream changes. If expected, run `rpi remove {}` then `rpi install {}` to trust the new digest.",
                 candidate.source, candidate.source
             ),
         });
@@ -6347,7 +6347,7 @@ mod tests {
             ("npm:pkg@1.2.3", true),
             ("npm:pkg@v1.2.3", true),
             ("npm:@scope/pkg@2.0.0-beta.1", true),
-            // Local references stay pinned so `pi update` leaves them alone.
+            // Local references stay pinned so `rpi update` leaves them alone.
             ("npm:pkg@file:../pkg", true),
             ("npm:pkg@link:../pkg", true),
             // Ranges, partial versions, and dist-tags float.
@@ -7690,7 +7690,7 @@ mod tests {
 
     #[test]
     fn auto_dirs_constructs_correct_paths() {
-        let base = Path::new("/home/user/.pi/agent");
+        let base = Path::new("/home/user/.rpi/agent");
         let dirs = AutoDirs::new(base);
         assert_eq!(dirs.extensions, base.join("extensions"));
         assert_eq!(dirs.skills, base.join("skills"));

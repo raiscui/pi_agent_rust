@@ -2,7 +2,7 @@
 
 Practical workflow for launching, monitoring, throttling, recovering, and handing off large Pi agent swarms.
 
-This runbook is operator guidance. It does not replace Beads as the work ledger, Agent Mail as the reservation/message ledger, `pi doctor` as the live diagnostic surface, or the release evidence gates as claim authority.
+This runbook is operator guidance. It does not replace Beads as the work ledger, Agent Mail as the reservation/message ledger, `rpi doctor` as the live diagnostic surface, or the release evidence gates as claim authority.
 
 ## Source Of Truth
 
@@ -10,17 +10,17 @@ This runbook is operator guidance. It does not replace Beads as the work ledger,
 |---------|-----------|---------------------|
 | Work ownership | Beads issue state and comments | `br ready --json`, `br show <id>`, `br update <id> --claim --actor "$AGENT_NAME"` |
 | Cross-agent coordination | Agent Mail messages, reservations, and build slots | MCP Agent Mail `macro_start_session`, `file_reservation_paths`, `fetch_inbox` |
-| Live swarm readiness | Doctor swarm diagnostics | `pi doctor --only swarm --format json` |
+| Live swarm readiness | Doctor swarm diagnostics | `rpi doctor --only swarm --format json` |
 | Cargo/RCH admission | Cargo headroom preflight | `scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets` |
 | Remote build status | RCH queue and worker state | `rch status`, `rch queue`, `rch doctor` |
 | Handoff bundle | Operator runpack | `python3 scripts/build_swarm_operator_runpack.py --capture-current ...` |
-| Progress posture | Read-only progress SLO report | `pi swarm-progress --input <progress-slo-input.json> --out-json <progress-slo.json>` |
+| Progress posture | Read-only progress SLO report | `rpi swarm-progress --input <progress-slo-input.json> --out-json <progress-slo.json>` |
 | Queue convergence | Read-only empty-queue convergence report | `python3 scripts/report_empty_queue_convergence.py --json` |
 | Dry-run self-healing guidance | Runpack action plan and work admission gate | `python3 scripts/build_swarm_operator_runpack.py --out-action-plan-json ... --out-work-admission-gate-json ...` |
 | Evidence renewal posture | Stale evidence renewal queue | `python3 scripts/build_stale_evidence_renewal_queue.py --out-json ...` |
 | Saturation and timeline evidence | Redacted swarm activity ledger | `docs/swarm-activity-ledger.md`, schema `pi.swarm.activity_digest.v1` |
 | Deterministic replay evidence | Swarm flight recorder | `docs/swarm-flight-recorder.md`, schema `pi.swarm.flight_recorder.report.v1` |
-| Offline replay policy comparison | Swarm replay operator workflow | `docs/swarm-replay-operator-workflow.md`, `pi swarm-replay-preview --trace <trace.json>` |
+| Offline replay policy comparison | Swarm replay operator workflow | `docs/swarm-replay-operator-workflow.md`, `rpi swarm-replay-preview --trace <trace.json>` |
 
 ## Startup Checklist
 
@@ -47,7 +47,7 @@ python3 scripts/report_empty_queue_convergence.py --json \
   "${agent_mail_arg[@]}"
 # When available, add:
 #   --validation-broker-json <validation-broker-status-or-plan.json>
-pi doctor --only swarm --format json > "$capture_dir/doctor.json"
+rpi doctor --only swarm --format json > "$capture_dir/doctor.json"
 scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets \
   --decision-json "$capture_dir/cargo-admission.json"
 rch status
@@ -73,7 +73,7 @@ Green startup means:
   action, while ready Beads work remains visible. If health capture fails, keep
   the report's `agent_mail_status=unavailable` warning and use the Beads claim
   as the soft lock.
-- `pi doctor --only swarm --format json` has no red finding that says new swarm work must stop.
+- `rpi doctor --only swarm --format json` has no red finding that says new swarm work must stop.
 - `scripts/cargo_headroom.sh --runner rch --admit-only ...` returns
   `decision=allow` with `admission_action=allow`. `admission_action=defer`
   means the gate must wait, and `admission_action=fallback` means the command
@@ -370,7 +370,7 @@ br list --status=in_progress --json
 br ready --json
 rch status
 rch queue
-pi doctor --only swarm --format json
+rpi doctor --only swarm --format json
 ```
 
 Watch for:
@@ -378,14 +378,14 @@ Watch for:
 - Multiple agents editing the same file without Agent Mail reservations or Beads comments.
 - `br list --status=in_progress --json` entries with old `updated_at` timestamps and no recent comments.
 - `rch queue` entries with stale progress, repeated artifact retrieval failures, or slot pressure.
-- `pi doctor --only swarm --format json` findings for Agent Mail build slots, reservation conflicts, cgroup memory pressure, target/TMPDIR headroom, or RCH classifier failures.
+- `rpi doctor --only swarm --format json` findings for Agent Mail build slots, reservation conflicts, cgroup memory pressure, target/TMPDIR headroom, or RCH classifier failures.
 - Dirty worktree entries outside your claimed file set.
 
 Do not revert unrelated dirty files. Treat them as another agent's work unless the owning bead or the user explicitly says otherwise.
 
 ## Progress SLO Operator Workflow
 
-`pi swarm-progress` classifies whether a swarm is making progress from a
+`rpi swarm-progress` classifies whether a swarm is making progress from a
 normalized `ProgressSloEvaluationInput` snapshot. It is read-only advisory
 evidence. It does not read live Beads, send Agent Mail, reserve files, start or
 cancel RCH jobs, mutate git, close beads, waive validation gates, or support
@@ -405,14 +405,14 @@ git status --short --branch > "$capture_dir/git-status.txt"
 rch status > "$capture_dir/rch-status.txt"
 rch queue > "$capture_dir/rch-queue.txt"
 PI_SWARM_PROGRESS_SLO_JSON="$capture_dir/progress-slo.json" \
-  pi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
+  rpi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
 ```
 
 Evaluate a prepared normalized input and keep both machine and human-readable
 artifacts:
 
 ```bash
-pi swarm-progress \
+rpi swarm-progress \
   --input "$capture_dir/progress-slo-input.json" \
   --since HEAD~1 \
   --out-json "$capture_dir/progress-slo.json" \
@@ -472,7 +472,7 @@ explicitly:
 
 ```bash
 PI_SWARM_PROGRESS_SLO_JSON="$capture_dir/progress-slo.json" \
-  pi doctor --only swarm --format json \
+  rpi doctor --only swarm --format json \
   | jq '.findings[] | select(.id == "progress_slo_current_posture")'
 
 python3 scripts/build_swarm_operator_runpack.py \
@@ -531,7 +531,7 @@ mkdir -p "$capture_dir"
 br ready --json > "$capture_dir/beads-ready.json"
 br list --status=in_progress --json > "$capture_dir/beads-in-progress.json"
 git status --short --branch > "$capture_dir/git-status.txt"
-pi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
+rpi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
 scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets \
   --decision-json "$capture_dir/cargo-admission.json"
 rch status > "$capture_dir/rch-status.txt"
@@ -634,7 +634,7 @@ Back off new claims when any of these are true:
 | RCH admission denies or backs off | `scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets` | Stop starting heavy cargo jobs. Continue docs, source inspection, or small non-cargo fixes. |
 | Local cargo/rustc process pressure is high | `scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets` | Wait for local process pressure to fall, or use `--force-admit` only for an explicitly approved override. |
 | Queue pressure is high | `rch queue` | Wait for active jobs to finish before launching more cargo. |
-| Agent Mail reservations conflict | `pi doctor --only swarm --format json` or Agent Mail reservation response | Narrow the file set, choose a different bead, or coordinate with the holder. |
+| Agent Mail reservations conflict | `rpi doctor --only swarm --format json` or Agent Mail reservation response | Narrow the file set, choose a different bead, or coordinate with the holder. |
 | Beads has stale in-progress work | `br list --status=in_progress --json` | Comment on the stale issue, verify no recent owner activity, then reopen only if it is clearly abandoned. |
 | Drop-in or release evidence is stale | `scripts/report_swarm_claim_readiness.py` | Do not make release-facing claims. File or work the evidence gap. |
 | Worktree is dirty outside your scope | `git status --short --branch` | Ignore unrelated changes and keep your commit narrowly staged. |
@@ -658,7 +658,7 @@ Do not reopen an in-progress bead just because Agent Mail is degraded. A current
 
 ### Agent Mail Degraded
 
-1. Run `pi doctor --only swarm --format json` and save the finding.
+1. Run `rpi doctor --only swarm --format json` and save the finding.
 2. Try the MCP registration/read path: `macro_start_session` or
    `register_agent`, then `fetch_inbox` or `list_agents`. Keep the exact
    health error, for example `database schema missing required tables`.
@@ -787,7 +787,7 @@ Use the broker only after the normal ownership checks are visible:
 2. Reserve files through Agent Mail when the Mail DB is healthy. If Mail is
    red, read-only, or schema-corrupt, use the Beads assignee as the soft lock
    and record the Mail blocker in the bead or handoff.
-3. Run `pi doctor --only swarm --format json` and
+3. Run `rpi doctor --only swarm --format json` and
    `scripts/cargo_headroom.sh --admit-only ...` before heavyweight gates so
    scratch-space, cgroup, CPU, memory, and RCH posture remain explicit.
 4. Ask the broker for a plan before launching duplicate or broad validation
@@ -796,7 +796,7 @@ Use the broker only after the normal ownership checks are visible:
 Typical read-only status capture:
 
 ```bash
-pi validation-broker status \
+rpi validation-broker status \
   --store "$PI_VALIDATION_BROKER_STORE" \
   --format json \
   --out-json "$capture_dir/validation-broker-status.json"
@@ -805,7 +805,7 @@ pi validation-broker status \
 Typical plan request:
 
 ```bash
-pi validation-broker plan \
+rpi validation-broker plan \
   --request "$capture_dir/validation-request.json" \
   --inputs "$capture_dir/validation-inputs.json" \
   --store "$PI_VALIDATION_BROKER_STORE" \
@@ -829,20 +829,20 @@ Interpret decisions conservatively:
 Acquire, renew, and release mutate only the append-only slot store:
 
 ```bash
-pi validation-broker acquire \
+rpi validation-broker acquire \
   --request "$capture_dir/validation-request.json" \
   --store "$PI_VALIDATION_BROKER_STORE" \
   --started-at "$started_at_utc" \
   --expires-at "$expires_at_utc"
 
-pi validation-broker renew \
+rpi validation-broker renew \
   --store "$PI_VALIDATION_BROKER_STORE" \
   --slot-id "$slot_id" \
   --owner "$AGENT_NAME" \
   --heartbeat-at "$heartbeat_at_utc" \
   --expires-at "$expires_at_utc"
 
-pi validation-broker release \
+rpi validation-broker release \
   --store "$PI_VALIDATION_BROKER_STORE" \
   --slot-id "$slot_id" \
   --owner "$AGENT_NAME" \
@@ -1193,7 +1193,7 @@ Degraded autopilot plan evidence:
       "commands": [
         {
           "purpose": "Refresh swarm resource preflight",
-          "command": "pi doctor --only swarm --format json"
+          "command": "rpi doctor --only swarm --format json"
         }
       ]
     },

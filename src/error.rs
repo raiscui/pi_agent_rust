@@ -322,7 +322,7 @@ impl Error {
             Self::SessionNotFound { path } => build_hints(
                 "Session file not found.",
                 vec![
-                    "Use `pi --continue` to open the most recent session.".to_string(),
+                    "Use `rpi --continue` to open the most recent session.".to_string(),
                     "Verify the path or move the session back into the sessions directory."
                         .to_string(),
                 ],
@@ -573,7 +573,7 @@ fn config_hints(message: &str) -> ErrorHints {
             "Configuration file is not valid JSON.",
             vec![
                 "Fix JSON formatting in the active settings file.".to_string(),
-                "Run `pi config` to see which settings file is in use.".to_string(),
+                "Run `rpi config` to see which settings file is in use.".to_string(),
             ],
             vec![("details", message.to_string())],
         );
@@ -582,8 +582,8 @@ fn config_hints(message: &str) -> ErrorHints {
         return build_hints(
             "Configuration file is missing.",
             vec![
-                "Create `~/.pi/agent/settings.json` or set `PI_CONFIG_PATH`.".to_string(),
-                "Run `pi config` to confirm the resolved path.".to_string(),
+                "Create `~/.rpi/agent/settings.json` or set `PI_CONFIG_PATH`.".to_string(),
+                "Run `rpi config` to confirm the resolved path.".to_string(),
             ],
             vec![("details", message.to_string())],
         );
@@ -592,7 +592,7 @@ fn config_hints(message: &str) -> ErrorHints {
         "Configuration error.",
         vec![
             "Review your settings file for incorrect values.".to_string(),
-            "Run `pi config` to verify settings precedence.".to_string(),
+            "Run `rpi config` to verify settings precedence.".to_string(),
         ],
         vec![("details", message.to_string())],
     )
@@ -604,7 +604,7 @@ fn session_hints(message: &str) -> ErrorHints {
         return build_hints(
             "Session file is empty or corrupted.",
             vec![
-                "Start a new session with `pi --no-session`.".to_string(),
+                "Start a new session with `rpi --no-session`.".to_string(),
                 "Inspect the session file for truncation.".to_string(),
             ],
             vec![("details", message.to_string())],
@@ -623,7 +623,7 @@ fn session_hints(message: &str) -> ErrorHints {
     build_hints(
         "Session error.",
         vec![
-            "Try `pi --continue` or specify `--session <path>`.".to_string(),
+            "Try `rpi --continue` or specify `--session <path>`.".to_string(),
             "Check session file integrity in the sessions directory.".to_string(),
         ],
         vec![("details", message.to_string())],
@@ -1626,7 +1626,7 @@ mod tests {
     fn native_provider_missing_key_anthropic() {
         let err = Error::provider(
             "anthropic",
-            "Missing API key for Anthropic. Set ANTHROPIC_API_KEY or use `pi auth`.",
+            "Missing API key for Anthropic. Set ANTHROPIC_API_KEY or use `rpi auth`.",
         );
         let d = err.auth_diagnostic().expect("diagnostic");
         assert_eq!(d.code, AuthDiagnosticCode::MissingApiKey);
@@ -1853,7 +1853,7 @@ mod tests {
         let cases: &[(&str, &str)] = &[
             (
                 "anthropic",
-                "Missing API key for Anthropic. Set ANTHROPIC_API_KEY or use `pi auth`.",
+                "Missing API key for Anthropic. Set ANTHROPIC_API_KEY or use `rpi auth`.",
             ),
             (
                 "openai",

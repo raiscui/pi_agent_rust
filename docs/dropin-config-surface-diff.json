@@ -18,7 +18,7 @@
     "environment runtime overrides",
     "PI_CONFIG_PATH single-file override, when set",
     "project .pi/settings.json",
-    "global ~/.pi/agent/settings.json",
+    "global ~/.rpi/agent/settings.json",
     "built-in defaults"
   ],
   "legacy_settings_fields": [

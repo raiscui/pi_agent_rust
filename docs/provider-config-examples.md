@@ -18,7 +18,7 @@ and reasoning support.
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-pi --provider anthropic --model claude-sonnet-4-5
+rpi --provider anthropic --model claude-sonnet-4-5
 ```
 
 **Endpoint**: `https://api.anthropic.com/v1/messages`
@@ -29,7 +29,7 @@ pi --provider anthropic --model claude-sonnet-4-5
 
 **Advanced**: Custom base URL (e.g., corporate proxy):
 ```bash
-pi --provider anthropic --model claude-sonnet-4-5 --base-url "https://proxy.corp.example.com/anthropic"
+rpi --provider anthropic --model claude-sonnet-4-5 --base-url "https://proxy.corp.example.com/anthropic"
 ```
 
 ### OpenAI
@@ -37,7 +37,7 @@ pi --provider anthropic --model claude-sonnet-4-5 --base-url "https://proxy.corp
 ```bash
 export OPENAI_API_KEY="sk-..."
 
-pi --provider openai --model gpt-4o
+rpi --provider openai --model gpt-4o
 ```
 
 **Endpoint**: `https://api.openai.com/v1`
@@ -54,9 +54,9 @@ export GOOGLE_API_KEY="AIza..."
 # or
 export GEMINI_API_KEY="AIza..."
 
-pi --provider google --model gemini-2.5-pro
+rpi --provider google --model gemini-2.5-pro
 # or with alias
-pi --provider gemini --model gemini-2.5-flash
+rpi --provider gemini --model gemini-2.5-flash
 ```
 
 **Endpoint**: `https://generativelanguage.googleapis.com/v1beta`
@@ -74,9 +74,9 @@ export GOOGLE_CLOUD_API_KEY="..."
 # or
 export VERTEX_API_KEY="..."
 
-pi --provider google-vertex --model gemini-2.5-pro
+rpi --provider google-vertex --model gemini-2.5-pro
 # or with alias
-pi --provider vertexai --model gemini-2.5-pro
+rpi --provider vertexai --model gemini-2.5-pro
 ```
 
 **Endpoint**: Region-based (e.g., `https://us-central1-aiplatform.googleapis.com/...`)
@@ -88,7 +88,7 @@ pi --provider vertexai --model gemini-2.5-pro
 **Caveat**: Base URL is constructed dynamically from region and project. Use
 `--base-url` to override if needed:
 ```bash
-pi --provider google-vertex --model gemini-2.5-pro \
+rpi --provider google-vertex --model gemini-2.5-pro \
   --base-url "https://europe-west4-aiplatform.googleapis.com/v1/projects/my-project/locations/europe-west4/publishers/google/models"
 ```
 
@@ -97,7 +97,7 @@ pi --provider google-vertex --model gemini-2.5-pro \
 ```bash
 export COHERE_API_KEY="..."
 
-pi --provider cohere --model command-r-plus
+rpi --provider cohere --model command-r-plus
 ```
 
 **Endpoint**: `https://api.cohere.com/v2`
@@ -124,9 +124,9 @@ export AWS_REGION="us-east-1"
 # Or use bearer token
 export AWS_BEARER_TOKEN_BEDROCK="..."
 
-pi --provider amazon-bedrock --model anthropic.claude-sonnet-4-20250514-v1:0
+rpi --provider amazon-bedrock --model anthropic.claude-sonnet-4-20250514-v1:0
 # or with alias
-pi --provider bedrock --model anthropic.claude-sonnet-4-20250514-v1:0
+rpi --provider bedrock --model anthropic.claude-sonnet-4-20250514-v1:0
 ```
 
 **Endpoint**: AWS regional endpoint (constructed from `AWS_REGION`)
@@ -145,9 +145,9 @@ pi --provider bedrock --model anthropic.claude-sonnet-4-20250514-v1:0
 ```bash
 export AZURE_OPENAI_API_KEY="..."
 
-pi --provider azure-openai --model gpt-4o
+rpi --provider azure-openai --model gpt-4o
 # or with alias
-pi --provider azure --model gpt-4o
+rpi --provider azure --model gpt-4o
 ```
 
 **Auth**: API key via `AZURE_OPENAI_API_KEY`
@@ -159,7 +159,7 @@ pi --provider azure --model gpt-4o
 - Model ID maps to deployment name, not the OpenAI model ID
 - Configure via `models.json` or `--base-url`:
 ```bash
-pi --provider azure --model my-gpt4o-deployment \
+rpi --provider azure --model my-gpt4o-deployment \
   --base-url "https://my-resource.openai.azure.com/openai/deployments/my-gpt4o-deployment/chat/completions?api-version=2024-02-15-preview"
 ```
 
@@ -175,9 +175,9 @@ export SAP_AI_CORE_CLIENT_SECRET="..."
 export SAP_AI_CORE_TOKEN_URL="https://..."
 export SAP_AI_CORE_SERVICE_URL="https://..."
 
-pi --provider sap-ai-core --model gpt-4o
+rpi --provider sap-ai-core --model gpt-4o
 # or with alias
-pi --provider sap --model gpt-4o
+rpi --provider sap --model gpt-4o
 ```
 
 **Auth**: OAuth2 client credentials via service key or individual env vars
@@ -195,9 +195,9 @@ export GITHUB_COPILOT_API_KEY="..."
 # or
 export GITHUB_TOKEN="ghp_..."
 
-pi --provider github-copilot --model gpt-4o
+rpi --provider github-copilot --model gpt-4o
 # or with alias
-pi --provider copilot --model gpt-4o
+rpi --provider copilot --model gpt-4o
 ```
 
 **Auth**: Token via `GITHUB_COPILOT_API_KEY` or `GITHUB_TOKEN`
@@ -215,9 +215,9 @@ export GITLAB_TOKEN="glpat-..."
 # or
 export GITLAB_API_KEY="..."
 
-pi --provider gitlab --model claude-sonnet-4
+rpi --provider gitlab --model claude-sonnet-4
 # or with alias
-pi --provider gitlab-duo --model claude-sonnet-4
+rpi --provider gitlab-duo --model claude-sonnet-4
 ```
 
 **Auth**: Token via `GITLAB_TOKEN` (primary) or `GITLAB_API_KEY` (fallback)
@@ -240,7 +240,7 @@ the OpenAI-compatible adapter. Set the provider-specific API key and go.
 ```bash
 export GROQ_API_KEY="gsk_..."
 
-pi --provider groq --model llama-3.3-70b-versatile
+rpi --provider groq --model llama-3.3-70b-versatile
 ```
 
 **Endpoint**: `https://api.groq.com/openai/v1/chat/completions`
@@ -255,7 +255,7 @@ pi --provider groq --model llama-3.3-70b-versatile
 ```bash
 export DEEPSEEK_API_KEY="sk-..."
 
-pi --provider deepseek --model deepseek-chat
+rpi --provider deepseek --model deepseek-chat
 ```
 
 **Endpoint**: `https://api.deepseek.com`
@@ -267,7 +267,7 @@ pi --provider deepseek --model deepseek-chat
 ```bash
 export CEREBRAS_API_KEY="csk-..."
 
-pi --provider cerebras --model llama-3.3-70b
+rpi --provider cerebras --model llama-3.3-70b
 ```
 
 **Endpoint**: `https://api.cerebras.ai/v1/chat/completions`
@@ -282,15 +282,15 @@ pi --provider cerebras --model llama-3.3-70b
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."
 
-pi --provider openrouter --model openai/gpt-4o-mini
+rpi --provider openrouter --model openai/gpt-4o-mini
 ```
 
 **Endpoint**: `https://openrouter.ai/api/v1/chat/completions`
 
 **Advanced**: Access any model via `provider/model` format:
 ```bash
-pi --provider openrouter --model anthropic/claude-sonnet-4
-pi --provider openrouter --model meta-llama/llama-3.3-70b-instruct
+rpi --provider openrouter --model anthropic/claude-sonnet-4
+rpi --provider openrouter --model meta-llama/llama-3.3-70b-instruct
 ```
 
 **Caveats**:
@@ -303,7 +303,7 @@ pi --provider openrouter --model meta-llama/llama-3.3-70b-instruct
 ```bash
 export MISTRAL_API_KEY="..."
 
-pi --provider mistral --model mistral-large-latest
+rpi --provider mistral --model mistral-large-latest
 ```
 
 **Endpoint**: `https://api.mistral.ai/v1/chat/completions`
@@ -318,11 +318,11 @@ export MOONSHOT_API_KEY="sk-..."
 export KIMI_API_KEY="sk-..."
 
 # Global endpoint
-pi --provider moonshotai --model moonshot-v1-128k
+rpi --provider moonshotai --model moonshot-v1-128k
 # China endpoint
-pi --provider moonshotai-cn --model moonshot-v1-128k
+rpi --provider moonshotai-cn --model moonshot-v1-128k
 # Coding-focused (uses Anthropic API)
-pi --provider kimi-for-coding --model kimi-k2.5
+rpi --provider kimi-for-coding --model kimi-k2.5
 ```
 
 **Endpoint**: `https://api.moonshot.ai/v1/chat/completions` (global)
@@ -342,9 +342,9 @@ export DASHSCOPE_API_KEY="sk-..."
 # or
 export QWEN_API_KEY="sk-..."
 
-pi --provider alibaba --model qwen-plus
+rpi --provider alibaba --model qwen-plus
 # or with alias
-pi --provider qwen --model qwen-turbo
+rpi --provider qwen --model qwen-turbo
 ```
 
 **Endpoint**: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`
@@ -361,9 +361,9 @@ pi --provider qwen --model qwen-turbo
 ```bash
 export FIREWORKS_API_KEY="..."
 
-pi --provider fireworks --model accounts/fireworks/models/llama-v3p1-70b-instruct
+rpi --provider fireworks --model accounts/fireworks/models/llama-v3p1-70b-instruct
 # or with alias
-pi --provider fireworks-ai --model accounts/fireworks/models/llama-v3p1-70b-instruct
+rpi --provider fireworks-ai --model accounts/fireworks/models/llama-v3p1-70b-instruct
 ```
 
 **Endpoint**: `https://api.fireworks.ai/inference/v1`
@@ -374,7 +374,7 @@ pi --provider fireworks-ai --model accounts/fireworks/models/llama-v3p1-70b-inst
 ```bash
 export PERPLEXITY_API_KEY="pplx-..."
 
-pi --provider perplexity --model sonar-pro
+rpi --provider perplexity --model sonar-pro
 ```
 
 **Endpoint**: `https://api.perplexity.ai`
@@ -385,7 +385,7 @@ pi --provider perplexity --model sonar-pro
 ```bash
 export XAI_API_KEY="xai-..."
 
-pi --provider xai --model grok-2
+rpi --provider xai --model grok-2
 ```
 
 **Endpoint**: `https://api.x.ai/v1`
@@ -396,7 +396,7 @@ pi --provider xai --model grok-2
 ```bash
 export TOGETHER_API_KEY="..."
 
-pi --provider togetherai --model meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
+rpi --provider togetherai --model meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
 ```
 
 **Endpoint**: `https://api.together.xyz/v1/chat/completions`
@@ -406,7 +406,7 @@ pi --provider togetherai --model meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
 ```bash
 export DEEPINFRA_API_KEY="..."
 
-pi --provider deepinfra --model meta-llama/Meta-Llama-3.1-70B-Instruct
+rpi --provider deepinfra --model meta-llama/Meta-Llama-3.1-70B-Instruct
 ```
 
 **Endpoint**: `https://api.deepinfra.com/v1/openai/chat/completions`
@@ -420,7 +420,7 @@ pi --provider deepinfra --model meta-llama/Meta-Llama-3.1-70B-Instruct
 ```bash
 export NVIDIA_API_KEY="nvapi-..."
 
-pi --provider nvidia --model meta/llama-3.1-70b-instruct
+rpi --provider nvidia --model meta/llama-3.1-70b-instruct
 ```
 
 **Endpoint**: `https://integrate.api.nvidia.com/v1/chat/completions`
@@ -430,7 +430,7 @@ pi --provider nvidia --model meta/llama-3.1-70b-instruct
 ```bash
 export HF_TOKEN="hf_..."
 
-pi --provider huggingface --model meta-llama/Meta-Llama-3.1-70B-Instruct
+rpi --provider huggingface --model meta-llama/Meta-Llama-3.1-70B-Instruct
 ```
 
 **Endpoint**: `https://router.huggingface.co/v1/chat/completions`
@@ -440,7 +440,7 @@ pi --provider huggingface --model meta-llama/Meta-Llama-3.1-70B-Instruct
 ```bash
 export STACKIT_API_KEY="..."
 
-pi --provider stackit --model <model-id>
+rpi --provider stackit --model <model-id>
 ```
 
 **Endpoint**: `https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1/chat/completions`
@@ -451,7 +451,7 @@ pi --provider stackit --model <model-id>
 ```bash
 export OLLAMA_API_KEY="..."
 
-pi --provider ollama-cloud --model llama3.1:70b
+rpi --provider ollama-cloud --model llama3.1:70b
 ```
 
 **Endpoint**: `https://ollama.com/v1/chat/completions`
@@ -464,7 +464,7 @@ After configuring any provider, verify it works:
 
 ```bash
 # Quick smoke test
-pi --provider <provider-id> --model <model-id> -m "Hello, respond with just OK"
+rpi --provider <provider-id> --model <model-id> -m "Hello, respond with just OK"
 
 # Expected: A response containing "OK" or similar acknowledgment
 ```

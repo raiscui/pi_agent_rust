@@ -132,7 +132,7 @@ fn is_negative_numeric_token(token: &str) -> bool {
 #[allow(clippy::too_many_lines)] // Argument normalization needs single-pass stateful parsing.
 fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<ExtensionCliFlag>) {
     if raw_args.is_empty() {
-        return (vec!["pi".to_string()], Vec::new());
+        return (vec!["rpi".to_string()], Vec::new());
     }
     let mut filtered = Vec::with_capacity(raw_args.len());
     filtered.push(raw_args[0].clone());
@@ -231,7 +231,7 @@ fn preprocess_extension_flags(raw_args: &[String]) -> (Vec<String>, Vec<Extensio
 
 pub fn parse_with_extension_flags(raw_args: Vec<String>) -> Result<ParsedCli, clap::Error> {
     if raw_args.is_empty() {
-        let cli = Cli::try_parse_from(["pi"])?;
+        let cli = Cli::try_parse_from(["rpi"])?;
         return Ok(ParsedCli {
             cli,
             extension_flags: Vec::new(),
@@ -241,7 +241,7 @@ pub fn parse_with_extension_flags(raw_args: Vec<String>) -> Result<ParsedCli, cl
     match Cli::try_parse_from(raw_args.clone()) {
         Ok(_) => {
             // We do NOT return early here because `Cli` has trailing varargs for `message`.
-            // If the user provided `pi hello --unknown flag`, clap might happily parse
+            // If the user provided `rpi hello --unknown flag`, clap might happily parse
             // `--unknown flag` into `message`. We must preprocess extension flags first!
         }
         Err(err) => {
@@ -273,15 +273,15 @@ pub fn parse_with_extension_flags(raw_args: Vec<String>) -> Result<ParsedCli, cl
 /// Pi - AI coding agent CLI
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are naturally boolean
-#[command(name = "pi")]
+#[command(name = "rpi")]
 #[command(version, about, long_about = None, disable_version_flag = true)]
 #[command(after_help = "Examples:
-  pi \"explain this code\"              Start new session with message
-  pi @file.rs \"review this\"           Include file in context
-  pi -c                                Continue previous session
-  pi -r                                Resume from session picker
-  pi -p \"what is 2+2\"                 Print mode (non-interactive)
-  pi --model claude-opus-4 \"help\"     Use specific model
+  rpi \"explain this code\"             Start new session with message
+  rpi @file.rs \"review this\"          Include file in context
+  rpi -c                               Continue previous session
+  rpi -r                               Resume from session picker
+  rpi -p \"what is 2+2\"                Print mode (non-interactive)
+  rpi --model claude-opus-4 \"help\"    Use specific model
 ")]
 pub struct Cli {
     // === Help & Version ===
@@ -546,6 +546,13 @@ mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
 
     // ── 1. Basic flag parsing ────────────────────────────────────────
+
+    #[test]
+    fn cli_metadata_uses_rpi() {
+        let mut command = Cli::command();
+        assert_eq!(command.get_name(), "rpi");
+        assert!(command.render_help().to_string().contains("rpi -p"));
+    }
 
     #[test]
     fn parse_resource_flags_and_mode() {
@@ -1756,9 +1763,9 @@ mod tests {
             }
 
             #[test]
-            fn preprocess_empty_returns_pi_program_name(_dummy in Just(())) {
+            fn preprocess_empty_returns_rpi_program_name(_dummy in Just(())) {
                 let result = preprocess_extension_flags(&[]);
-                assert_eq!(result.0, vec!["pi"]);
+                assert_eq!(result.0, vec!["rpi"]);
                 let extracted: &[ExtensionCliFlag] = &result.1;
                 assert!(extracted.is_empty());
             }

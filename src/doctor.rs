@@ -1,4 +1,4 @@
-//! Comprehensive environment health checker for `pi doctor`.
+//! Comprehensive environment health checker for `rpi doctor`.
 //!
 //! When invoked without a path, checks config, directories, auth, shell tools,
 //! and sessions. When invoked with a path, runs extension preflight analysis.
@@ -446,7 +446,7 @@ pub fn run_doctor(opts: &DoctorOptions<'_>) -> Result<DoctorReport> {
                 "Extensions check requires an extension path",
             )
             .with_remediation(
-                "Run `pi doctor <path-to-extension>` to evaluate extension compatibility",
+                "Run `rpi doctor <path-to-extension>` to evaluate extension compatibility",
             ),
         );
     }
@@ -705,7 +705,9 @@ fn check_auth(fix: bool, findings: &mut Vec<Finding>) {
         findings.push(
             Finding::info(cat, "auth.json: not present")
                 .with_detail("No credentials stored yet")
-                .with_remediation("Run `pi` and follow the login prompt, or set ANTHROPIC_API_KEY"),
+                .with_remediation(
+                    "Run `rpi` and follow the login prompt, or set ANTHROPIC_API_KEY",
+                ),
         );
         // Still check env vars
         check_auth_env_vars(cat, findings);
@@ -773,7 +775,7 @@ fn check_auth(fix: bool, findings: &mut Vec<Finding>) {
         if providers.is_empty() {
             findings.push(
                 Finding::info(cat, "No stored credentials")
-                    .with_remediation("Run `pi` to authenticate or set an API key env var"),
+                    .with_remediation("Run `rpi` to authenticate or set an API key env var"),
             );
         } else {
             for provider in &providers {
@@ -791,7 +793,9 @@ fn check_auth(fix: bool, findings: &mut Vec<Finding>) {
                     CredentialStatus::OAuthExpired { .. } => {
                         findings.push(
                             Finding::warn(cat, format!("{provider}: OAuth token expired"))
-                                .with_remediation(format!("Run `pi /login {provider}` to refresh")),
+                                .with_remediation(format!(
+                                    "Run `rpi /login {provider}` to refresh"
+                                )),
                         );
                     }
                     CredentialStatus::BearerToken => {
@@ -843,7 +847,7 @@ fn check_auth_env_vars(cat: CheckCategory, findings: &mut Vec<Finding>) {
         } else {
             findings.push(
                 Finding::info(cat, format!("{provider}: no env var"))
-                    .with_detail(format!("Set {env_key} or run `pi /login {provider}`")),
+                    .with_detail(format!("Set {env_key} or run `rpi /login {provider}`")),
             );
         }
     }
@@ -1514,7 +1518,7 @@ fn swarm_admission_blocked_finding(
     let next_actions = vec![
         "Do not launch new swarm work while the admission action is deny".to_string(),
         "Repair or refresh the coordination inputs".to_string(),
-        "Rerun `pi doctor --only swarm --format json`".to_string(),
+        "Rerun `rpi doctor --only swarm --format json`".to_string(),
     ];
     let remediation = next_actions.join("; ");
     let data = serde_json::json!({
@@ -1624,13 +1628,13 @@ fn swarm_admission_next_actions(action: AdmissionAction, has_warnings: bool) -> 
         AdmissionAction::Backpressure => vec![
             "Delay new swarm work until the reported retry_after_ms has elapsed".to_string(),
             "Reduce active agents or tool calls on the pressure dimension".to_string(),
-            "Rerun `pi doctor --only swarm --format json` before heavyweight cargo checks"
+            "Rerun `rpi doctor --only swarm --format json` before heavyweight cargo checks"
                 .to_string(),
         ],
         AdmissionAction::Deny => vec![
             "Do not launch new swarm work while the admission action is deny".to_string(),
             "Stop or defer agents on the pressure dimension".to_string(),
-            "Rerun `pi doctor --only swarm --format json` after pressure clears".to_string(),
+            "Rerun `rpi doctor --only swarm --format json` after pressure clears".to_string(),
         ],
     };
     if has_warnings {
@@ -5430,7 +5434,7 @@ fn swarm_context_intelligence_unavailable_finding(error: &str) -> Finding {
         "Context intelligence posture unavailable",
     )
     .with_detail(error)
-    .with_remediation("Run `pi doctor --only swarm --format json` from a readable project root")
+    .with_remediation("Run `rpi doctor --only swarm --format json` from a readable project root")
     .with_data(serde_json::json!({
         "schema": SWARM_DOCTOR_CONTEXT_INTELLIGENCE_SCHEMA,
         "mode": "audit_only",
@@ -6782,10 +6786,10 @@ fn classify_swarm_incident_diagnostics(findings: &[Finding]) -> Finding {
         component_map.insert(component.domain.to_string(), component.to_json());
     }
     let remediation = primary.map_or_else(
-        || "No incident action needed; rerun `pi doctor --only swarm --format json` before large swarms".to_string(),
+        || "No incident action needed; rerun `rpi doctor --only swarm --format json` before large swarms".to_string(),
         |component| {
             component.remediation.clone().unwrap_or_else(|| {
-                "Inspect the component evidence and rerun `pi doctor --only swarm --format json` after remediation".to_string()
+                "Inspect the component evidence and rerun `rpi doctor --only swarm --format json` after remediation".to_string()
             })
         },
     );
@@ -7154,7 +7158,7 @@ fn incident_session_queue_component(findings: &[Finding]) -> SwarmIncidentCompon
         "checked": session_finding.is_some(),
         "queue_depth": null,
         "queue_depth_status": "not_available",
-        "next_probe": "pi doctor --only sessions --format json",
+        "next_probe": "rpi doctor --only sessions --format json",
     });
 
     component_from_finding(
@@ -10852,7 +10856,7 @@ fn check_extension(
                         "{} error(s), {} warning(s)",
                         report.summary.errors, report.summary.warnings
                     ))
-                    .with_remediation(format!("Try: pi doctor {path} --policy permissive")),
+                    .with_remediation(format!("Try: rpi doctor {path} --policy permissive")),
             );
         }
     }

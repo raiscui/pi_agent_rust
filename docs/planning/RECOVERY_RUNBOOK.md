@@ -14,5 +14,5 @@
 6. Release lock
 
 ## Commands (planned)
-- `pi sessions reindex` (rebuild SQLite index from JSONL)
-- `pi sessions export-jsonl` (dump indexed metadata for inspection)
+- `rpi sessions reindex` (rebuild SQLite index from JSONL)
+- `rpi sessions export-jsonl` (dump indexed metadata for inspection)

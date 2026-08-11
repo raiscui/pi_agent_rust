@@ -62,8 +62,8 @@ fn config_hints(msg: &str) -> ErrorHint {
         return ErrorHint {
             summary: "Invalid or missing configuration file",
             hints: &[
-                "Check that ~/.pi/agent/settings.json exists and is valid JSON",
-                "Run 'pi config' to see configuration paths and precedence",
+                "Check that ~/.rpi/agent/settings.json exists and is valid JSON",
+                "Run 'rpi config' to see configuration paths and precedence",
             ],
             context_fields: &["file_path"],
         };
@@ -72,7 +72,7 @@ fn config_hints(msg: &str) -> ErrorHint {
         return ErrorHint {
             summary: "Invalid models configuration",
             hints: &[
-                "Verify ~/.pi/agent/models.json has valid JSON syntax",
+                "Verify ~/.rpi/agent/models.json has valid JSON syntax",
                 "Check that 'providers' key exists in models.json",
             ],
             context_fields: &["file_path", "parse_error"],
@@ -90,15 +90,15 @@ fn session_hints(error: &Error) -> ErrorHint {
         Error::SessionNotFound { .. } => ErrorHint {
             summary: "Session file not found",
             hints: &[
-                "Use 'pi' without --session to start a new session",
-                "Use 'pi --resume' to pick from existing sessions",
+                "Use 'rpi' without --session to start a new session",
+                "Use 'rpi --resume' to pick from existing sessions",
             ],
             context_fields: &["path"],
         },
         Error::Session(msg) if msg.contains("corrupted") || msg.contains("invalid") => ErrorHint {
             summary: "Session file is corrupted or invalid",
             hints: &[
-                "Start a new session with 'pi'",
+                "Start a new session with 'rpi'",
                 "Session files are JSONL format - check for malformed lines",
             ],
             context_fields: &["path", "line_number"],
@@ -132,7 +132,7 @@ fn auth_hints(msg: &str) -> ErrorHint {
             summary: "API key not configured",
             hints: &[
                 "Set ANTHROPIC_API_KEY environment variable",
-                "Or add key to ~/.pi/agent/auth.json",
+                "Or add key to ~/.rpi/agent/auth.json",
             ],
             context_fields: &["provider"],
         };
@@ -151,7 +151,7 @@ fn auth_hints(msg: &str) -> ErrorHint {
         return ErrorHint {
             summary: "OAuth token expired or invalid",
             hints: &[
-                "Run 'pi login <provider>' to re-authenticate",
+                "Run 'rpi login <provider>' to re-authenticate",
                 "Or set API key directly via environment variable",
             ],
             context_fields: &["provider"],
@@ -222,7 +222,7 @@ fn provider_hints(message: &str) -> ErrorHint {
             summary: "Model not found or unavailable",
             hints: &[
                 "Check that the model ID is correct",
-                "Use 'pi --list-models' to see available models",
+                "Use 'rpi --list-models' to see available models",
             ],
             context_fields: &["provider", "model_id"],
         };
@@ -345,7 +345,7 @@ fn extension_hints(msg: &str) -> ErrorHint {
             summary: "Extension not found",
             hints: &[
                 "Check extension name is correct",
-                "Use 'pi list' to see installed extensions",
+                "Use 'rpi list' to see installed extensions",
             ],
             context_fields: &["extension_name"],
         };
@@ -466,7 +466,7 @@ fn sqlite_hints(err: &sqlmodel_core::Error) -> ErrorHint {
             summary: "Database corrupted",
             hints: &[
                 "The session index may need to be rebuilt",
-                "Delete ~/.pi/agent/sessions/index.db to rebuild",
+                "Delete ~/.rpi/agent/sessions/index.db to rebuild",
             ],
             context_fields: &["db_path"],
         };
@@ -792,7 +792,7 @@ mod tests {
         let error = Error::auth("OAuth token expired for provider X");
         let hint = hints_for_error(&error);
         assert!(hint.summary.contains("OAuth"));
-        assert!(hint.hints.iter().any(|h| h.contains("pi login")));
+        assert!(hint.hints.iter().any(|h| h.contains("rpi login")));
     }
 
     #[test]
@@ -937,7 +937,7 @@ mod tests {
         let error = Error::extension("extension my-ext not found");
         let hint = hints_for_error(&error);
         assert!(hint.summary.contains("not found"));
-        assert!(hint.hints.iter().any(|h| h.contains("pi list")));
+        assert!(hint.hints.iter().any(|h| h.contains("rpi list")));
     }
 
     #[test]

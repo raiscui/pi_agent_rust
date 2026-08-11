@@ -126,7 +126,7 @@ fi
 require_cmd cargo
 require_cmd jq
 
-MODELS_PATH="${PI_MODELS_PATH:-$HOME/.pi/agent/models.json}"
+MODELS_PATH="${PI_MODELS_PATH:-$HOME/.rpi/agent/models.json}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_DIR="${ROOT}/tests/e2e_results/${TIMESTAMP}"
 mkdir -p "$OUT_DIR"

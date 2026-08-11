@@ -2941,7 +2941,7 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
     /// Pi connects to MCP servers only when an installed extension registers
     /// them via `registerMcpServer`. It does *not* read standalone MCP config
     /// files such as `.agents/mcp.json`, `.pi/mcp.json`, or
-    /// `~/.pi/agent/mcp.json` (those are honored by other agents, not Pi), so
+    /// `~/.rpi/agent/mcp.json` (those are honored by other agents, not Pi), so
     /// this command makes the current state explicit instead of leaving
     /// `/mcp` as an "unknown command" (pi_agent_rust#112).
     pub(super) fn handle_slash_mcp(&mut self, _args: &str) -> Option<Cmd> {
@@ -2979,7 +2979,7 @@ result in account suspension/ban. Prefer using an Anthropic API key (ANTHROPIC_A
         content.push_str(
             "\nNote: Pi only loads MCP servers that an installed extension registers via\n\
              registerMcpServer. It does not read standalone MCP config files\n\
-             (.agents/mcp.json, .pi/mcp.json, ~/.pi/agent/mcp.json) — those are used by\n\
+             (.agents/mcp.json, .pi/mcp.json, ~/.rpi/agent/mcp.json) — those are used by\n\
              other agents, not Pi. To expose an MCP server to Pi, install an extension\n\
              that registers it.",
         );

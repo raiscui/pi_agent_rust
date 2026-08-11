@@ -1141,7 +1141,7 @@ mod tests {
     #[test]
     fn tool_schema_advertises_all_three_workflows() {
         let tool =
-            SubagentTool::with_paths(PathBuf::from("."), PathBuf::from("."), PathBuf::from("pi"));
+            SubagentTool::with_paths(PathBuf::from("."), PathBuf::from("."), PathBuf::from("rpi"));
         let schema = tool.parameters();
         assert!(schema["properties"].get("agent").is_some());
         assert!(schema["properties"].get("tasks").is_some());

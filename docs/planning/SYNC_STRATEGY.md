@@ -14,7 +14,7 @@
 - JSONL marker: file `mtime` + `size` (filesystem metadata)
 
 ## Concurrency
-- Lock file path: `~/.pi/agent/session-index.lock`
+- Lock file path: `~/.rpi/agent/session-index.lock`
 - Busy timeout: 5 seconds (SQLite busy timeout)
 
 ## Failure Handling
@@ -23,5 +23,5 @@
 - Git commit error: not applicable (no automatic git operations)
 
 ## Planned CLI Helpers
-- `pi sessions reindex` — rebuild SQLite index from JSONL
-- `pi sessions export-jsonl` — dump index metadata for inspection
+- `rpi sessions reindex` — rebuild SQLite index from JSONL
+- `rpi sessions export-jsonl` — dump index metadata for inspection

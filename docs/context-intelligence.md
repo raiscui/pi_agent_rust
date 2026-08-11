@@ -9,12 +9,12 @@ drop-in certification gates.
 
 ## Configuration
 
-The shipped user-facing entry point is `pi context-preview`. It is read-only:
+The shipped user-facing entry point is `rpi context-preview`. It is read-only:
 the command performs no provider calls, no writes, no Beads mutations, and no
 Agent Mail reservations.
 
 ```bash
-pi context-preview \
+rpi context-preview \
   --format text \
   --bead bd-ircr3.11 \
   --changed-path scripts/build_swarm_operator_runpack.py \
@@ -39,7 +39,7 @@ live provider turn.
 
 ## Preview Workflow
 
-1. Run `pi context-preview --format text ...` with at least one signal: query,
+1. Run `rpi context-preview --format text ...` with at least one signal: query,
    `--bead`, `--changed-path`, or `--failing-command`.
 2. Inspect selected items, excluded items, stale evidence suppressions,
    suggested validation commands, redaction status, and cache TTL.
@@ -49,7 +49,7 @@ live provider turn.
 5. Capture JSON when evidence is needed:
 
 ```bash
-pi context-preview --format json \
+rpi context-preview --format json \
   --bead bd-ircr3.11 \
   --changed-path docs/context-intelligence.md \
   --changed-path scripts/build_swarm_operator_runpack.py \
@@ -94,7 +94,7 @@ bundle excludes that item rather than exposing it to a provider.
 Investigate a failing context planner test:
 
 ```bash
-pi context-preview --format text \
+rpi context-preview --format text \
   --failing-command "rch exec -- cargo test --test semantic_workspace_graph_builder context" \
   --changed-path src/semantic_workspace_graph.rs \
   semantic bundle planner deterministic replay
@@ -103,7 +103,7 @@ pi context-preview --format text \
 Prepare a closeout review for this program:
 
 ```bash
-pi context-preview --format json \
+rpi context-preview --format json \
   --bead bd-ircr3.11 \
   --changed-path docs/context-intelligence.md \
   --changed-path docs/contracts/context-intelligence-closeout-gate-contract.json \
@@ -114,7 +114,7 @@ pi context-preview --format json \
 Inspect swarm posture through Doctor:
 
 ```bash
-pi doctor --only swarm --format json
+rpi doctor --only swarm --format json
 ```
 
 The Doctor output includes `pi.doctor.context_intelligence_posture.v1` when the

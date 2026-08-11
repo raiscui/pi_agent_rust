@@ -701,7 +701,7 @@ fn main_impl() -> Result<()> {
             .iter()
             .all(|message| message.trim().is_empty())
     {
-        bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
+        bail!("No input provided. Use: rpi -p \"your message\" or pipe input via stdin");
     }
 
     // Initialize logging (skip for ultra-fast paths like --version)
@@ -947,10 +947,10 @@ fn extension_policy_migration_guardrails(
         "profile_source": resolved.profile_source,
         "permissive_by_default_reason": "Fresh installs favor extension compatibility and custom UI out of the box.",
         "override_cli": {
-            "safe_strict_mode": "pi --extension-policy safe <your command>",
-            "balanced_prompt_mode": "pi --extension-policy balanced <your command>",
-            "balanced_with_dangerous_caps": "PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced <your command>",
-            "explicit_permissive": "pi --extension-policy permissive <your command>",
+            "safe_strict_mode": "rpi --extension-policy safe <your command>",
+            "balanced_prompt_mode": "rpi --extension-policy balanced <your command>",
+            "balanced_with_dangerous_caps": "PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced <your command>",
+            "explicit_permissive": "rpi --extension-policy permissive <your command>",
         },
         "settings_examples": {
             "default_permissive": policy_default_toggle_example(true),
@@ -960,7 +960,7 @@ fn extension_policy_migration_guardrails(
             "balanced_with_dangerous_caps": policy_config_example("balanced", true),
             "explicit_permissive": policy_config_example("permissive", false),
         },
-        "revert_to_safe_cli": "pi --extension-policy safe <your command>",
+        "revert_to_safe_cli": "rpi --extension-policy safe <your command>",
     })
 }
 
@@ -989,8 +989,8 @@ fn capability_remediation(capability: Capability, decision: PolicyDecision) -> s
     let (to_allow_cli, to_allow_config, recommendation) = match (is_dangerous, decision) {
         (true, PolicyDecision::Deny) => (
             vec![
-                "PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced <your command>",
-                "pi --extension-policy permissive <your command>",
+                "PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced <your command>",
+                "rpi --extension-policy permissive <your command>",
             ],
             vec![
                 policy_config_example("balanced", true),
@@ -1001,7 +1001,7 @@ fn capability_remediation(capability: Capability, decision: PolicyDecision) -> s
         (true, PolicyDecision::Prompt) => (
             vec![
                 "Approve the runtime capability prompt (Allow once/always).",
-                "pi --extension-policy permissive <your command>",
+                "rpi --extension-policy permissive <your command>",
             ],
             vec![
                 policy_config_example("balanced", true),
@@ -1016,8 +1016,8 @@ fn capability_remediation(capability: Capability, decision: PolicyDecision) -> s
         ),
         (false, PolicyDecision::Deny) => (
             vec![
-                "pi --extension-policy balanced <your command>",
-                "pi --extension-policy permissive <your command>",
+                "rpi --extension-policy balanced <your command>",
+                "rpi --extension-policy permissive <your command>",
             ],
             vec![
                 policy_config_example("balanced", false),
@@ -1028,7 +1028,7 @@ fn capability_remediation(capability: Capability, decision: PolicyDecision) -> s
         (false, PolicyDecision::Prompt) => (
             vec![
                 "Approve the runtime capability prompt (Allow once/always).",
-                "pi --extension-policy permissive <your command>",
+                "rpi --extension-policy permissive <your command>",
             ],
             vec![
                 policy_config_example("balanced", false),
@@ -1045,11 +1045,11 @@ fn capability_remediation(capability: Capability, decision: PolicyDecision) -> s
 
     let to_restrict_cli = if is_dangerous {
         vec![
-            "pi --extension-policy balanced <your command>",
-            "pi --extension-policy safe <your command>",
+            "rpi --extension-policy balanced <your command>",
+            "rpi --extension-policy safe <your command>",
         ]
     } else {
-        vec!["pi --extension-policy safe <your command>"]
+        vec!["rpi --extension-policy safe <your command>"]
     };
     let to_restrict_config = if is_dangerous {
         vec![
@@ -1103,19 +1103,19 @@ fn print_resolved_extension_policy(resolved: &pi::config::ResolvedExtensionPolic
         {
             "profile": "safe",
             "summary": "Strict deny-by-default profile.",
-            "cli": "pi --extension-policy safe <your command>",
+            "cli": "rpi --extension-policy safe <your command>",
             "config_example": policy_config_example("safe", false),
         },
         {
             "profile": "balanced",
             "summary": "Prompt-based profile (legacy alias: standard).",
-            "cli": "pi --extension-policy balanced <your command>",
+            "cli": "rpi --extension-policy balanced <your command>",
             "config_example": policy_config_example("balanced", false),
         },
         {
             "profile": "permissive",
             "summary": "Allow-most profile for compatibility-first workflows.",
-            "cli": "pi --extension-policy permissive <your command>",
+            "cli": "rpi --extension-policy permissive <your command>",
             "config_example": policy_config_example("permissive", false),
         },
     ]);
@@ -1130,7 +1130,7 @@ fn print_resolved_extension_policy(resolved: &pi::config::ResolvedExtensionPolic
         "allow_dangerous": resolved.allow_dangerous,
         "profile_presets": profile_presets,
         "dangerous_capability_opt_in": {
-            "cli": "PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced <your command>",
+            "cli": "PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced <your command>",
             "env_var": "PI_EXTENSION_ALLOW_DANGEROUS=1",
             "config_example": policy_config_example("balanced", true),
         },
@@ -1157,7 +1157,7 @@ fn print_resolved_repair_policy(resolved: &pi::config::ResolvedRepairPolicy) -> 
             "auto-safe": "Automatically apply safe fixes (e.g., config updates).",
             "auto-strict": "Automatically apply all fixes including code changes.",
         },
-        "cli_override": "pi --repair-policy <mode> <your command>",
+        "cli_override": "rpi --repair-policy <mode> <your command>",
         "env_var": "PI_REPAIR_POLICY=<mode>",
     });
 
@@ -1487,7 +1487,7 @@ async fn run(
         cli.no_session = true;
     }
     if mode.eq("text") && initial.is_none() && messages.is_empty() {
-        bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
+        bail!("No input provided. Use: rpi -p \"your message\" or pipe input via stdin");
     }
 
     let scoped_patterns = if let Some(models_arg) = &cli.models {
@@ -3161,7 +3161,7 @@ fn build_swarm_replay_preview_report<'a>(
         schema: SWARM_REPLAY_PREVIEW_SCHEMA,
         generated_at_utc,
         command: SwarmReplayPreviewCommand {
-            invocation: "pi swarm-replay-preview",
+            invocation: "rpi swarm-replay-preview",
             cwd: normalize_display_path(cwd),
             read_only_replay: true,
             provider_calls: 0,
@@ -3578,7 +3578,7 @@ fn handle_context_preview_blocking(
         schema: "pi.context_bundle_preview.v1",
         generated_at_utc,
         command: ContextPreviewCommandProvenance {
-            invocation: "pi context-preview",
+            invocation: "rpi context-preview",
             cwd: normalize_display_path(cwd),
             read_only: true,
             provider_calls: 0,
@@ -4279,7 +4279,7 @@ fn print_search_results(hits: &[pi::extension_index::ExtensionSearchHit], index:
     } else {
         "extensions"
     };
-    println!("\n  {count} {noun} found. Install with: pi install <name>");
+    println!("\n  {count} {noun} found. Install with: rpi install <name>");
 }
 
 fn handle_info_blocking(name: &str) -> Result<()> {
@@ -4288,11 +4288,11 @@ fn handle_info_blocking(name: &str) -> Result<()> {
         ExtensionInfoLookup::Found(entry) => print_extension_info(entry, &index),
         ExtensionInfoLookup::Ambiguous => {
             println!("Extension query \"{name}\" is ambiguous.");
-            println!("Try: pi search {name}");
+            println!("Try: rpi search {name}");
         }
         ExtensionInfoLookup::NotFound => {
             println!("Extension \"{name}\" not found.");
-            println!("Try: pi search {name}");
+            println!("Try: rpi search {name}");
         }
     }
     Ok(())
@@ -4414,7 +4414,7 @@ fn print_extension_info(entry: &ExtensionIndexEntry, index: &ExtensionIndex) {
     // Install command
     println!("  ├{bar}┤");
     if let Some(install_source) = &entry.install_source {
-        let install_line = format!("Install: pi install {install_source}");
+        let install_line = format!("Install: rpi install {install_source}");
         for line in wrap_text(&install_line, width - 2) {
             let padding = width.saturating_sub(line.len() + 1);
             println!("  │ {line}{:padding$}│", "");
@@ -5368,7 +5368,7 @@ async fn handle_config(
     json_output: bool,
 ) -> Result<()> {
     if json_output && (show || paths) {
-        bail!("`pi config --json` cannot be combined with --show/--paths");
+        bail!("`rpi config --json` cannot be combined with --show/--paths");
     }
 
     let interactive_requested = !show && !paths;
@@ -5560,7 +5560,7 @@ fn handle_doctor(
 
 fn print_version() {
     println!(
-        "pi {} ({} {})",
+        "rpi {} ({} {})",
         env!("CARGO_PKG_VERSION"),
         option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"),
         option_env!("VERGEN_BUILD_TIMESTAMP").unwrap_or(""),
@@ -5648,7 +5648,7 @@ fn maybe_print_list_models_note<R: ModelTableRow>(rows: &[R], pattern: Option<&s
     let total = PROVIDER_METADATA.len();
 
     if shown < total {
-        println!("Showing {shown} of {total} providers. Run `pi --list-providers` to see all.");
+        println!("Showing {shown} of {total} providers. Run `rpi --list-providers` to see all.");
     }
 }
 
@@ -6936,7 +6936,7 @@ async fn run_print_mode(
             io::stdout().flush()?;
             return Ok(());
         }
-        bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
+        bail!("No input provided. Use: rpi -p \"your message\" or pipe input via stdin");
     }
 
     let text_stream_state = Arc::new(StdMutex::new(PrintTextStreamState::default()));
@@ -6997,7 +6997,7 @@ async fn run_print_mode(
             io::stdout().flush()?;
             return Ok(());
         }
-        bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
+        bail!("No input provided. Use: rpi -p \"your message\" or pipe input via stdin");
     }
 
     let retry_enabled = config.retry_enabled();

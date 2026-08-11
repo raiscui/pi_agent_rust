@@ -2,7 +2,7 @@
 
 Purpose: Explain how operators and developers should capture, preview, and interpret offline swarm replay evidence without treating it as live coordination truth or release evidence.
 
-This guide covers the replay lab shipped under `bd-in57w`: the read-only trace ingestor in `src/swarm_replay.rs`, the `pi swarm-replay-preview` CLI surface, the operator runpack integration, and the no-mock E2E evidence harness. It is written for multi-agent operators who need to understand what happened in a swarm, compare advisory policies, and hand off the next safe action without mutating Beads, Agent Mail, git, RCH, or live build slots.
+This guide covers the replay lab shipped under `bd-in57w`: the read-only trace ingestor in `src/swarm_replay.rs`, the `rpi swarm-replay-preview` CLI surface, the operator runpack integration, and the no-mock E2E evidence harness. It is written for multi-agent operators who need to understand what happened in a swarm, compare advisory policies, and hand off the next safe action without mutating Beads, Agent Mail, git, RCH, or live build slots.
 
 ## What Replay Is
 
@@ -22,7 +22,7 @@ It cannot:
 - Send Agent Mail messages or reserve files.
 - Cancel, start, or prioritize RCH jobs.
 - Stage, commit, push, stash, reset, clean, or edit git state.
-- Replace `pi doctor --only swarm`, Beads, Agent Mail, RCH, CI, or release evidence gates.
+- Replace `rpi doctor --only swarm`, Beads, Agent Mail, RCH, CI, or release evidence gates.
 - Prove release-facing performance, strict drop-in certification, or live swarm readiness.
 
 Treat replay output as reproducible operator evidence. Use source systems for authority.
@@ -51,7 +51,7 @@ git status --short --branch > "$capture_dir/git-status.txt"
 rch status > "$capture_dir/rch-status.txt"
 rch queue > "$capture_dir/rch-queue.txt"
 
-pi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
+rpi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
 scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets \
   --decision-json "$capture_dir/cargo-admission.json"
 ```
@@ -77,7 +77,7 @@ The runpack is a redacted index over source artifacts, not a new source of truth
 Use the checked-in golden trace when validating the CLI surface:
 
 ```bash
-pi swarm-replay-preview \
+rpi swarm-replay-preview \
   --trace tests/golden_corpus/swarm_replay_trace/normalized_trace.json \
   --format json
 ```
@@ -85,7 +85,7 @@ pi swarm-replay-preview \
 Write reproducible preview artifacts with explicit output paths:
 
 ```bash
-pi swarm-replay-preview \
+rpi swarm-replay-preview \
   --trace tests/golden_corpus/swarm_replay_trace/normalized_trace.json \
   --policy conservative_manual \
   --policy rch_fanout_limited \
@@ -168,7 +168,7 @@ Replay often appears in swarms running on hosts with 64 or more cores and 256 Gi
 Use this sequence before increasing fanout:
 
 ```bash
-pi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
+rpi doctor --only swarm --format json > "$capture_dir/doctor-swarm.json"
 scripts/cargo_headroom.sh --runner rch --admit-only check --all-targets \
   --decision-json "$capture_dir/cargo-admission.json"
 rch status

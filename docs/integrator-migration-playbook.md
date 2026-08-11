@@ -51,7 +51,7 @@ Record your current TypeScript Pi usage footprint:
 Minimum capture template:
 
 ```text
-Current pi version:
+Current rpi version:
 Execution surfaces in use:
 Required flags/subcommands:
 Provider + model matrix:
@@ -80,7 +80,7 @@ Move settings and secrets deliberately; do not rely on implicit defaults.
 ### 2.1 Settings
 
 Review and reconcile:
-- `~/.pi/agent/settings.json`
+- `~/.rpi/agent/settings.json`
 - project-level `.pi/settings.json`
 
 Key parity-sensitive areas:
@@ -105,9 +105,9 @@ Run only the checks relevant to your integration footprint.
 ### 3.1 CLI and Interactive
 
 ```bash
-pi --list-models >/dev/null
-pi config >/dev/null
-pi --model claude-sonnet-4-20250514 -p "ping"
+rpi --list-models >/dev/null
+rpi config >/dev/null
+rpi --model claude-sonnet-4-20250514 -p "ping"
 ```
 
 Validate:
@@ -118,8 +118,8 @@ Validate:
 ### 3.2 Print and JSON Mode
 
 ```bash
-printf 'Hello\n' | pi -p
-printf 'Hello\n' | pi --mode json
+printf 'Hello\n' | rpi -p
+printf 'Hello\n' | rpi --mode json
 ```
 
 Validate:
@@ -132,7 +132,7 @@ Validate:
 Smoke-check line-delimited JSON protocol:
 
 ```bash
-pi --mode rpc
+rpi --mode rpc
 ```
 
 Then send at least:
@@ -163,8 +163,8 @@ Do not claim SDK drop-in compatibility unless your usage scenario passes those c
 Validate behavior for your actual session workflows:
 
 ```bash
-pi --continue
-pi --session <path-to-known-session>
+rpi --continue
+rpi --session <path-to-known-session>
 ```
 
 Checks:

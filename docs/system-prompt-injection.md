@@ -96,7 +96,7 @@ flowchart TD
   </available_skills>
   ```
   XML escape 走 `escape_xml` (`src/resources.rs:1373-1380`)。
-- 加载路径: 全局 `~/.pi/agent/skills/<name>/SKILL.md`、项目 `<cwd>/<Config::project_dir()>/skills`、显式 `--skill <path>` (`src/resources.rs:999-1051`)。完整 spec 见 [`docs/skills.md`](skills.md)。
+- 加载路径: 全局 `~/.rpi/agent/skills/<name>/SKILL.md`、项目 `<cwd>/<Config::project_dir()>/skills`、显式 `--skill <path>` (`src/resources.rs:999-1051`)。完整 spec 见 [`docs/skills.md`](skills.md)。
 
 ## 6. 项目上下文段 (`AGENTS.md` / `CLAUDE.md`)
 
@@ -172,7 +172,7 @@ flowchart TD
 ## 11. 验证手段
 
 - 跑一次带 `--append-system-prompt "marker"` 的 dry 调用,看模型是否在第一轮引用 `marker`: 能验证 `build_system_prompt` 装配顺序实际生效。
-- 在 `Agent::build_context` 加 `tracing::info!(system_prompt_bytes = prompt.len(), "...")`,跑一次后从 `~/.pi/agent/sessions/<id>.jsonl` 读 trace,能看到拼装后的字节数和前若干行。
+- 在 `Agent::build_context` 加 `tracing::info!(system_prompt_bytes = prompt.len(), "...")`,跑一次后从 `~/.rpi/agent/sessions/<id>.jsonl` 读 trace,能看到拼装后的字节数和前若干行。
 - `PI_TEST_MODE=1` 时,`Current date and time` / `Current working directory` 被替换成 `<TIMESTAMP>` / `<CWD>`,方便单测和 fixture 比对 (`src/app.rs:193-202`、`201-211`)。
 
 ## 12. 边界与陷阱

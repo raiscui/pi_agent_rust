@@ -465,3 +465,41 @@
 - 修正该名称前,精确测试失败为 `Some(Malformed)`。
 - 只修正该字符串后,同一条精确测试通过,证明 fixture 与 production 契约的这一精确字段不一致参与了失败路径。
 - 本轮没有放宽 source lane 校验,用户 symlink 的 fail-closed 边界仍需由后续精确测试复验。
+
+## [2026-08-12 01:11:21] [Session ID: omx-1786418643597-4bz6s9] 笔记: 默认全局 agent 目录迁移
+
+### 静态发现
+
+- `Config::global_dir()` 是全局 agent 根目录的唯一运行时来源。未设置 `PI_CODING_AGENT_DIR` 时,它现在返回 `~/.rpi/agent`。
+- 资源加载和 QuickJS 模块缓存均从这个函数派生路径,因此不会因缓存目录保留第二个旧路径真相源。
+- Kimi device ID 原本读取 `~/.pi/agent/kimi-device-id` 的兼容回退已删除;Kimi 只使用自身共享目录。
+
+### 扫描结论
+
+- 对 `src`、`tests`、`README.md`、`docs` 和 `scripts` 的静态扫描没有发现 `~/.pi/agent` 或 `.join(".pi").join("agent")`。
+- 剩余 `.pi/agents` 和 `.pi/mcp.json` 均是项目级约定,不属于全局配置目录迁移范围。
+- `jq empty` 已验证四个修改后的当前 JSON 契约;`bash -n tests/run_e2e.sh` 已通过。
+
+### 质量门补充
+
+- `cargo clippy -j 2 --all-targets -- -D warnings` 先发现测试 fixture 的无意义 `Result` 包装。移除后,精确 semantic graph 测试、fmt、all-target check 和 clippy 均通过。
+- `proc-macro-error2 v2.0.1` 的 future-incompat 来自 `charmed-bubbletea-macros`;macOS 链接大型 lib test 时的 compact-unwind warning 也与本轮目录改动无关。两者不通过修改本仓库代码规避。
+
+## [2026-08-12 02:10:30] [Session ID: omx-1786418643597-4bz6s9] 笔记: rpi 调用面补充分类
+
+### 静态证据
+
+- `src/sdk.rs` 的 in-process SDK 初始化使用了 `Cli::try_parse_from(["pi"])`;它不会启动子进程,但 argv[0] 应与 Clap 的公开程序名保持一致,因此改为 `rpi`。
+- `src/cli.rs` 与 `tests/cli_edge_cases.rs` 中大量 `"pi"` 都是 Clap parser 测试的 argv[0] 占位,不参与二进制查找或用户命令解析,本轮不做无行为收益的批量替换。
+- README、发布说明、终端说明、swarm 操作手册和 extension capture scenario 中的 `pi` 是对 Rust binary 的实际说明,已改为 `rpi`。
+- `docs/planning/EXISTING_PI_STRUCTURE.md` 是 Rust port 的规范资料,其全局设置、认证、模型、会话、资源和 RPC 示例已经同步为 `~/.rpi/agent` 与 `rpi --mode rpc`。
+
+### 保留边界
+
+- TypeScript Pi 命令、Cargo library crate `pi`、`package.json` 的 `pi` 字段、项目级 `.pi/` 路径、历史讨论、beads 历史和外部扩展生态描述不属于此次迁移。
+- `docs/EXTENSION_CANDIDATES.md` 记录上游 Pi 与 OpenClaw 的外部比较,保留其上游 `~/.pi/agent` 例子。
+
+### 验证计划
+
+- 对修改后的 JSON golden 执行 `jq empty`,再运行 CLI、配置和 swarm replay 定向测试。
+- 通过 fmt、all-target check、clippy 和分类扫描后,才可进入提交前 ledger 与 UBS 门禁。

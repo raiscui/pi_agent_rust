@@ -182,10 +182,6 @@ where
         })
 }
 
-fn home_dir() -> Option<std::path::PathBuf> {
-    home_dir_with_env_lookup(|key| std::env::var(key).ok())
-}
-
 fn kimi_share_dir_with_env_lookup<F>(env_lookup: F) -> Option<std::path::PathBuf>
 where
     F: Fn(&str) -> Option<String>,
@@ -201,13 +197,8 @@ fn kimi_share_dir() -> Option<std::path::PathBuf> {
     kimi_share_dir_with_env_lookup(|key| std::env::var(key).ok())
 }
 
-fn kimi_device_id_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    let primary = kimi_share_dir()?.join("device_id");
-    let legacy = home_dir().map_or_else(
-        || primary.clone(),
-        |home| home.join(".pi").join("agent").join("kimi-device-id"),
-    );
-    Some((primary, legacy))
+fn kimi_device_id_path() -> Option<std::path::PathBuf> {
+    Some(kimi_share_dir()?.join("device_id"))
 }
 
 fn kimi_device_id() -> String {
@@ -215,20 +206,18 @@ fn kimi_device_id() -> String {
     DEVICE_ID
         .get_or_init(|| {
             let generated = uuid::Uuid::new_v4().simple().to_string();
-            let Some((primary, legacy)) = kimi_device_id_paths() else {
+            let Some(path) = kimi_device_id_path() else {
                 return generated;
             };
 
-            for path in [&primary, &legacy] {
-                if let Ok(existing) = fs::read_to_string(path) {
-                    let existing = existing.trim();
-                    if !existing.is_empty() {
-                        return existing.to_string();
-                    }
+            if let Ok(existing) = fs::read_to_string(&path) {
+                let existing = existing.trim();
+                if !existing.is_empty() {
+                    return existing.to_string();
                 }
             }
 
-            if let Some(parent) = primary.parent() {
+            if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
 
@@ -241,7 +230,7 @@ fn kimi_device_id() -> String {
                 options.mode(0o600);
             }
 
-            if let Ok(mut file) = options.open(&primary) {
+            if let Ok(mut file) = options.open(&path) {
                 use std::io::Write;
                 let _ = file.write_all(generated.as_bytes());
             }

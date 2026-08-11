@@ -10,7 +10,7 @@ being implemented, the relevant bead ID is listed for tracking.
 **Fixes:**
 - Use env vars: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, etc.
 - Or set `--api-key` per run.
-- Or store credentials in `~/.pi/agent/auth.json` via `/login` (Anthropic OAuth).
+- Or store credentials in `~/.rpi/agent/auth.json` via `/login` (Anthropic OAuth).
 
 **Config precedence (most → least):**
 1. `--api-key`
@@ -33,7 +33,7 @@ client secret as an API token.
 
 **5xx/network:** Temporary provider outage or flaky network. Retry or switch models.
 
-**Retry config** lives in `~/.pi/agent/settings.json`:
+**Retry config** lives in `~/.rpi/agent/settings.json`:
 ```json
 {
   "retry": {
@@ -63,9 +63,9 @@ Common fixes:
 **Symptom:** extensions or skills not found.
 
 **Fixes:**
-- Check package sources via `pi list`.
-- Confirm settings in `~/.pi/agent/settings.json` or `.pi/settings.json`.
-- Re-run `pi update` after adding a source.
+- Check package sources via `rpi list`.
+- Confirm settings in `~/.rpi/agent/settings.json` or `.pi/settings.json`.
+- Re-run `rpi update` after adding a source.
 
 Extension discovery is tracked under **bd-1e0** (install + resolution). If an
 extension fails to load, expect diagnostics to improve as that bead lands.
@@ -74,7 +74,7 @@ extension fails to load, expect diagnostics to improve as that bead lands.
 
 Sessions live under:
 ```
-~/.pi/agent/sessions/
+~/.rpi/agent/sessions/
 ```
 
 Overrides:
@@ -91,7 +91,7 @@ Interactive UX parity for `/resume`, `/tree`, `/fork` is tracked by **bd-14cc**.
 
 Keybindings are loaded from:
 ```
-~/.pi/agent/keybindings.json
+~/.rpi/agent/keybindings.json
 ```
 
 If shortcuts don’t work as expected:

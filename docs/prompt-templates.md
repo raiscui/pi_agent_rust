@@ -6,7 +6,7 @@ Prompt templates allow you to define reusable prompts with arguments.
 
 Templates are Markdown files loaded from:
 
-1. **Global**: `~/.pi/agent/prompts/*.md`
+1. **Global**: `~/.rpi/agent/prompts/*.md`
 2. **Project**: `.pi/prompts/*.md`
 3. **Packages**: Installed packages can also provide templates.
 

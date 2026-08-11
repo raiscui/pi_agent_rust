@@ -630,14 +630,14 @@ pub struct RpcTransportOptions {
 impl Default for RpcTransportOptions {
     fn default() -> Self {
         Self {
-            binary_path: PathBuf::from("pi"),
+            binary_path: PathBuf::from("rpi"),
             args: vec!["--mode".to_string(), "rpc".to_string()],
             cwd: None,
         }
     }
 }
 
-/// Subprocess-backed SDK transport for `pi --mode rpc`.
+/// Subprocess-backed SDK transport for `rpi --mode rpc`.
 pub struct RpcTransportClient {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -1662,7 +1662,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         .as_deref()
         .map(|path| resolve_path_for_cwd(path, &cwd));
 
-    let mut cli = Cli::try_parse_from(["pi"])
+    let mut cli = Cli::try_parse_from(["rpi"])
         .map_err(|e| Error::validation(format!("CLI init failed: {e}")))?;
     cli.no_session = options.no_session;
     cli.provider = options.provider.clone();

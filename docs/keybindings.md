@@ -5,7 +5,7 @@ Pi supports configurable keybindings in interactive mode.
 ## Configuration
 
 User keybindings are loaded from:
-`~/.pi/agent/keybindings.json`
+`~/.rpi/agent/keybindings.json`
 
 ### Format
 

@@ -51,19 +51,19 @@ dangerous ones) or `Permissive` (allows everything with audit logging).
 **Diagnosis**:
 ```bash
 # Check effective policy
-pi info <extension-id>
+rpi info <extension-id>
 
 # Or inspect the resolved config
-pi config show | grep -A 20 extensions.policy
+rpi config show | grep -A 20 extensions.policy
 ```
 
 ### Symptom: "Allow Always" not persisting
 
 **Cause**: The `PermissionStore` writes to
-`~/.pi/agent/extension_permissions.json`. If this file is unwritable or
+`~/.rpi/agent/extension_permissions.json`. If this file is unwritable or
 the directory doesn't exist, decisions are session-only.
 
-**Fix**: Ensure `~/.pi/agent/` exists and is writable.
+**Fix**: Ensure `~/.rpi/agent/` exists and is writable.
 
 ### Policy Precedence (for debugging)
 
@@ -100,7 +100,7 @@ descriptor).
 **Cause**: `JsExtensionLoadSpec::from_entry_path()` cannot find the file.
 
 **Fix**:
-- Verify the extension is installed: `ls ~/.pi/agent/extensions/`
+- Verify the extension is installed: `ls ~/.rpi/agent/extensions/`
 - Check that `extension.json` exists in the extension directory
 - Ensure `entry_path` in `extension.json` points to a valid `.js`/`.ts`
 

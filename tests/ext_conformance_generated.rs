@@ -751,7 +751,7 @@ fn prepare_extension_fixture(ext_id: &str, cwd: &Path) {
 
     for prompt_dir in [
         cwd.join(".pi").join("prompts"),
-        cwd.join("home").join(".pi").join("agent").join("prompts"),
+        cwd.join("home").join(".rpi").join("agent").join("prompts"),
     ] {
         std::fs::create_dir_all(&prompt_dir).expect("create prompt-template-model fixture dir");
         std::fs::write(

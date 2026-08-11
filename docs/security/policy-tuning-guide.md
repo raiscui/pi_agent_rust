@@ -81,7 +81,7 @@ Profiles are set via CLI flag, environment variable, or config file:
 
 ```bash
 # CLI
-pi --extension-policy safe
+rpi --extension-policy safe
 
 # Environment
 export PI_EXTENSION_POLICY=safe

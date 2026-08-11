@@ -231,3 +231,14 @@
 ### 边界
 - 用户已安装的 `/Users/cuiluming/Library/pnpm/pi` 不在本仓库管理范围,不会被安装器、卸载器或本轮变更触碰。
 - 若需要删除旧 Cargo `pi` 文件,这是文件删除操作,必须由用户明确书面授权后单独处理。
+
+## [2026-08-12 01:30:34] [Session ID: omx-1786418643597-4bz6s9] 后续计划: 更新 `proc-macro-error2` 的上游依赖链
+
+### 背景
+
+- nightly 构建提示 `proc-macro-error2 v2.0.1` 将来的 Rust 版本会拒绝其私有 `proc_macro` 重导出。
+- 当前依赖链是 `pi_agent_rust -> charmed-bubbletea -> charmed-bubbletea-macros -> proc-macro-error2`。
+
+### 建议
+
+- 下次维护 `charmed-bubbletea` 依赖时,优先升级到移除该 future-incompat 的上游版本,不要为本地 warning 在本仓库添加 patch 或修改发布 profile。

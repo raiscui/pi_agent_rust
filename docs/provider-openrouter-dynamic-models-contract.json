@@ -38,7 +38,7 @@
   },
   "dynamic_catalog_contract": {
     "models_endpoint": "GET https://openrouter.ai/api/v1/models",
-    "cache_path": "~/.pi/agent/cache/openrouter_models.json",
+    "cache_path": "~/.rpi/agent/cache/openrouter_models.json",
     "cache_ttl_seconds": 86400,
     "refresh_triggers": [
       "explicit refresh flag/command",

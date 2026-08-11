@@ -397,7 +397,7 @@ Scenarios:
 ### subagent
 
 **Source:** `tests/ext_conformance/artifacts/subagent/index.ts`  
-**Feature categories:** tool, UI integration (confirm), external process (spawns `pi` subprocess), filesystem (temp prompt files)
+**Feature categories:** tool, UI integration (confirm), external process (spawns `rpi` subprocess), filesystem (temp prompt files)
 **Tool:** `subagent(...)`
 
 Scenarios (deterministic-first):
@@ -581,4 +581,3 @@ The harness should prioritize running the headless paths in CI, and gate the hea
 - How do we represent `ctx.hasUI` / UI scripting in the Rust harness in a way that matches legacy behavior?
 - For provider/network scenarios, do we standardize on a VCR format (SSE recording) shared across providers and extensions?
 - What is the canonical “command execution transcript” format for asserting `pi.exec(...)` behavior deterministically (stdout/stderr/exitCode + timing)?
-

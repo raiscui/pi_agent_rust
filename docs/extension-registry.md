@@ -1,7 +1,7 @@
 # Extension Registry and Local Index
 
 This document defines Pi's *offline-first* extension discovery registry and the local on-disk index
-used by user-facing discovery commands (`pi search`, `pi info`) and refresh command (`pi update-index`).
+used by user-facing discovery commands (`rpi search`, `rpi info`) and refresh command (`rpi update-index`).
 
 Key goals:
 - No central server: data comes from public backends (npm + GitHub) plus curated seed data shipped
@@ -17,7 +17,7 @@ The **index** is a single JSON file containing a list of extension descriptors +
 for local (client-side) search.
 
 Default location:
-- `~/.pi/agent/extension-index.json`
+- `~/.rpi/agent/extension-index.json`
 - Override via `PI_EXTENSION_INDEX_PATH`
 
 ### Seed Index (Bundled)
@@ -94,7 +94,7 @@ Field notes:
 
 - Auto-refresh when the cache is missing or older than 24 hours (available in store API; command-level
   wiring can choose eager or lazy refresh behavior).
-- Manual refresh via `pi update-index`.
+- Manual refresh via `rpi update-index`.
 
 ### Failure Semantics (Critical)
 
@@ -126,7 +126,7 @@ The goal is "good enough" relevance without pulling in a heavy fuzzy-matching de
 ## Install Resolution by ID
 
 For ergonomics, Pi should support:
-- `pi install <id-or-name>` for entries where `installSource` is present and the match is unique.
+- `rpi install <id-or-name>` for entries where `installSource` is present and the match is unique.
 
 Resolution rules:
 1. Exact match (case-insensitive) on `name`
@@ -141,7 +141,7 @@ If multiple entries match, Pi should refuse to guess and instruct the user to pa
 - `src/extension_index.rs` implements the local schema, bundled seed loading, cache staleness checks,
   search scoring, id/name install source resolution, and remote refresh adapters for npm + GitHub.
 - `src/config.rs` provides `Config::extension_index_path()` with `PI_EXTENSION_INDEX_PATH` override.
-- `pi install`, `pi remove`, and `pi update <source>` now resolve shorthand id/name aliases through
+- `rpi install`, `rpi remove`, and `rpi update <source>` now resolve shorthand id/name aliases through
   the local index before delegating to package manager operations.
-- `pi update-index` performs a best-effort remote refresh and writes the merged cache to the local
+- `rpi update-index` performs a best-effort remote refresh and writes the merged cache to the local
   extension-index path.

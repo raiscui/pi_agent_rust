@@ -2185,7 +2185,7 @@ pub async fn run(
     // stdin has closed. Drain any in-flight work (streaming turn, extension
     // command, auto-compaction, background bash) before tearing down so a
     // client that pipes a single command and closes stdin
-    // (`printf '{"type":"prompt",...}' | pi --mode rpc`) still receives the
+    // (`printf '{"type":"prompt",...}' | rpi --mode rpc`) still receives the
     // full event stream through `agent_end` (gh #137). Without this the
     // process shuts down while the spawned task is still starting or
     // streaming, and the work is silently dropped. The Ctrl+C abort path in
@@ -6602,7 +6602,7 @@ export default function init(pi) {
     }
 
     /// Closing stdin while a turn is in flight must drain the turn instead of
-    /// tearing down and silently dropping it (gh #137: `printf '...' | pi
+    /// tearing down and silently dropping it (gh #137: `printf '...' | rpi
     /// --mode rpc` lost the entire event stream after the prompt ack). An
     /// extension command blocked on a UI request is the hardest variant: the
     /// UI answer can never arrive once stdin is closed, so the drain has to
@@ -6649,7 +6649,7 @@ export default function init(pi) {
             let ui_event = recv_ui_request(&out_rx, "wait-confirm-report ui before eof").await;
             assert_eq!(ui_event["method"], "confirm");
 
-            // Simulate `printf ... | pi --mode rpc`: stdin closes immediately.
+            // Simulate `printf ... | rpi --mode rpc`: stdin closes immediately.
             drop(in_tx);
 
             // The server must drain the in-flight command (cancelling the

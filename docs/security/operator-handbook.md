@@ -72,9 +72,9 @@ Extension source  ──[B1: scanner]──>  QuickJS sandbox
 
 **CLI flag (highest priority):**
 ```bash
-pi --extension-policy safe
-pi --extension-policy standard
-pi --extension-policy permissive
+rpi --extension-policy safe
+rpi --extension-policy standard
+rpi --extension-policy permissive
 ```
 
 **Environment variable:**
@@ -99,7 +99,7 @@ Unknown profile names fail closed to `safe` (invariant INV-006).
 ### Inspecting Effective Policy
 
 ```bash
-pi --explain-extension-policy
+rpi --explain-extension-policy
 ```
 
 Outputs the resolved policy with per-capability decisions, showing which layer in the precedence chain determined each decision.
@@ -342,7 +342,7 @@ alert with category `QuotaBreach` is raised.
 
 2. **Identify the extension.**
    ```bash
-   pi --explain-extension-policy  # View current policy state
+   rpi --explain-extension-policy  # View current policy state
    ```
 
 3. **Query related alerts.**
@@ -363,7 +363,7 @@ alert with category `QuotaBreach` is raised.
 Export the current security state:
 ```bash
 # View resolved policy with explanations
-pi --explain-extension-policy
+rpi --explain-extension-policy
 
 # Run security tests to verify invariants
 cargo test --test security_budgets -- --nocapture
@@ -482,8 +482,8 @@ What failed and why. Reference specific controls:
 
 | Command | Purpose |
 |---------|---------|
-| `pi --explain-extension-policy` | Show resolved policy with per-capability decisions |
-| `pi --extension-policy safe` | Override policy for this session |
+| `rpi --explain-extension-policy` | Show resolved policy with per-capability decisions |
+| `rpi --extension-policy safe` | Override policy for this session |
 
 ### Testing and Verification
 

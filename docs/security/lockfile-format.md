@@ -108,9 +108,9 @@ If a lockfile entry already exists:
 
 - **Digest match + provenance match**: Passes with reason code `verified`.
 - **Digest mismatch**: **Fails closed** with code `digest_mismatch`.
-  Remediation: `pi remove <source> && pi install <source>`.
+  Remediation: `rpi remove <source> && rpi install <source>`.
 - **Provenance mismatch**: **Fails closed** with code `provenance_mismatch`.
-  Remediation: `pi remove <source> && pi install <source>`.
+  Remediation: `rpi remove <source> && rpi install <source>`.
 
 ### Update
 

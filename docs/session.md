@@ -11,7 +11,7 @@ Sessions are stored as JSONL (JSON Lines) files.
 ### Location
 
 Sessions are grouped by project directory:
-`~/.pi/agent/sessions/--encoded-project-path--/`
+`~/.rpi/agent/sessions/--encoded-project-path--/`
 
 Filename format: `YYYY-MM-DDTHH-MM-SS.sssZ_id.jsonl`
 
@@ -46,7 +46,7 @@ When you navigate to a previous message and reply, Pi creates a new branch.
 
 ### Management
 
-#### Resume (`/resume`, `pi -r`)
+#### Resume (`/resume`, `rpi -r`)
 
 Opens the session picker to switch between sessions.
 - Select: Enter

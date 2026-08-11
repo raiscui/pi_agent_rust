@@ -32,7 +32,7 @@ Pi is an AI coding agent platform with these core components:
 |-----------|-------------------|-----------------|
 | LLM Provider Abstraction | `@mariozechner/pi-ai` | `pi::provider` module |
 | Agent Runtime | `@mariozechner/pi-agent` | `pi::agent` module |
-| CLI Application | `@mariozechner/pi-coding-agent` | `pi` binary |
+| CLI Application | `@mariozechner/pi-coding-agent` | `rpi` binary |
 | Terminal UI | `@mariozechner/pi-tui` | `pi::tui` module |
 
 ### Key Statistics (TypeScript)
@@ -627,7 +627,7 @@ pub const GREP_MAX_LINE_LENGTH: usize = 500;
 ### 6.1 File Organization
 
 ```
-~/.pi/agent/sessions/
+~/.rpi/agent/sessions/
 └── --{encoded-cwd}--/
     └── {timestamp}_{session-id}.jsonl
 ```
@@ -794,11 +794,11 @@ pub struct SessionInfoEntry {
 
 | Type | Path |
 |------|------|
-| Global settings | `~/.pi/agent/settings.json` |
+| Global settings | `~/.rpi/agent/settings.json` |
 | Project settings | `./.pi/settings.json` |
-| Auth | `~/.pi/agent/auth.json` |
-| Models | `~/.pi/agent/models.json` |
-| Sessions | `~/.pi/agent/sessions/` |
+| Auth | `~/.rpi/agent/auth.json` |
+| Models | `~/.rpi/agent/models.json` |
+| Sessions | `~/.rpi/agent/sessions/` |
 
 ### 7.2 Settings Structure
 
@@ -886,14 +886,14 @@ pub struct TerminalSettings {
 1. CLI flags (highest)
 2. Environment variables
 3. Project settings (`./.pi/settings.json`)
-4. Global settings (`~/.pi/agent/settings.json`)
+4. Global settings (`~/.rpi/agent/settings.json`)
 5. Built-in defaults (lowest)
 
 ### 7.4 Environment Variables
 
 ```rust
 // Config paths
-PI_CODING_AGENT_DIR     // Override ~/.pi/agent
+PI_CODING_AGENT_DIR     // Override ~/.rpi/agent
 PI_PACKAGE_DIR          // Override package assets
 
 // API Keys (per provider)
@@ -916,7 +916,7 @@ MISTRAL_API_KEY
 
 ### 8.1 Auth File
 
-- **Path:** `~/.pi/agent/auth.json`
+- **Path:** `~/.rpi/agent/auth.json`
 - **Permissions:** `0o600` (read-write owner only)
 - **Locking:** File lock with 30-second stale timeout
 
@@ -1034,11 +1034,11 @@ The refreshed credentials overwrite the stored entry in `auth.json` and are pers
 
 | Command | Syntax | Description |
 |---------|--------|-------------|
-| `install` | `pi install <source> [-l\|--local]` | Install extension/skill/prompt/theme |
-| `remove` | `pi remove <source> [-l\|--local]` | Remove from settings |
-| `update` | `pi update [source]` | Update all or specific source |
-| `list` | `pi list` | List global + project packages |
-| `config` | `pi config` | Open TUI config selector |
+| `install` | `rpi install <source> [-l\|--local]` | Install extension/skill/prompt/theme |
+| `remove` | `rpi remove <source> [-l\|--local]` | Remove from settings |
+| `update` | `rpi update [source]` | Update all or specific source |
+| `list` | `rpi list` | List global + project packages |
+| `config` | `rpi config` | Open TUI config selector |
 
 ### 9.2 Flags (Complete List)
 
@@ -1197,7 +1197,7 @@ pi [options] [@files...] [messages...]
 ### 11.1 Start RPC Mode
 
 ```bash
-pi --mode rpc [options]
+rpi --mode rpc [options]
 ```
 
 Common options:
@@ -1740,7 +1740,7 @@ If `pi` field is absent, defaults apply:
 Skills are markdown files with YAML frontmatter defining agent capabilities.
 
 **File locations:**
-- Global: `~/.pi/agent/skills/*.md`
+- Global: `~/.rpi/agent/skills/*.md`
 - Project: `./.pi/skills/*.md`
 - Package: `<package>/skills/*.md`
 
@@ -1778,7 +1778,7 @@ allowed_tools:             # Optional, restrict to specific tools
 Prompt templates are markdown files for reusable user prompts.
 
 **File locations:**
-- Global: `~/.pi/agent/prompts/*.md`
+- Global: `~/.rpi/agent/prompts/*.md`
 - Project: `./.pi/prompts/*.md`
 - Package: `<package>/prompts/*.md`
 
@@ -1799,7 +1799,7 @@ Prompt templates are markdown files for reusable user prompts.
 Themes are JSON files defining terminal color schemes.
 
 **File locations:**
-- Global: `~/.pi/agent/themes/*.json`
+- Global: `~/.rpi/agent/themes/*.json`
 - Project: `./.pi/themes/*.json`
 - Package: `<package>/themes/*.json`
 

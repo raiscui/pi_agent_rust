@@ -8,7 +8,7 @@
           "purpose": "Inspect budget drift"
         },
         {
-          "command": "pi doctor --only swarm --format json",
+          "command": "rpi doctor --only swarm --format json",
           "purpose": "Refresh swarm resource preflight"
         },
         {

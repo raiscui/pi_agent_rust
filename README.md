@@ -42,7 +42,7 @@ You want an AI coding assistant in your terminal, but existing tools are:
 
 ## The Solution
 
-**pi_agent_rust** is a from-scratch Rust port of [Pi Agent](https://github.com/badlogic/pi) by [Mario Zechner](https://github.com/badlogic) (made with his blessing!). Official release archives install the single end-user binary `pi`, with streaming responses and 9 built-in tools.
+**pi_agent_rust** is a from-scratch Rust port of [Pi Agent](https://github.com/badlogic/pi) by [Mario Zechner](https://github.com/badlogic) (made with his blessing!). Official release archives install the single end-user binary `rpi`, with streaming responses and 9 built-in tools.
 
 Rather than a direct line-by-line translation, this port builds on two purpose-built Rust libraries:
 - **[asupersync](https://github.com/Dicklesworthstone/asupersync)**: A structured concurrency async runtime with built-in HTTP, TLS, and SQLite
@@ -50,13 +50,13 @@ Rather than a direct line-by-line translation, this port builds on two purpose-b
 
 ```bash
 # Start a session
-pi "Help me refactor this function to use async/await"
+rpi "Help me refactor this function to use async/await"
 
 # Continue a previous session
-pi --continue
+rpi --continue
 
 # Single-shot mode (no session)
-pi -p "What does this error mean?" < error.log
+rpi -p "What does this error mean?" < error.log
 ```
 
 ## Why Should You Care?
@@ -183,23 +183,23 @@ If you want full details, see:
 
 ```bash
 # 1) Start an interactive session
-pi
+rpi
 
 # 2) Ask a codebase question
-pi "Summarize the architecture in src/"
+rpi "Summarize the architecture in src/"
 
 # 3) Attach a file inline
-pi @src/main.rs "Explain startup flow"
+rpi @src/main.rs "Explain startup flow"
 
 # 4) Run single-shot mode for scripting
-pi -p "List likely regression risks for this diff"
+rpi -p "List likely regression risks for this diff"
 
 # 5) Continue your last project session
-pi --continue
+rpi --continue
 
 # 6) Inspect available models/providers
-pi --list-models
-pi --list-providers
+rpi --list-models
+rpi --list-providers
 ```
 
 ---
@@ -253,13 +253,13 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 
 ```bash
 # Interactive mode
-pi
+rpi
 
 # With an initial message
-pi "Explain this codebase structure"
+rpi "Explain this codebase structure"
 
 # Read files as context
-pi @src/main.rs "What does this do?"
+rpi @src/main.rs "What does this do?"
 ```
 
 ### Using a local model
@@ -269,13 +269,13 @@ pi @src/main.rs "What does this do?"
 work out of the box against their default ports:
 
 ```bash
-pi --provider ollama    --model llama3        -p "hi"
-pi --provider llamacpp  --model <gguf-repo-id> -p "hi"
-pi --provider mistralrs --model default        -p "hi"
+rpi --provider ollama    --model llama3        -p "hi"
+rpi --provider llamacpp  --model <gguf-repo-id> -p "hi"
+rpi --provider mistralrs --model default        -p "hi"
 ```
 
 To point at any other OpenAI-compatible server (a custom host/port, vLLM, etc.),
-add it to `~/.pi/agent/models.json`:
+add it to `~/.rpi/agent/models.json`:
 
 ```json
 {
@@ -290,7 +290,7 @@ add it to `~/.pi/agent/models.json`:
 }
 ```
 
-Then `pi --provider ollama --model Qwen3.6-35B-A3B-4bit`. See
+Then `rpi --provider ollama --model Qwen3.6-35B-A3B-4bit`. See
 [docs/models.md](docs/models.md) for the full `models.json` schema, provider
 aliases, and secret resolution (env vars and `!command` shell lookups).
 
@@ -302,21 +302,21 @@ prints one model ID per stdout line and exits without starting the TUI.
 ```bash
 # Use a successful live response or (with a warning on stderr) the static
 # registry when live discovery is unavailable
-pi --fetch-models openrouter
+rpi --fetch-models openrouter
 
 # Bypass the cache and require a genuinely live response; never fall back
-pi --fetch-models openrouter --refresh-models
+rpi --fetch-models openrouter --refresh-models
 
 # Make a successful live/cache catalog available to future --list-models and
 # interactive /model pickers
-pi --fetch-models openrouter --refresh-models --persist-models
+rpi --fetch-models openrouter --refresh-models --persist-models
 ```
 
 Each standalone CLI invocation starts a new process, so its in-memory cache is
 fresh. The five-minute cache only avoids repeat discovery calls made within one
 long-lived process by SDK/library users; `--refresh-models` bypasses that cache.
 
-Persistence is opt-in. The v2 `~/.pi/agent/models.fetched.json` schema stores
+Persistence is opt-in. The v2 `~/.rpi/agent/models.fetched.json` schema stores
 provider/model IDs, the fetch timestamp, and a non-secret SHA-256 identity
 binding membership to the provider, API, query-free endpoint, auth-header
 mode, recognized credential-query ordered name/presence shape, and
@@ -334,7 +334,7 @@ endpoint/transport shape can retain the prior account's saved model list until
 you rerun `--fetch-models <provider> --refresh-models --persist-models`.
 Inference still resolves and sends the current account's credential; only the
 opt-in model-membership list can be stale across that switch. The generated
-catalog is loaded first; your hand-written `~/.pi/agent/models.json` is loaded
+catalog is loaded first; your hand-written `~/.rpi/agent/models.json` is loaded
 afterward and remains authoritative. Pi does not rewrite or merge that
 user-authored file.
 Legacy `pi.models.fetched.v1` files cannot be rebound safely because they lack
@@ -351,7 +351,7 @@ live refresh and persist command above to create a v2 catalog.
 Real-time response streaming with extended thinking support:
 
 ```
-pi "Write a quicksort implementation"
+rpi "Write a quicksort implementation"
 ```
 
 Watch the response appear incrementally, with thinking blocks shown inline.
@@ -379,20 +379,20 @@ All tools include:
 processes. Enable it explicitly with `--tools` (or in the tools setting):
 
 ```bash
-pi --tools read,bash,edit,write,grep,find,ls,hashline_edit,subagent \
+rpi --tools read,bash,edit,write,grep,find,ls,hashline_edit,subagent \
   "Use the scout agent to inspect the provider implementation."
 ```
 
 ### Native Subagents and Orchestration
 
 Rust Pi includes a native `subagent` tool; it does not depend on a QuickJS
-extension and never resolves a child executable by assuming a `pi` binary on
+extension and never resolves a child executable by assuming an `rpi` binary on
 `PATH`. By default it starts the current Rust Pi executable. Set
 `PI_SUBAGENT_PI_BINARY=/absolute/path/to/rpi` only when an explicit binary
 override is needed.
 
 Agent definitions are Markdown files in `$PI_CODING_AGENT_DIR/agents/*.md`
-(normally `~/.pi/agent/agents/*.md`) or the nearest
+(normally `~/.rpi/agent/agents/*.md`) or the nearest
 `.pi/agents/*.md`. Project definitions take precedence over same-named user
 definitions. The process inherits the parent's provider, router, authentication,
 and model-registry environment, including `PI_CODING_AGENT_DIR`.
@@ -425,13 +425,13 @@ Sessions persist as JSONL files with full conversation history:
 
 ```bash
 # Continue most recent session
-pi --continue
+rpi --continue
 
 # Open specific session
-pi --session ~/.pi/agent/sessions/--home-user-project--/2024-01-15T10-30-00.jsonl
+rpi --session ~/.rpi/agent/sessions/--home-user-project--/2024-01-15T10-30-00.jsonl
 
 # Ephemeral (no persistence)
-pi --no-session
+rpi --no-session
 ```
 
 Sessions support:
@@ -444,16 +444,16 @@ Sessions support:
 Enable deep reasoning for complex problems:
 
 ```bash
-pi --thinking high "Design a distributed rate limiter"
+rpi --thinking high "Design a distributed rate limiter"
 ```
 
 Thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
 
 ### Customization (Skills & Prompt Templates)
 
-- **Skills**: Drop `SKILL.md` under `~/.pi/agent/skills/` or `.pi/skills/` and invoke with `/skill:name`.
-- **Prompt templates**: Markdown files under `~/.pi/agent/prompts/` or `.pi/prompts/`; invoke via `/<template> [args]`.
-- **Packages**: Share bundles with `pi install npm:@org/pi-packages` (skills, prompts, themes, extensions).
+- **Skills**: Drop `SKILL.md` under `~/.rpi/agent/skills/` or `.pi/skills/` and invoke with `/skill:name`.
+- **Prompt templates**: Markdown files under `~/.rpi/agent/prompts/` or `.pi/prompts/`; invoke via `/<template> [args]`.
+- **Packages**: Share bundles with `rpi install npm:@org/pi-packages` (skills, prompts, themes, extensions).
 
 ### Autocomplete
 
@@ -470,9 +470,9 @@ Pi runs in three modes, each suited to different workflows:
 
 | Mode | Invocation | Use Case |
 |------|-----------|----------|
-| **Interactive** | `pi` (default) | Full TUI with streaming, tools, session branching, autocomplete |
-| **Print** | `pi -p "..."` | Single response to stdout, no TUI, scriptable |
-| **RPC** | `pi --mode rpc` | Headless JSON protocol over stdin/stdout for IDE integrations |
+| **Interactive** | `rpi` (default) | Full TUI with streaming, tools, session branching, autocomplete |
+| **Print** | `rpi -p "..."` | Single response to stdout, no TUI, scriptable |
+| **RPC** | `rpi --mode rpc` | Headless JSON protocol over stdin/stdout for IDE integrations |
 
 **Interactive mode** provides the full experience: a multi-line text editor with history, scrollable conversation viewport, model selector (`Ctrl+L`), scoped model cycling (`Ctrl+P`/`Ctrl+Shift+P`), session branch navigator (`/tree`), and real-time token/cost tracking.
 
@@ -761,13 +761,13 @@ then restores a migrated TypeScript `pi` if one was preserved.
 ### Basic Usage
 
 ```bash
-pi [OPTIONS] [MESSAGE]...
+rpi [OPTIONS] [MESSAGE]...
 
 # Examples
-pi                              # Start interactive session
-pi "Hello"                      # Start with message
-pi @file.rs "Explain this"      # Include file as context
-pi -p "Quick question"          # Print mode (no session)
+rpi                             # Start interactive session
+rpi "Hello"                     # Start with message
+rpi @file.rs "Explain this"     # Include file as context
+rpi -p "Quick question"         # Print mode (no session)
 ```
 
 Interactive file references:
@@ -809,41 +809,41 @@ Additional high-leverage flags:
 
 ```bash
 # Package management
-pi install <source> [-l|--local]    # Install a package source and add to settings
-pi remove <source> [-l|--local]     # Remove a package source from settings
-pi update [source]                 # Update all (or one) non-pinned packages
-pi list                            # List user + project packages from settings
+rpi install <source> [-l|--local]   # Install a package source and add to settings
+rpi remove <source> [-l|--local]    # Remove a package source from settings
+rpi update [source]                # Update all (or one) non-pinned packages
+rpi list                           # List user + project packages from settings
 
 # Configuration
-pi config                          # Show settings paths + precedence
+rpi config                         # Show settings paths + precedence
 ```
 
 More utility subcommands:
 
 ```bash
 # Extension catalog index + discovery
-pi update-index
-pi search "git"
-pi info pi-search-agent
+rpi update-index
+rpi search "git"
+rpi info pi-search-agent
 
 # Environment and extension diagnostics
-pi doctor
-pi doctor --only sessions --format json
-pi doctor --only swarm --format json
-pi doctor ./path/to/extension --policy safe --fix
+rpi doctor
+rpi doctor --only sessions --format json
+rpi doctor --only swarm --format json
+rpi doctor ./path/to/extension --policy safe --fix
 
 # Read-only swarm progress SLO evaluation from normalized evidence
-pi swarm-progress --input progress-slo-input.json --format json
-pi swarm-progress --input progress-slo-input.json --since HEAD~1 --out-json progress-slo.json
+rpi swarm-progress --input progress-slo-input.json --format json
+rpi swarm-progress --input progress-slo-input.json --since HEAD~1 --out-json progress-slo.json
 
 # Session storage migration (JSONL -> v2 sidecar store)
-pi migrate ~/.pi/agent/sessions --dry-run
-pi migrate ~/.pi/agent/sessions
+rpi migrate ~/.rpi/agent/sessions --dry-run
+rpi migrate ~/.rpi/agent/sessions
 ```
 
 - `update-index` refreshes extension index metadata used by `search` and `info`.
 - `search` and `info` let you discover and inspect extension metadata without leaving the CLI.
-- `doctor` checks config, directories, auth, shell setup, sessions, swarm coordination readiness, and extension compatibility. `pi doctor --only swarm --format json` also reports cgroup CPU quota, cpuset size, NUMA topology, cgroup memory limits, target/tmp headroom, and recommended concurrency budgets before large multi-agent runs.
+- `doctor` checks config, directories, auth, shell setup, sessions, swarm coordination readiness, and extension compatibility. `rpi doctor --only swarm --format json` also reports cgroup CPU quota, cpuset size, NUMA topology, cgroup memory limits, target/tmp headroom, and recommended concurrency budgets before large multi-agent runs.
 - `swarm-progress` evaluates a normalized progress SLO snapshot and emits advisory JSON/text only; it does not mutate Beads, git, Agent Mail, RCH, validation broker slots, runpacks, or source files. Operator workflow, privacy boundaries, degraded Agent Mail/RCH interpretation, stale-Beads handling, and no-open-work convergence guidance lives in [docs/swarm-operations-runbook.md#progress-slo-operator-workflow](docs/swarm-operations-runbook.md#progress-slo-operator-workflow).
 - `migrate` validates or creates the v2 session sidecar format for faster resume on larger histories.
 
@@ -851,7 +851,7 @@ pi migrate ~/.pi/agent/sessions
 
 ## Configuration
 
-Pi reads configuration from `~/.pi/agent/settings.json`:
+Pi reads configuration from `~/.rpi/agent/settings.json`:
 
 ```json
 {
@@ -894,7 +894,7 @@ Settings are resolved in priority order (first match wins):
 1. **CLI flags** (`--model`, `--thinking`, `--provider`, etc.)
 2. **Environment variables** (`ANTHROPIC_API_KEY`, `PI_CONFIG_PATH`, etc.)
 3. **Project settings** (`.pi/settings.json` in the working directory)
-4. **Global settings** (`~/.pi/agent/settings.json`)
+4. **Global settings** (`~/.rpi/agent/settings.json`)
 5. **Built-in defaults**
 
 This means a CLI flag always overrides a `settings.json` value, and a project-level setting overrides the global one.
@@ -905,8 +905,8 @@ Skills, prompt templates, themes, and extensions follow the same resolution orde
 
 1. CLI-specified paths (`--skill`, `--prompt-template`, `--theme`, `-e`)
 2. Project directory (`.pi/skills/`, `.pi/prompts/`, `.pi/themes/`, `.pi/extensions/`)
-3. Global directory (`~/.pi/agent/skills/`, `~/.pi/agent/prompts/`, etc.)
-4. Installed packages (`~/.pi/agent/packages/`)
+3. Global directory (`~/.rpi/agent/skills/`, `~/.rpi/agent/prompts/`, etc.)
+4. Installed packages (`~/.rpi/agent/packages/`)
 
 When multiple resources share the same name, the first occurrence wins. Collisions are logged as diagnostics.
 
@@ -1050,7 +1050,7 @@ This is a second comparison pass focused on high-impact architectural deltas and
 
 | Area | Original pi-mono (`packages/coding-agent`) | `pi_agent_rust` | Why this divergence exists |
 |------|---------------------------------------------|------------------|----------------------------|
-| **Distribution model** | npm package (`npm install -g @mariozechner/pi-coding-agent`) | Single Rust binary (`pi`) | Remove Node runtime dependency and improve startup/deployment portability |
+| **Distribution model** | npm package (`npm install -g @mariozechner/pi-coding-agent`) | Single Rust binary (`rpi`) | Remove Node runtime dependency and improve startup/deployment portability |
 | **Execution surfaces** | Interactive + print + JSON mode + RPC + SDK | Interactive + print + JSON mode + RPC + Rust SDK | Rust SDK provides idiomatic companion API for embedding Pi programmatically (documented in `docs/sdk.md`) |
 | **Default built-in tool posture** | Defaults to `read/write/edit/bash` (others available) | Eight built-ins treated as first-class (`read/write/edit/bash/grep/find/ls/hashline_edit`) | Keep common code-navigation, shell, and hashline-anchored edit workflows available without extra configuration |
 | **Extension trust model** | Extension/package model documented as full system access | Embedded runtime with capability-gated hostcalls and policy profiles | Reduce ambient authority and make extension behavior auditable/deny-by-default |
@@ -1087,7 +1087,7 @@ The sections above compare mechanics. This section calls out concrete features p
 
 | Rust-port feature | Why it is useful/compelling |
 |-------------------|-----------------------------|
-| **`pi doctor` diagnostics command** (`text`/`json`/`markdown`, `--only`, `--fix`, swarm preflight, extension compatibility checks) | Gives actionable environment + compatibility diagnostics, supports CI gating (non-zero on failures), can auto-fix safe issues like missing dirs/permissions, and reports read-only multi-agent readiness before swarm work |
+| **`rpi doctor` diagnostics command** (`text`/`json`/`markdown`, `--only`, `--fix`, swarm preflight, extension compatibility checks) | Gives actionable environment + compatibility diagnostics, supports CI gating (non-zero on failures), can auto-fix safe issues like missing dirs/permissions, and reports read-only multi-agent readiness before swarm work |
 | **Capability-gated extension policy profiles** (`safe` / `balanced` / `permissive`) with per-extension overrides | Lets operators run shared extensions with explicit capability boundaries instead of ambient full-system access |
 | **Secret-aware extension env filtering** (`pi.env()` blocklist for keys/tokens/secrets) | Reduces accidental credential exposure from extension code paths |
 | **Per-extension trust lifecycle + kill-switch audit trail** (`pending`/`acknowledged`/`trusted`/`killed`, `kill_switch`, `lift_kill_switch`) | Supports immediate containment, explicit operator provenance, and controlled re-entry after review |
@@ -1481,7 +1481,7 @@ User specifies --provider openai --model gpt-4o
   └───────────────────────────┘
 ```
 
-**`models.json` overrides**: Users can define custom providers in `~/.pi/agent/models.json` or `.pi/models.json`. Each entry specifies a model ID, base URL, API type, and optional compat flags, letting you route to self-hosted models, proxies, or providers that Pi does not natively support.
+**`models.json` overrides**: Users can define custom providers in `~/.rpi/agent/models.json` or `.pi/models.json`. Each entry specifies a model ID, base URL, API type, and optional compat flags, letting you route to self-hosted models, proxies, or providers that Pi does not natively support.
 
 **Compat config** handles the differences between OpenAI-compatible APIs:
 
@@ -1669,7 +1669,7 @@ The interactive mode uses the **Elm Architecture** (Model-Update-View) via the `
 
 ### RPC Protocol
 
-The RPC mode (`pi --mode rpc`) exposes a line-delimited JSON protocol over stdin/stdout for programmatic integration. Each line is a self-contained JSON object.
+The RPC mode (`rpi --mode rpc`) exposes a line-delimited JSON protocol over stdin/stdout for programmatic integration. Each line is a self-contained JSON object.
 
 **Client → Pi (stdin):**
 
@@ -1708,7 +1708,7 @@ Queue modes (`All` or `OneAtATime`) control whether multiple queued messages are
 
 ### Session Indexing
 
-Session resume (`pi -c` or `pi -r`) needs to find the most recent session for the current project without scanning every JSONL file on disk. Pi maintains a SQLite index (`session-index.sqlite`) that provides constant-time lookups.
+Session resume (`rpi -c` or `rpi -r`) needs to find the most recent session for the current project without scanning every JSONL file on disk. Pi maintains a SQLite index (`session-index.sqlite`) that provides constant-time lookups.
 
 **Schema:**
 
@@ -1728,8 +1728,8 @@ CREATE TABLE sessions (
 **Update lifecycle:**
 
 1. After saving a session JSONL file, Pi upserts its metadata into the index
-2. `pi -c` queries `WHERE cwd = ? ORDER BY last_modified DESC LIMIT 1`
-3. `pi -r` queries the same table and presents a picker sorted by recency
+2. `rpi -c` queries `WHERE cwd = ? ORDER BY last_modified DESC LIMIT 1`
+3. `rpi -r` queries the same table and presents a picker sorted by recency
 
 **Concurrency**: A file-based lock (`session-index.lock`) serializes writes from concurrent Pi instances. Reads use WAL mode for non-blocking access.
 
@@ -1766,12 +1766,12 @@ Pi also supports a v2 sidecar store next to JSONL sessions for faster resume and
 
 **CLI support:**
 
-- `pi migrate <path> --dry-run` validates migration without writing.
-- `pi migrate <path>` performs JSONL-to-v2 migration and verifies parity.
+- `rpi migrate <path> --dry-run` validates migration without writing.
+- `rpi migrate <path>` performs JSONL-to-v2 migration and verifies parity.
 
 ### Authentication & Credential Management
 
-Beyond simple API keys, Pi supports OAuth, AWS credential chains, service key exchange, and bearer-token auth. Credentials are stored in `~/.pi/agent/auth.json` with file-locked access to prevent corruption from concurrent instances. Stored API keys can be literal strings, `$ENV:VAR_NAME` references, or `$CMD:shell command` / `$COMMAND:shell command` sources that resolve trimmed stdout at request time.
+Beyond simple API keys, Pi supports OAuth, AWS credential chains, service key exchange, and bearer-token auth. Credentials are stored in `~/.rpi/agent/auth.json` with file-locked access to prevent corruption from concurrent instances. Stored API keys can be literal strings, `$ENV:VAR_NAME` references, or `$CMD:shell command` / `$COMMAND:shell command` sources that resolve trimmed stdout at request time.
 
 | Mechanism | Providers | Details |
 |-----------|-----------|---------|
@@ -1783,7 +1783,7 @@ Beyond simple API keys, Pi supports OAuth, AWS credential chains, service key ex
 
 **OAuth token lifecycle:**
 
-1. User runs `pi` with an OAuth-configured provider
+1. User runs `rpi` with an OAuth-configured provider
 2. Pi checks `auth.json` for an existing token
 3. If missing: opens browser to authorization URL, user authenticates, Pi receives authorization code, exchanges it for access + refresh tokens, stores both with expiry timestamp
 4. If expired but refresh token valid: exchanges refresh token for new access token, updates `auth.json`
@@ -1791,7 +1791,7 @@ Beyond simple API keys, Pi supports OAuth, AWS credential chains, service key ex
 
 Google CLI-style OAuth providers carry project metadata with the token payload. Pi preserves and refreshes that payload and can resolve project IDs from `GOOGLE_CLOUD_PROJECT` or local `gcloud` config when needed.
 
-**Credential status reporting**: `pi config` shows the status of each configured provider's credentials: `Missing`, `ApiKey`, `OAuthValid` (with time until expiry), `OAuthExpired` (with time since expiry), `AwsCredentials`, or `BearerToken`.
+**Credential status reporting**: `rpi config` shows the status of each configured provider's credentials: `Missing`, `ApiKey`, `OAuthValid` (with time until expiry), `OAuthExpired` (with time since expiry), `AwsCredentials`, or `BearerToken`.
 
 **Diagnostic codes**: Auth failures produce specific diagnostic codes (`MissingApiKey`, `InvalidApiKey`, `QuotaExceeded`, `OAuthTokenRefreshFailed`, `MissingAzureDeployment`, `MissingRegion`, etc.) with context-specific error hints rather than generic messages.
 
@@ -2150,7 +2150,7 @@ current closeout artifact is
 `docs/evidence/fourth-wave-self-healing-closeout-gate.json`.
 
 Offline swarm replay traces can be previewed before handoff with
-`pi swarm-replay-preview --trace <trace.json> --format json`. The command is
+`rpi swarm-replay-preview --trace <trace.json> --format json`. The command is
 read-only, emits `pi.swarm.replay_preview.v1` JSON or concise text, refuses to
 overwrite requested output files, and can feed
 `scripts/build_swarm_operator_runpack.py --swarm-replay-preview-json <preview.json>`
@@ -2469,7 +2469,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 { "apiKey": "sk-ant-..." }
 
 # Or per-command
-pi --api-key "sk-ant-..." "Hello"
+rpi --api-key "sk-ant-..." "Hello"
 ```
 
 ### "Session corrupted"
@@ -2478,10 +2478,10 @@ Sessions are append-only JSONL. If corruption occurs:
 
 ```bash
 # Start fresh
-pi --no-session
+rpi --no-session
 
 # Or delete the problematic session
-rm ~/.pi/agent/sessions/--home-user-project--/corrupted-session.jsonl
+rm ~/.rpi/agent/sessions/--home-user-project--/corrupted-session.jsonl
 ```
 
 ### "Streaming hangs"
@@ -2603,19 +2603,19 @@ Operator rollout playbook (compatibility-first local defaults + explicit lock-do
 
 ```bash
 # 1) Baseline: verify defaults are compatibility-first (`permissive`)
-pi --explain-extension-policy
+rpi --explain-extension-policy
 
 # 2) Staging: use balanced prompting, dangerous caps still denied by default
-pi --extension-policy balanced --explain-extension-policy
+rpi --extension-policy balanced --explain-extension-policy
 
 # 3) Explicit lock-down for strict local/CI runs
-pi --extension-policy safe --explain-extension-policy
+rpi --extension-policy safe --explain-extension-policy
 
 # 4) Narrow opt-in for dangerous capabilities (preferred path)
-PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced --explain-extension-policy
+PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced --explain-extension-policy
 
 # 5) Explicit permissive mode when you want to be unambiguous
-pi --extension-policy permissive --explain-extension-policy
+rpi --extension-policy permissive --explain-extension-policy
 ```
 
 `settings.json` baseline for local/dev:
@@ -2644,15 +2644,15 @@ CI guidance:
 
 ```bash
 # CI default: keep dangerous capabilities disabled
-pi --extension-policy safe --explain-extension-policy
+rpi --extension-policy safe --explain-extension-policy
 
 # CI opt-in job (only where required), keep explicit and auditable
-PI_EXTENSION_ALLOW_DANGEROUS=1 pi --extension-policy balanced --explain-extension-policy
+PI_EXTENSION_ALLOW_DANGEROUS=1 rpi --extension-policy balanced --explain-extension-policy
 ```
 
 Rollback rule: remove `PI_EXTENSION_ALLOW_DANGEROUS`, set `extensionPolicy.profile`
 back to `safe` or set `extensionPolicy.defaultPermissive` to `false`, and re-run
-`pi --explain-extension-policy` to confirm deny decisions.
+`rpi --explain-extension-policy` to confirm deny decisions.
 
 See [EXTENSIONS.md](docs/planning/EXTENSIONS.md) for the full architecture, runtime contract,
 and conformance results.
@@ -2681,7 +2681,7 @@ A: This is an authorized Rust port of [Pi Agent](https://github.com/badlogic/pi)
 A: Startup time matters when you're in a terminal all day. Rust provides a native single-binary deployment without a managed application runtime. Fresh comparative measurements are required before this release makes a speed claim.
 
 **Q: Can I use providers beyond Anthropic (OpenAI/Gemini/Cohere/Azure/Bedrock/Vertex/Copilot/GitLab/Cursor/Codex)?**
-A: Yes. Pi has 11 native provider implementation modules: Anthropic, OpenAI Chat, OpenAI Responses/Codex Responses, Gemini (native + Gemini CLI + Antigravity routes), Cohere, Azure OpenAI, Amazon Bedrock, Vertex AI, GitHub Copilot, GitLab Duo, and Cursor. Pi also supports many OpenAI-compatible presets (for example Groq, OpenRouter, Mistral, Together, DeepSeek, Cerebras, DeepInfra, Alibaba/Qwen, and Moonshot/Kimi). Provider IDs and aliases are case-insensitive. Set credentials and choose via `--provider`/`--model`; run `pi --list-providers` to see canonical IDs, aliases, and env keys.
+A: Yes. Pi has 11 native provider implementation modules: Anthropic, OpenAI Chat, OpenAI Responses/Codex Responses, Gemini (native + Gemini CLI + Antigravity routes), Cohere, Azure OpenAI, Amazon Bedrock, Vertex AI, GitHub Copilot, GitLab Duo, and Cursor. Pi also supports many OpenAI-compatible presets (for example Groq, OpenRouter, Mistral, Together, DeepSeek, Cerebras, DeepInfra, Alibaba/Qwen, and Moonshot/Kimi). Provider IDs and aliases are case-insensitive. Set credentials and choose via `--provider`/`--model`; run `rpi --list-providers` to see canonical IDs, aliases, and env keys.
 
 **Q: How do sessions work?**
 A: By default, each session is a JSONL v3 file with message entries, parent references for branching, and compaction metadata. Builds include `sqlite-sessions` support by default, so configured deployments can use SQLite-backed session storage too; JSONL remains the default store unless configuration selects SQLite.
@@ -2699,10 +2699,10 @@ A: Pi focuses on core coding assistance. Features like web browsing, image gener
 A: When a conversation exceeds the model's context window, Pi summarizes older messages using the LLM itself, storing the summary as a session entry. Recent messages are kept verbatim. The cut point is chosen at a turn boundary, and the summary includes a record of which files were read or modified so the model retains that awareness. Compaction runs automatically after each agent turn when needed, or manually via `/compact`.
 
 **Q: Can I add a custom provider that Pi doesn't support natively?**
-A: Yes. Create a `models.json` file in `~/.pi/agent/` or `.pi/` with entries specifying the model ID, base URL, and API type (usually `openai-completions` for OpenAI-compatible endpoints). Pi's compat config system handles field name differences and feature flag overrides. Extensions can also register entirely custom providers.
+A: Yes. Create a `models.json` file in `~/.rpi/agent/` or `.pi/` with entries specifying the model ID, base URL, and API type (usually `openai-completions` for OpenAI-compatible endpoints). Pi's compat config system handles field name differences and feature flag overrides. Extensions can also register entirely custom providers.
 
 **Q: How does Pi decide which session to resume?**
-A: Pi maintains a SQLite session metadata index sidecar with WAL/lock handling and stale-index reindexing. When you run `pi -c`, it queries that index for the most recently modified session whose working directory matches your current project, including JSONL sessions and configured SQLite-backed sessions. This avoids scanning the filesystem on every resume.
+A: Pi maintains a SQLite session metadata index sidecar with WAL/lock handling and stale-index reindexing. When you run `rpi -c`, it queries that index for the most recently modified session whose working directory matches your current project, including JSONL sessions and configured SQLite-backed sessions. This avoids scanning the filesystem on every resume.
 
 **Q: What happens if an extension tries to access something dangerous?**
 A: Every hostcall from an extension is checked against the active capability policy before execution. Dangerous capabilities (`exec`, `env`) are denied by default under `safe` and `balanced` unless explicitly opted in (for example via `PI_EXTENSION_ALLOW_DANGEROUS=1`), and are available under `permissive`. For `exec`, Pi then applies command mediation before spawn: it classifies command+arg signatures and blocks critical classes by default (for example recursive delete, disk/device write, reverse shell), with strict/safe policy able to block high-tier classes as well (for example shutdown, process-kill, credential-file modification). Denied calls return errors to the extension Promise path, and denial events are recorded in redacted security-alert and exec-mediation audit artifacts. Sensitive env keys (API keys/tokens/secrets) remain filtered. If behavior escalates, you can kill-switch that extension into quarantined `killed` state immediately or force compatibility-lane routing as a containment step while investigating.
@@ -2750,7 +2750,7 @@ space. Set `PI_CARGO_RUNNER=local` for a local-only run,
 `PI_CARGO_HEADROOM_MIN_FREE_MB=<mb>` for smaller focused checks.
 
 Before launching swarms or heavyweight all-target gates, run
-`pi doctor --only swarm --format json`. The
+`rpi doctor --only swarm --format json`. The
 `pi.doctor.swarm_resource_preflight.v1` result fails closed when
 `CARGO_TARGET_DIR` or `TMPDIR` cannot prove enough scratch headroom, and its
 `recommended_budgets` object gives conservative agent, tool, extension hostcall,

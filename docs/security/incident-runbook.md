@@ -50,7 +50,7 @@ DETECT  →  CONTAIN  →  COLLECT  →  VERIFY  →  ANALYZE  →  REMEDIATE  �
 
 2. **Check policy evaluation path.**
    ```bash
-   pi --explain-extension-policy
+   rpi --explain-extension-policy
    ```
    - Verify the capability is in `deny_caps`
    - Check if per-extension overrides exist for this extension
@@ -337,7 +337,7 @@ After collecting evidence:
 
 Verification:
 ```bash
-pi --explain-extension-policy  # Confirm safe profile active
+rpi --explain-extension-policy  # Confirm safe profile active
 cargo test --test security_conformance_benign -- --nocapture  # Confirm compatibility
 ```
 
@@ -361,7 +361,7 @@ Or disable entirely: set `enabled: false`. The controller stops scoring but exis
 ### Emergency: Kill All Extensions
 
 ```bash
-pi --no-extensions  # Disable all extension discovery and loading
+rpi --no-extensions  # Disable all extension discovery and loading
 ```
 
 This is the nuclear option. Use only when containment requires complete extension isolation.

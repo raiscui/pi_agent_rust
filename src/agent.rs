@@ -11366,7 +11366,7 @@ mod tests {
             Some("请读取 src/main.rs。"),
             &[sample_tool_call(
                 "read",
-                "/Users/ciluming/.pi/agent/packages/main.rs",
+                "/Users/ciluming/.rpi/agent/packages/main.rs",
             )],
         );
 
