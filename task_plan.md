@@ -627,3 +627,21 @@
 ### 当前状态
 
 **正在执行阶段 4** - 提交前门禁通过,准备创建并推送 scoped commit。
+
+## [2026-08-12 13:38:33] [Session ID: omx-1786418643597-4bz6s9] 阶段 4 完成: rpi 发布安装闭环已交付
+
+### 完成结果
+
+- [x] scoped commit 已创建: `033c90ec fix(release): publish rpi artifacts consistently`。
+- [x] `git pull --rebase my main` 成功。
+- [x] `git push my main` 与 `git push my main:master` 成功。
+- [x] `HEAD`、`my/main` 与 `my/master` 都是 `033c90ec0e0ef3e9fb3eb6b9049d140b1cc53448`。
+
+### 保留状态
+
+- `legacy_pi_mono_code/pi-mono/pnpm-lock.yaml`、`tests/cross_platform_reports/macos/` 与 `tests/evidence_bundle/` 是其他会话的未跟踪产物,未修改也未提交。
+- `EPIPHANY_LOG.md` 与 `LATER_PLANS.md` 已回顾;本轮没有新的架构风险或延期事项需要追加。
+
+### 当前状态
+
+**任务完成** - `rpi` 的发布、安装、卸载、release assets 和当前发布文档已经使用同一命名契约,并已同步到远端。
