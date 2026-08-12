@@ -214,9 +214,9 @@ capture_version_line() {
   printf '%s\n' "$out"
 }
 
-is_rust_pi_output() {
+is_rust_rpi_output() {
   local out="$1"
-  [[ "$out" =~ ^pi[[:space:]][0-9]+\.[0-9]+\.[0-9]+[[:space:]]\( ]]
+  [[ "$out" =~ ^rpi[[:space:]][0-9]+\.[0-9]+\.[0-9]+[[:space:]]\( ]]
 }
 
 is_rust_pi_binary() {
@@ -225,7 +225,7 @@ is_rust_pi_binary() {
 
   local out
   out="$(capture_version_line "$path")"
-  is_rust_pi_output "$out"
+  is_rust_rpi_output "$out"
 }
 
 is_expected_legacy_agent_settings_path() {

@@ -322,6 +322,24 @@
 - `cargo test -j 2 --test semantic_workspace_graph_builder canonical_dropin_verdict_uses_release_gate_age_limit -- --exact`: 1 passed。
 - `cargo clippy -j 2 --all-targets -- -D warnings`: passed。
 
+## [2026-08-12 13:28:19] [Session ID: omx-1786418643597-4bz6s9] 质量门环境错误: `/data` 临时目录不可写
+
+### 问题
+
+- `cargo fmt --check && cargo check -j 2 --all-targets && cargo clippy -j 2 --all-targets -- -D warnings` 未进入编译,`sccache` 在 `/data/tmp/pi_agent_rust_cargo/cuiluming/tmp` 创建临时文件时失败。
+
+### 原因
+
+- 当前 macOS 环境的 `/data` 为只读挂载,无法作为 Cargo target 或临时目录。
+
+### 修复
+
+- 使用可写的 `/private/tmp/pi_agent_rust_cargo_omx-1786418643597-4bz6s9` 与 `/private/tmp/pi_agent_rust_tmp_omx-1786418643597-4bz6s9` 重跑相同质量门。
+
+### 验证
+
+- 后续质量门结果将以可写临时目录下的实际输出为准。
+
 ## [2026-08-12 02:17:00] [Session ID: omx-1786418643597-4bz6s9] 修复: 默认目录与 shipping CLI 文档残留
 
 ### 现象

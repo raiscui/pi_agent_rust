@@ -224,7 +224,7 @@ set -euo pipefail
 MODE="${mode}"
 
 if [ "\${1:-}" = "--version" ]; then
-  echo "pi 9.9.9 (fixture)"
+  echo "rpi 9.9.9 (fixture)"
   exit 0
 fi
 
@@ -232,7 +232,7 @@ if [ "\${1:-}" = "--help" ]; then
   case "\${MODE}" in
     help_lists_completions)
       cat <<'HELP'
-Usage: pi [OPTIONS] [ARGS]... [COMMAND]
+Usage: rpi [OPTIONS] [ARGS]... [COMMAND]
 
 Commands:
   completions  Generate shell completions
@@ -242,14 +242,14 @@ HELP
       ;;
     help_inconclusive_probe_ok)
       cat <<'HELP'
-Usage: pi [OPTIONS] [ARGS]... [COMMAND]
+Usage: rpi [OPTIONS] [ARGS]... [COMMAND]
 This build omits the command table from --help output.
 HELP
       exit 0
       ;;
     help_conclusive_no_completion)
       cat <<'HELP'
-Usage: pi [OPTIONS] [ARGS]... [COMMAND]
+Usage: rpi [OPTIONS] [ARGS]... [COMMAND]
 
 Commands:
   help  Print this message
@@ -284,15 +284,15 @@ if [ "\${1:-}" = "completions" ]; then
     completion_ok)
       case "\${2:-}" in
         bash)
-          echo "# bash completion for pi fixture"
+          echo "# bash completion for rpi fixture"
           exit 0
           ;;
         zsh)
-          echo "#compdef pi"
+          echo "#compdef rpi"
           exit 0
           ;;
         fish)
-          echo "complete -c pi"
+          echo "complete -c rpi"
           exit 0
           ;;
         *)
@@ -303,15 +303,15 @@ if [ "\${1:-}" = "completions" ]; then
     help_lists_completions|help_inconclusive_probe_ok)
       case "\${2:-}" in
         bash)
-          echo "# bash completion for pi fixture"
+          echo "# bash completion for rpi fixture"
           exit 0
           ;;
         zsh)
-          echo "#compdef pi"
+          echo "#compdef rpi"
           exit 0
           ;;
         fish)
-          echo "complete -c pi"
+          echo "complete -c rpi"
           exit 0
           ;;
         *)
@@ -843,7 +843,7 @@ test_linux_target_uses_supported_linux_artifact_naming() {
     --no-agent-skills
 
   assert_exit_code "$dir" 0
-  if ! grep -Eq "pi_linux_amd64|x86_64-unknown-linux-gnu" "$curl_log"; then
+  if ! grep -Eq "rpi_linux_amd64|rpi-x86_64-unknown-linux-gnu" "$curl_log"; then
     echo "expected linux-amd64 or GNU artifact URL candidate" >&2
     cat "$curl_log" >&2
     return 1
@@ -875,7 +875,7 @@ test_rosetta_prefers_arm64_artifact_naming() {
 
   assert_exit_code "$dir" 0
   assert_output_contains "$dir" "Rosetta shell detected on Apple Silicon; preferring native arm64 binary"
-  if ! grep -Eq "pi_darwin_arm64|aarch64-apple-darwin|pi-darwin-arm64" "$curl_log"; then
+  if ! grep -Eq "rpi_darwin_arm64|rpi-aarch64-apple-darwin|rpi-darwin-arm64" "$curl_log"; then
     echo "expected darwin arm64 artifact URL candidate under Rosetta" >&2
     cat "$curl_log" >&2
     return 1
@@ -938,6 +938,18 @@ test_installer_installs_only_rpi_without_touching_pi() {
     echo "installer must not modify the existing pi command" >&2
     return 1
   }
+
+  run_installer "$dir" \
+    --yes --no-gum --offline \
+    --version v9.9.9 \
+    --dest "${dir}/dest" \
+    --artifact-url "${artifact_url}" \
+    --checksum "${checksum}" \
+    --no-completions \
+    --no-agent-skills
+
+  assert_exit_code "$dir" 0
+  assert_output_contains "$dir" "rpi v9.9.9 already installed at"
 }
 
 test_legacy_agent_settings_cleanup_is_safe_and_idempotent() {
@@ -1780,7 +1792,7 @@ test_completions_success_writes_file() {
     --checksum "${checksum}" \
     --completions bash
 
-  completion_file="${dir}/data/bash-completion/completions/pi"
+  completion_file="${dir}/data/bash-completion/completions/rpi"
 
   assert_exit_code "$dir" 0
   assert_output_contains "$dir" "Installed bash completions to"
@@ -1789,7 +1801,7 @@ test_completions_success_writes_file() {
     echo "expected completion file: ${completion_file}" >&2
     return 1
   fi
-  if ! grep -Fq "bash completion for pi fixture" "$completion_file"; then
+  if ! grep -Fq "bash completion for rpi fixture" "$completion_file"; then
     echo "completion file missing expected content: ${completion_file}" >&2
     cat "$completion_file" >&2
     return 1
@@ -1814,7 +1826,7 @@ test_completions_help_discovery_path_succeeds() {
     --checksum "${checksum}" \
     --completions bash
 
-  completion_file="${dir}/data/bash-completion/completions/pi"
+  completion_file="${dir}/data/bash-completion/completions/rpi"
   assert_exit_code "$dir" 0
   assert_output_contains "$dir" "Installed bash completions to"
   assert_output_contains "$dir" "Shell:     installed (bash)"
@@ -1839,7 +1851,7 @@ test_completions_help_inconclusive_falls_back_to_probe() {
     --checksum "${checksum}" \
     --completions bash
 
-  completion_file="${dir}/data/bash-completion/completions/pi"
+  completion_file="${dir}/data/bash-completion/completions/rpi"
   assert_exit_code "$dir" 0
   assert_output_contains "$dir" "Installed bash completions to"
   assert_output_contains "$dir" "Shell:     installed (bash)"
@@ -1890,7 +1902,7 @@ test_completions_internal_timeout_fallback_succeeds() {
     --checksum "${checksum}" \
     --completions bash
 
-  completion_file="${dir}/data/bash-completion/completions/pi"
+  completion_file="${dir}/data/bash-completion/completions/rpi"
   assert_exit_code "$dir" 0
   assert_output_contains "$dir" "Installed bash completions to"
   assert_output_contains "$dir" "Shell:     installed (bash)"

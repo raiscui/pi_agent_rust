@@ -503,3 +503,22 @@
 
 - 对修改后的 JSON golden 执行 `jq empty`,再运行 CLI、配置和 swarm replay 定向测试。
 - 通过 fmt、all-target check、clippy 和分类扫描后,才可进入提交前 ledger 与 UBS 门禁。
+
+## [2026-08-12 13:32:03] [Session ID: omx-1786418643597-4bz6s9] 笔记: rpi 发布安装链路验证
+
+### 动态证据
+
+- `bash tests/installer_regression.sh`: 48 passed,0 failed。
+- `cargo fmt --check`、`cargo check -j 2 --all-targets`、`cargo clippy -j 2 --all-targets -- -D warnings`: 均通过。
+- `bash -n install.sh uninstall.sh tests/installer_regression.sh`、Ruby YAML 解析和 `git diff --check`: 均通过。
+
+### 静态分类
+
+- `.github/workflows/release.yml` 的 build matrix、archive root、archive 内 binary、asset inventory、manifest 和发布说明均为 `rpi`。
+- `docs/releasing.md` 的 DSR raw binary、aggregate manifest、smoke、installer digest 校验和 release assets 均为 `rpi`。
+- 剩余 `pi` 命中不是 shipping executable,它们是 TypeScript 命令保护、`pi.release.*` schema 或 DSR `.tool` 协议标识。
+
+### 环境修正
+
+- `/data` 在当前 macOS 环境只读,导致 `sccache` 无法创建临时文件。
+- 改用 `/private/tmp` 后同一质量门通过,因此该问题不构成源码或构建回归。

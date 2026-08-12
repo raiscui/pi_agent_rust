@@ -1418,7 +1418,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
      "$preserved_wrapper_sha256" "$preserved_audit_sha256" \
      "$preservation_manifest_sha256" >> "$proof_file"
 
-   raw_manifest="$RAW_RELEASE_DIR/pi-v0.2.0-manifest.json"
+   raw_manifest="$RAW_RELEASE_DIR/rpi-v0.2.0-manifest.json"
    jq -e \
      --arg output "$RAW_RELEASE_DIR" \
      --arg manifest "$raw_manifest" '
@@ -1433,12 +1433,12 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    ' "$build_receipt" >/dev/null
 
    RAW_EXPECTED=(
-     pi_linux_amd64
-     pi_linux_arm64
-     pi_darwin_amd64
-     pi_darwin_arm64
-     pi_windows_amd64.exe
-     pi-v0.2.0-manifest.json
+     rpi_linux_amd64
+     rpi_linux_arm64
+     rpi_darwin_amd64
+     rpi_darwin_arm64
+     rpi_windows_amd64.exe
+     rpi-v0.2.0-manifest.json
    )
    expected_raw="$(printf '%s\n' "${RAW_EXPECTED[@]}" | LC_ALL=C sort)"
    actual_raw="$(find "$RAW_RELEASE_DIR" -mindepth 1 -maxdepth 1 \
@@ -1470,11 +1470,11 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
      ] and
      (.artifacts | length) == 5 and
      ([.artifacts[] | {target, name}] | sort_by(.target)) == ([
-       {target: "linux/amd64", name: "pi_linux_amd64"},
-       {target: "linux/arm64", name: "pi_linux_arm64"},
-       {target: "darwin/amd64", name: "pi_darwin_amd64"},
-       {target: "darwin/arm64", name: "pi_darwin_arm64"},
-       {target: "windows/amd64", name: "pi_windows_amd64.exe"}
+       {target: "linux/amd64", name: "rpi_linux_amd64"},
+       {target: "linux/arm64", name: "rpi_linux_arm64"},
+       {target: "darwin/amd64", name: "rpi_darwin_amd64"},
+       {target: "darwin/arm64", name: "rpi_darwin_arm64"},
+       {target: "windows/amd64", name: "rpi_windows_amd64.exe"}
      ] | sort_by(.target)) and
      all(.artifacts[];
        (.sha256 | test("^[0-9a-f]{64}$")) and
@@ -1771,33 +1771,33 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
 
    specs = {
        "linux/amd64": {
-           "raw": "pi_linux_amd64", "asset": "pi-linux-amd64",
+           "raw": "rpi_linux_amd64", "asset": "rpi-linux-amd64",
            "triple": "x86_64-unknown-linux-gnu", "runner_os": "Linux",
-           "format": "tar.xz", "binary": "pi",
+           "format": "tar.xz", "binary": "rpi",
        },
        "linux/arm64": {
-           "raw": "pi_linux_arm64", "asset": "pi-linux-arm64",
+           "raw": "rpi_linux_arm64", "asset": "rpi-linux-arm64",
            "triple": "aarch64-unknown-linux-gnu", "runner_os": "Linux",
-           "format": "tar.xz", "binary": "pi",
+           "format": "tar.xz", "binary": "rpi",
        },
        "darwin/amd64": {
-           "raw": "pi_darwin_amd64", "asset": "pi-darwin-amd64",
+           "raw": "rpi_darwin_amd64", "asset": "rpi-darwin-amd64",
            "triple": "x86_64-apple-darwin", "runner_os": "macOS",
-           "format": "tar.xz", "binary": "pi",
+           "format": "tar.xz", "binary": "rpi",
        },
        "darwin/arm64": {
-           "raw": "pi_darwin_arm64", "asset": "pi-darwin-arm64",
+           "raw": "rpi_darwin_arm64", "asset": "rpi-darwin-arm64",
            "triple": "aarch64-apple-darwin", "runner_os": "macOS",
-           "format": "tar.xz", "binary": "pi",
+           "format": "tar.xz", "binary": "rpi",
        },
        "windows/amd64": {
-           "raw": "pi_windows_amd64.exe", "asset": "pi-windows-amd64",
+           "raw": "rpi_windows_amd64.exe", "asset": "rpi-windows-amd64",
            "triple": "x86_64-pc-windows-msvc", "runner_os": "Windows",
-           "format": "zip", "binary": "pi.exe",
+           "format": "zip", "binary": "rpi.exe",
        },
    }
    expected_raw = {item["raw"] for item in specs.values()} | {
-       f"pi-{tag}-manifest.json"
+       f"rpi-{tag}-manifest.json"
    }
    raw_entries = list(raw_dir.iterdir()) if raw_dir.is_dir() and not raw_dir.is_symlink() else []
    if len(raw_entries) != len(expected_raw) \
@@ -1807,7 +1807,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
           for entry in raw_entries):
        fail("raw DSR inventory contains an invalid entry")
 
-   if raw_manifest_path != raw_dir / f"pi-{tag}-manifest.json":
+   if raw_manifest_path != raw_dir / f"rpi-{tag}-manifest.json":
        fail("aggregate manifest path is outside the exact raw inventory")
    raw_manifest_bytes = raw_manifest_path.read_bytes()
    raw_manifest = strict_json(raw_manifest_path)
@@ -1895,7 +1895,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
            fail(f"invalid DSR build-environment receipt: {dsr_target}")
        validate_binary(raw_bytes, spec["triple"])
 
-       archive_root = f"pi-{version}-{spec['triple']}"
+       archive_root = f"rpi-{version}-{spec['triple']}"
        suffix = ".zip" if spec["format"] == "zip" else ".tar.xz"
        archive_path = output_dir / f"{spec['asset']}{suffix}"
        if archive_path.exists() or archive_path.is_symlink():
@@ -2019,18 +2019,18 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    )
 
    EXPECTED_ASSETS=(
-     pi-linux-amd64.tar.xz
-     pi-linux-arm64.tar.xz
-     pi-darwin-amd64.tar.xz
-     pi-darwin-arm64.tar.xz
-     pi-windows-amd64.zip
+     rpi-linux-amd64.tar.xz
+     rpi-linux-arm64.tar.xz
+     rpi-darwin-amd64.tar.xz
+     rpi-darwin-arm64.tar.xz
+     rpi-windows-amd64.zip
      install.sh
      SHA256SUMS
-     build-manifest-pi-linux-amd64.json
-     build-manifest-pi-linux-arm64.json
-     build-manifest-pi-darwin-amd64.json
-     build-manifest-pi-darwin-arm64.json
-     build-manifest-pi-windows-amd64.json
+     build-manifest-rpi-linux-amd64.json
+     build-manifest-rpi-linux-arm64.json
+     build-manifest-rpi-darwin-amd64.json
+     build-manifest-rpi-darwin-arm64.json
+     build-manifest-rpi-windows-amd64.json
    )
    expected_assets="$(printf '%s\n' "${EXPECTED_ASSETS[@]}" | LC_ALL=C sort)"
    actual_assets="$(find "$RELEASE_ARTIFACT_DIR" -mindepth 1 -maxdepth 1 \
@@ -2052,7 +2052,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
        | grep -v '^SHA256SUMS$' | LC_ALL=C sort)"
      test "$checksum_names" = "$expected_checksum_names"
      sha256sum --check --strict SHA256SUMS
-     set -- build-manifest-pi-*.json
+     set -- build-manifest-rpi-*.json
      test "$#" = 5
      for manifest in "$@"; do
        jq -e \
@@ -2441,18 +2441,18 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    ' "$draft_created")"
 
    EXPECTED_ASSETS=(
-     pi-linux-amd64.tar.xz
-     pi-linux-arm64.tar.xz
-     pi-darwin-amd64.tar.xz
-     pi-darwin-arm64.tar.xz
-     pi-windows-amd64.zip
+     rpi-linux-amd64.tar.xz
+     rpi-linux-arm64.tar.xz
+     rpi-darwin-amd64.tar.xz
+     rpi-darwin-arm64.tar.xz
+     rpi-windows-amd64.zip
      install.sh
      SHA256SUMS
-     build-manifest-pi-linux-amd64.json
-     build-manifest-pi-linux-arm64.json
-     build-manifest-pi-darwin-amd64.json
-     build-manifest-pi-darwin-arm64.json
-     build-manifest-pi-windows-amd64.json
+     build-manifest-rpi-linux-amd64.json
+     build-manifest-rpi-linux-arm64.json
+     build-manifest-rpi-darwin-amd64.json
+     build-manifest-rpi-darwin-arm64.json
+     build-manifest-rpi-windows-amd64.json
    )
    expected_assets="$(printf '%s\n' "${EXPECTED_ASSETS[@]}" | LC_ALL=C sort)"
    remote_assets="$(jq -r '.assets[].name' "$draft_created" | LC_ALL=C sort)"
@@ -2536,18 +2536,18 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    set -euo pipefail
    verify_operator_tools
    EXPECTED_ASSETS=(
-     pi-linux-amd64.tar.xz
-     pi-linux-arm64.tar.xz
-     pi-darwin-amd64.tar.xz
-     pi-darwin-arm64.tar.xz
-     pi-windows-amd64.zip
+     rpi-linux-amd64.tar.xz
+     rpi-linux-arm64.tar.xz
+     rpi-darwin-amd64.tar.xz
+     rpi-darwin-arm64.tar.xz
+     rpi-windows-amd64.zip
      install.sh
      SHA256SUMS
-     build-manifest-pi-linux-amd64.json
-     build-manifest-pi-linux-arm64.json
-     build-manifest-pi-darwin-amd64.json
-     build-manifest-pi-darwin-arm64.json
-     build-manifest-pi-windows-amd64.json
+     build-manifest-rpi-linux-amd64.json
+     build-manifest-rpi-linux-arm64.json
+     build-manifest-rpi-darwin-amd64.json
+     build-manifest-rpi-darwin-arm64.json
+     build-manifest-rpi-windows-amd64.json
    )
    expected_assets="$(printf '%s\n' "${EXPECTED_ASSETS[@]}" | LC_ALL=C sort)"
    local_assets="$(find "$RELEASE_ARTIFACT_DIR" -mindepth 1 -maxdepth 1 \
@@ -2785,7 +2785,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    test ! -e "$HOME/$remote_dir"
    mkdir -m 700 "$HOME/$remote_dir"
    REMOTE
-     scp -- "$raw_path" "${host}:${remote_dir}/pi"
+     scp -- "$raw_path" "${host}:${remote_dir}/rpi"
      (set -C; ssh "$host" sh -s -- \
        "$label" "$remote_dir" "$RELEASE_VERSION" "$expected_sha" \
        "$qemu_sysroot" \
@@ -2796,7 +2796,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    expected_version="$3"
    expected_sha="$4"
    qemu_sysroot="$5"
-   binary="$HOME/$remote_dir/pi"
+   binary="$HOME/$remote_dir/rpi"
    test -f "$binary" && test ! -L "$binary" && test -s "$binary"
    chmod 700 "$binary"
    host_arch="$(uname -m)"
@@ -2869,7 +2869,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
 
    test "$actual_sha" = "$expected_sha"
    case "$version_output" in
-     "pi $expected_version ("*) ;;
+     "rpi $expected_version ("*) ;;
      *) printf 'unexpected version output: %s\n' "$version_output" >&2; exit 5 ;;
    esac
    receipt_label="$label"
@@ -2888,18 +2888,18 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    }
 
    smoke_unix_raw_binary \
-     linux-amd64 "$LINUX_AMD64_SMOKE_HOST" pi_linux_amd64
+     linux-amd64 "$LINUX_AMD64_SMOKE_HOST" rpi_linux_amd64
    smoke_unix_raw_binary \
-     linux-arm64 "$LINUX_ARM64_SMOKE_HOST" pi_linux_arm64 \
+     linux-arm64 "$LINUX_ARM64_SMOKE_HOST" rpi_linux_arm64 \
      "$LINUX_ARM64_QEMU_SYSROOT"
    smoke_unix_raw_binary \
-     darwin-amd64 "$DARWIN_SMOKE_HOST" pi_darwin_amd64
+     darwin-amd64 "$DARWIN_SMOKE_HOST" rpi_darwin_amd64
    smoke_unix_raw_binary \
-     darwin-arm64 "$DARWIN_SMOKE_HOST" pi_darwin_arm64
+     darwin-arm64 "$DARWIN_SMOKE_HOST" rpi_darwin_arm64
 
-   windows_raw="$RAW_RELEASE_DIR/pi_windows_amd64.exe"
+   windows_raw="$RAW_RELEASE_DIR/rpi_windows_amd64.exe"
    windows_expected_sha="$(jq -er '
-     first(.artifacts[] | select(.name == "pi_windows_amd64.exe") | .sha256) |
+     first(.artifacts[] | select(.name == "rpi_windows_amd64.exe") | .sha256) |
      select(test("^[0-9a-f]{64}$"))
    ' "$raw_manifest")"
    test -f "$windows_raw" && test ! -L "$windows_raw" && test -s "$windows_raw"
@@ -2950,7 +2950,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    if ($ActualSha -ne '{expected_sha}') {{ throw 'Windows smoke digest mismatch' }}
    $VersionOutput = ((& $Binary --version 2>&1) -join "`n").Trim()
    if ($LASTEXITCODE -ne 0) {{ throw 'rpi --version failed' }}
-   if (-not $VersionOutput.StartsWith('pi {version} (')) {{ throw "unexpected version: $VersionOutput" }}
+   if (-not $VersionOutput.StartsWith('rpi {version} (')) {{ throw "unexpected version: $VersionOutput" }}
    & $Binary --help *> $null
    if ($LASTEXITCODE -ne 0) {{ throw 'rpi --help failed' }}
    Write-Output 'status=success'
@@ -2975,7 +2975,7 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
    test "$(tr -d '\r' < "$windows_setup_receipt" |
      grep -Fxc 'status=ready')" = 1
    scp -- "$windows_raw" \
-     "${WINDOWS_AMD64_SMOKE_HOST}:${windows_remote_dir}/pi.exe"
+     "${WINDOWS_AMD64_SMOKE_HOST}:${windows_remote_dir}/rpi.exe"
    (set -C; ssh "$WINDOWS_AMD64_SMOKE_HOST" \
      powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
        -Command - < "$windows_smoke_ps" > "$windows_receipt" 2>&1)
@@ -3857,12 +3857,12 @@ d040d967dbf63644a29d72068aa6ac35e5ff74a7e168cb5eda08a46ff828f32b
       test -f "$PIAR_INSTALL_BIN" && test ! -L "$PIAR_INSTALL_BIN"
       installed_sha="$(sha256sum "$PIAR_INSTALL_BIN" | awk '{print $1}')"
       linux_release_sha="$(jq -er '
-        first(.artifacts[] | select(.name == "pi_linux_amd64") | .sha256) |
+        first(.artifacts[] | select(.name == "rpi_linux_amd64") | .sha256) |
         select(test("^[0-9a-f]{64}$"))
       ' "$raw_manifest")"
       test "$installed_sha" = "$linux_release_sha"
       installed_version="$("$PIAR_INSTALL_BIN" --version)"
-      case "$installed_version" in "pi $RELEASE_VERSION ("*) ;; *) exit 1 ;; esac
+      case "$installed_version" in "rpi $RELEASE_VERSION ("*) ;; *) exit 1 ;; esac
       printf 'post_public_installer_status=success\nsha256=%s\nversion=%s\n' \
         "$installed_sha" "$installed_version"
     ) >> "$installer_receipt"

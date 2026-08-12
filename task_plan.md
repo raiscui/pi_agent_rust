@@ -191,6 +191,34 @@
 
 **正在执行追加修复** - 只替换实际命令调用,不改 crate/schema、项目级 `.pi` 或历史证据。
 
+## [2026-08-12 13:28:19] [Session ID: omx-1786418643597-4bz6s9] 发布安装链路收尾: installer 回归通过
+
+### 已验证
+
+- `bash tests/installer_regression.sh` 已完成,48 个用例全部通过。
+- 回归覆盖了 release 下载名、`rpi` 二进制发现、卸载识别与 completion 文件路径。
+
+### 接下来
+
+- [ ] 运行 `cargo fmt --check`、`cargo check -j 2 --all-targets` 与 `cargo clippy -j 2 --all-targets -- -D warnings`。
+- [ ] 扫描 release、安装器和发布文档,确认不存在旧 `pi` shipping asset 或 binary 名残留。
+- [ ] 更新任务记录,运行 ledger 与 staged UBS,精确提交并推送。
+
+### 当前状态
+
+**正在执行发布安装收尾质量门** - 安装器行为已通过,现在确认整个仓库仍可构建且发布命名没有遗漏。
+
+## [2026-08-12 13:28:19] [Session ID: omx-1786418643597-4bz6s9] 质量门环境修正: `/data` 不可写
+
+### 现象
+
+- 质量门在执行 `rustc -vV` 前失败,`sccache` 无法创建 `/data/tmp/pi_agent_rust_cargo/cuiluming/tmp/*`。
+
+### 结论与下一步
+
+- 当前 macOS 环境将 `/data` 挂载为只读,失败与本轮源码无关。
+- 改用可写的 `/private/tmp` 重跑同一组质量门,不修改构建配置或产品代码。
+
 ## [2026-08-12 01:36:03] [Session ID: omx-1786418643597-4bz6s9] 继续: 收敛遗留的 `pi` 命令调用
 
 ### 行动目的
@@ -449,3 +477,153 @@
 ### 当前状态
 
 **任务完成** - 默认全局目录、Rust CLI 调用面、当前运行文档、fixture 和 provider 示例已统一为 `.rpi/agent` 与 `rpi`。
+
+## [2026-08-12 12:50:07] [Session ID: omx-1786418643597-4bz6s9] 修复任务: rpi 发布、安装与卸载闭环
+
+### 目标
+
+修复审查确认的 `rpi` CLI 重命名遗漏,使 release workflow、installer 与 uninstaller 只识别、发布和处理 `rpi`。
+
+### 阶段
+
+- [x] 复现 release version 校验与 installer/uninstaller 版本识别失败。
+- [x] 更新 release workflow、安装和卸载脚本,以及对应的 installer regression fixture。
+- [ ] 运行定向脚本回归、发布 workflow 静态校验、fmt、check 与 clippy。
+- [ ] 记录结果,运行提交前门禁并 scoped commit/push。
+
+### 已验证事实
+
+- 真实 `rpi --version` 输出以 `rpi ` 开头。
+- `install.sh` 和 `uninstall.sh` 的版本谓词仍只匹配 `pi `,导致已安装判断和删除判断失败。
+- `release.yml` 构建 `rpi`,但版本校验、大小检查和 archive 清单仍查询 `pi` 文件。
+
+### 当前状态
+
+**正在执行阶段 2** - 在已有命名真相源下修正发布与安装闭环,不改 `pi` library crate、schema 或项目级 `.pi/` 路径。
+
+## [2026-08-12 13:18:00] [Session ID: omx-1786418643597-4bz6s9] 阶段 2 行动记录: 统一发布资产与版本契约
+
+### 将要修改
+
+- 将 installer 和 uninstaller 的 Rust CLI 版本谓词从 `pi` 改为 `rpi`。
+- 将 release workflow 的公开 asset、archive root、archive 内 binary、manifest 验证和 release notes 统一为 `rpi`。
+- 将 installer regression 的 artifact fixture 改为 `rpi` 版本与帮助输出,并增加同版本重装的幂等验证。
+
+### 边界
+
+- 保留 `pi_agent_rust` crate、`pi.release.*` schema、`pi-agent-rust` state/skill 名称、项目级 `.pi/` 路径与用于证明不覆盖 pnpm `pi` 的 fixture。
+
+### 当前状态
+
+**正在执行阶段 2** - 已完成静态调用面确认,现在修改这四个实际发布与安装层。
+
+## [2026-08-12 13:22:00] [Session ID: omx-1786418643597-4bz6s9] 验证修正: macOS 临时路径 canonicalization
+
+### 现象
+
+- 新增的同版本重装回归已动态进入 `rpi v9.9.9 already installed` 分支。
+- 断言失败是因为测试传入的 `/var/folders/...` 在 installer 内显示为等价的 `/private/var/folders/...`。
+
+### 结论
+
+- 这不是版本谓词或幂等逻辑失败。动态输出证明 `rpi` fixture 已被正确识别。
+- 回归断言不应绑定 macOS 系统 alias,改为只断言版本与“already installed”行为文本。
+
+### 当前状态
+
+**正在执行阶段 3** - 修正平台无关的测试断言,然后完整重跑 installer regression。
+
+## [2026-08-12 13:24:00] [Session ID: omx-1786418643597-4bz6s9] 验证环境隔离: 默认 installer 锁已被占用
+
+### 现象
+
+- 重新运行完整 harness 时,前 16 个 case 通过,随后 32 个 case 都在 installer 业务逻辑前报告 `/tmp/pi-agent-rust-install.lock.d` 已存在。
+- 失败输出一致,没有新的断言或安装行为失败。
+
+### 当前判断
+
+- 主假设: 这是共享默认锁路径的外部占用或上一轮遗留,不是本轮命名修改造成的功能回归。
+- 备选解释: harness 某个保留锁的 case 泄露了默认锁。该解释会被独立锁路径下的完整重跑结果推翻或证实。
+
+### 验证计划
+
+- 不删除未知 `/tmp` 锁目录。
+- 为完整 harness 传入本轮专属 `PI_INSTALLER_LOCK_DIR`,验证是否恢复所有案例并观察是否仍存在锁泄露。
+
+### 当前状态
+
+**正在执行阶段 3** - 使用隔离锁路径重跑 installer regression。
+
+## [2026-08-12 13:35:00] [Session ID: omx-1786418643597-4bz6s9] 范围补全: 现行发布文档资产名
+
+### 新发现
+
+- `README.md` 的手动安装示例和 `docs/releasing.md` 的发布 runbook 仍列出 `pi-*` archive 与 `build-manifest-pi-*`。
+- release workflow 已改为只发布 `rpi-*`,这些文档会指导用户请求不存在的文件。
+
+### 决议
+
+- 将当前 release asset、DSR asset 与 manifest 文件名统一改为 `rpi`。
+- 继续保留 `pi.release.*` schema、crate/package 名和历史证据中的 `pi` 标识。
+
+### 当前状态
+
+**正在执行阶段 3** - 发布 workflow、安装/卸载脚本、回归 fixture、README 与 release runbook 已统一到 `rpi`;现在验证实际脚本、YAML 与 Rust 质量门。
+
+## [2026-08-12 13:18:25] [Session ID: omx-1786418643597-4bz6s9] 阶段 2 完成: 发布文档与资产清单同步
+
+### 已完成
+
+- README 的显式安装 URL 改为 `rpi-linux-amd64.tar.xz`。
+- `docs/releasing.md` 的 raw DSR binary、aggregate manifest、archive root、release asset、build manifest、Unix/Windows smoke 和 post-public installer 校验均改为 `rpi`。
+- `pi.release.*` schema、DSR JSON 的 `.tool == "pi"` 和项目/crate 标识保持不变。
+
+### 静态证据
+
+- 三处 `EXPECTED_ASSETS` 清单均为 `rpi-*` 与 `build-manifest-rpi-*`。
+- raw DSR inventory、Windows/Unix smoke 和 installer digest lookup 都使用 `rpi_*` 原始二进制名。
+
+### 当前状态
+
+**正在执行阶段 3** - 先运行 shell、YAML、installer 回归和 Rust 质量门,再进入 scoped 提交。
+
+## [2026-08-12 13:32:03] [Session ID: omx-1786418643597-4bz6s9] 阶段 3 完成: rpi 发布安装链路质量门
+
+### 已完成
+
+- [x] 安装器回归: `bash tests/installer_regression.sh` 完成,48 passed,0 failed。
+- [x] Rust 质量门: `cargo fmt --check`、`cargo check -j 2 --all-targets`、`cargo clippy -j 2 --all-targets -- -D warnings` 通过。
+- [x] 脚本、YAML 和 diff 检查: `bash -n`,Ruby YAML 解析和 `git diff --check` 通过。
+- [x] 发布路径扫描: 不存在旧 `pi-*` shipping asset、旧 `pi_*` raw binary、旧 `build-manifest-pi-*` 或旧 executable 断言。
+
+### 分类结论
+
+- 剩余 `pi` 命中仅服务于既有 TypeScript `pi` 命令保护、`pi.release.*` schema 或 DSR `.tool == "pi"` 协议标识,不代表 Rust shipping binary。
+- release workflow、发布文档、安装器与卸载器的实际 executable 和发布文件名均为 `rpi`。
+
+### 接下来
+
+- [ ] 运行 beads ledger reconciliation,复查 `LATER_PLANS.md` 和 `EPIPHANY_LOG.md`。
+- [ ] 精确暂存本轮文件,执行 staged UBS 和 staged diff 检查。
+- [ ] 提交并推送 `my/main` 和同步的 `my/master`。
+
+### 当前状态
+
+**正在执行阶段 4** - 实现和质量门已完成,正在进行提交前审查和交付。
+
+## [2026-08-12 13:36:29] [Session ID: omx-1786418643597-4bz6s9] 阶段 4 进度: 提交前门禁通过
+
+### 已完成
+
+- [x] beads ledger reconciliation 通过,没有 orphan ledger gap 或失配的 gap-tracking bead。
+- [x] 已精确暂存 10 个本轮文件,未跟踪的 `legacy_pi_mono_code/pi-mono/pnpm-lock.yaml`、`tests/cross_platform_reports/macos/` 和 `tests/evidence_bundle/` 未进入 index。
+- [x] staged `git diff --check` 通过。
+- [x] `ubs --staged --only=rust .` 在 60 秒内完成;本轮没有 Rust 文件,因此没有适用的 Rust 扫描项。
+
+### 接下来
+
+- [ ] 创建 scoped commit,执行 `git pull --rebase my main`,推送 `my/main` 与 `my/main:master`。
+
+### 当前状态
+
+**正在执行阶段 4** - 提交前门禁通过,准备创建并推送 scoped commit。

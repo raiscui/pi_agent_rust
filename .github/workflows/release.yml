@@ -491,19 +491,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset: pi-linux-amd64
+            asset: rpi-linux-amd64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            asset: pi-linux-arm64
+            asset: rpi-linux-arm64
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            asset: pi-darwin-amd64
+            asset: rpi-darwin-amd64
           - os: macos-15
             target: aarch64-apple-darwin
-            asset: pi-darwin-arm64
+            asset: rpi-darwin-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: pi-windows-amd64
+            asset: rpi-windows-amd64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -684,7 +684,7 @@ jobs:
           output = os.environ["VERSION_OUTPUT"]
           expected_version = os.environ["RELEASE_VERSION"]
           expected_commit = os.environ["RELEASE_COMMIT"]
-          match = re.fullmatch(r"pi ([^ ]+) \(([0-9a-f]{40}) ([^)]+)\)", output)
+          match = re.fullmatch(r"rpi ([^ ]+) \(([0-9a-f]{40}) ([^)]+)\)", output)
           if match is None:
               raise SystemExit(f"native release binary returned malformed version output: {output!r}")
           version, commit, timestamp = match.groups()
@@ -789,7 +789,7 @@ jobs:
           mkdir dist
 
           # RUNNER_TEMP is job-scoped, so staging never mutates the release checkout.
-          STAGE_NAME="pi-${{ needs.plan.outputs.version }}-${{ matrix.target }}"
+          STAGE_NAME="rpi-${{ needs.plan.outputs.version }}-${{ matrix.target }}"
           STAGE_DIR="${RUNNER_TEMP}/${STAGE_NAME}"
           mkdir "$STAGE_DIR"
           cp "target/${{ matrix.target }}/release/rpi" "$STAGE_DIR/"
@@ -804,7 +804,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Path dist
 
-          $stageName = "pi-${{ needs.plan.outputs.version }}-${{ matrix.target }}"
+          $stageName = "rpi-${{ needs.plan.outputs.version }}-${{ matrix.target }}"
           $stageDir = Join-Path $env:RUNNER_TEMP $stageName
           New-Item -ItemType Directory -Path $stageDir
           Copy-Item "target/${{ matrix.target }}/release/rpi.exe" "$stageDir/"
@@ -926,7 +926,7 @@ jobs:
               else f"{os.environ['RELEASE_ASSET']}.tar.xz"
           )
           binary = Path("target") / os.environ["RELEASE_TARGET"] / "release" / (
-              "pi.exe" if is_windows else "pi"
+              "rpi.exe" if is_windows else "rpi"
           )
           max_binary_bytes = 22 * 1024 * 1024
           binary_size = binary.stat().st_size
@@ -1176,8 +1176,8 @@ jobs:
                   fail(f"unsupported release target: {target}")
 
           def archive_binary(archive_path, target):
-              root_name = f"pi-{version}-{target}"
-              binary_name = "pi.exe" if target.endswith("windows-msvc") else "pi"
+              root_name = f"rpi-{version}-{target}"
+              binary_name = "rpi.exe" if target.endswith("windows-msvc") else "rpi"
               expected_files = {
                   f"{root_name}/{binary_name}",
                   f"{root_name}/LICENSE",
@@ -1290,11 +1290,11 @@ jobs:
               (root / "rust-toolchain.toml").read_text(encoding="utf-8")
           )["toolchain"]["channel"]
           specs = {
-              "pi-linux-amd64": ("x86_64-unknown-linux-gnu", "Linux", ".tar.xz"),
-              "pi-linux-arm64": ("aarch64-unknown-linux-gnu", "Linux", ".tar.xz"),
-              "pi-darwin-amd64": ("x86_64-apple-darwin", "macOS", ".tar.xz"),
-              "pi-darwin-arm64": ("aarch64-apple-darwin", "macOS", ".tar.xz"),
-              "pi-windows-amd64": ("x86_64-pc-windows-msvc", "Windows", ".zip"),
+              "rpi-linux-amd64": ("x86_64-unknown-linux-gnu", "Linux", ".tar.xz"),
+              "rpi-linux-arm64": ("aarch64-unknown-linux-gnu", "Linux", ".tar.xz"),
+              "rpi-darwin-amd64": ("x86_64-apple-darwin", "macOS", ".tar.xz"),
+              "rpi-darwin-arm64": ("aarch64-apple-darwin", "macOS", ".tar.xz"),
+              "rpi-windows-amd64": ("x86_64-pc-windows-msvc", "Windows", ".zip"),
           }
           expected_names = {
               *(asset + suffix for asset, (_, _, suffix) in specs.items()),
@@ -1372,7 +1372,7 @@ jobs:
               if manifest.get("archive") != expected_archive:
                   fail(f"{manifest_path} archive digest/size binding failed")
               binary_bytes = archive_binary(archive_path, target)
-              binary_name = "pi.exe" if runner_os == "Windows" else "pi"
+              binary_name = "rpi.exe" if runner_os == "Windows" else "rpi"
               expected_binary = {"name": binary_name, "sha256": sha256(binary_bytes), "size": len(binary_bytes)}
               if manifest.get("binary") != expected_binary:
                   fail(f"{manifest_path} extracted binary digest/size binding failed")
@@ -1502,15 +1502,15 @@ jobs:
 
           ### Manual Install
 
-          Download the archive for your platform, extract, and place `pi` on your `PATH`:
+          Download the archive for your platform, extract, and place `rpi` on your `PATH`:
 
           | Platform | Archive |
           |----------|---------|
-          | Linux x86_64 | `pi-linux-amd64.tar.xz` |
-          | Linux ARM64 | `pi-linux-arm64.tar.xz` |
-          | macOS x86_64 | `pi-darwin-amd64.tar.xz` |
-          | macOS ARM64 (Apple Silicon) | `pi-darwin-arm64.tar.xz` |
-          | Windows x86_64 | `pi-windows-amd64.zip` |
+          | Linux x86_64 | `rpi-linux-amd64.tar.xz` |
+          | Linux ARM64 | `rpi-linux-arm64.tar.xz` |
+          | macOS x86_64 | `rpi-darwin-amd64.tar.xz` |
+          | macOS ARM64 (Apple Silicon) | `rpi-darwin-arm64.tar.xz` |
+          | Windows x86_64 | `rpi-windows-amd64.zip` |
 
           All archives include SHA256 checksums in `SHA256SUMS` for verification.
           INSTALL
@@ -1553,14 +1553,14 @@ jobs:
               return json.loads(body, object_pairs_hook=strict_object)
 
           expected_names = {
-              "pi-linux-amd64.tar.xz", "pi-linux-arm64.tar.xz",
-              "pi-darwin-amd64.tar.xz", "pi-darwin-arm64.tar.xz",
-              "pi-windows-amd64.zip", "install.sh", "SHA256SUMS",
-              "build-manifest-pi-linux-amd64.json",
-              "build-manifest-pi-linux-arm64.json",
-              "build-manifest-pi-darwin-amd64.json",
-              "build-manifest-pi-darwin-arm64.json",
-              "build-manifest-pi-windows-amd64.json",
+              "rpi-linux-amd64.tar.xz", "rpi-linux-arm64.tar.xz",
+              "rpi-darwin-amd64.tar.xz", "rpi-darwin-arm64.tar.xz",
+              "rpi-windows-amd64.zip", "install.sh", "SHA256SUMS",
+              "build-manifest-rpi-linux-amd64.json",
+              "build-manifest-rpi-linux-arm64.json",
+              "build-manifest-rpi-darwin-amd64.json",
+              "build-manifest-rpi-darwin-arm64.json",
+              "build-manifest-rpi-windows-amd64.json",
           }
           release_dir = Path("release")
           entries = list(release_dir.iterdir()) if release_dir.is_dir() and not release_dir.is_symlink() else []
@@ -3256,14 +3256,14 @@ jobs:
           release_dir = Path("publication/release")
           body_path = Path("publication/RELEASE_BODY.md")
           expected_names = {
-              "pi-linux-amd64.tar.xz", "pi-linux-arm64.tar.xz",
-              "pi-darwin-amd64.tar.xz", "pi-darwin-arm64.tar.xz",
-              "pi-windows-amd64.zip", "install.sh", "SHA256SUMS",
-              "build-manifest-pi-linux-amd64.json",
-              "build-manifest-pi-linux-arm64.json",
-              "build-manifest-pi-darwin-amd64.json",
-              "build-manifest-pi-darwin-arm64.json",
-              "build-manifest-pi-windows-amd64.json",
+              "rpi-linux-amd64.tar.xz", "rpi-linux-arm64.tar.xz",
+              "rpi-darwin-amd64.tar.xz", "rpi-darwin-arm64.tar.xz",
+              "rpi-windows-amd64.zip", "install.sh", "SHA256SUMS",
+              "build-manifest-rpi-linux-amd64.json",
+              "build-manifest-rpi-linux-arm64.json",
+              "build-manifest-rpi-darwin-amd64.json",
+              "build-manifest-rpi-darwin-arm64.json",
+              "build-manifest-rpi-windows-amd64.json",
           }
           entries = list(release_dir.iterdir()) if release_dir.is_dir() and not release_dir.is_symlink() else []
           if len(entries) != 12 or {entry.name for entry in entries} != expected_names \

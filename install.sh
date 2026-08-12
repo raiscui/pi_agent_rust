@@ -1012,7 +1012,7 @@ prepare_asset_urls() {
       exit 1
     fi
   else
-    ASSET_NAME="pi-${VERSION}-${TARGET}${EXE_EXT}"
+    ASSET_NAME="rpi-${VERSION}-${TARGET}${EXE_EXT}"
   fi
 
   SHA_URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/SHA256SUMS"
@@ -1311,9 +1311,9 @@ cleanup() {
 
 trap cleanup EXIT
 
-is_rust_pi_output() {
+is_rust_rpi_output() {
   local out="$1"
-  [[ "$out" =~ ^pi[[:space:]][0-9]+\.[0-9]+\.[0-9]+[[:space:]]\( ]]
+  [[ "$out" =~ ^rpi[[:space:]][0-9]+\.[0-9]+\.[0-9]+[[:space:]]\( ]]
 }
 
 ensure_install_target() {
@@ -1565,25 +1565,25 @@ download_release_binary() {
     # Try candidates in priority order. dsr bare-binary names first (most common
     # for local releases), then archive formats, then Rust target-triple names.
     local base_v="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}"
-    # dsr-style naming: pi_<os>_<arch> with underscores (e.g. pi_darwin_arm64)
+    # dsr-style naming: rpi_<os>_<arch> with underscores (e.g. rpi_darwin_arm64)
     if [ -n "$ASSET_PLATFORM" ]; then
-      local dsr_name="pi_${ASSET_PLATFORM//-/_}${EXE_EXT}"
+      local dsr_name="rpi_${ASSET_PLATFORM//-/_}${EXE_EXT}"
       candidates+=("${dsr_name}|${base_v}/${dsr_name}")
     fi
-    # Bare binary name (dsr uploads Linux as just "pi")
-    candidates+=("pi${EXE_EXT}|${base_v}/pi${EXE_EXT}")
+    # Bare binary name (dsr uploads Linux as just "rpi")
+    candidates+=("rpi${EXE_EXT}|${base_v}/rpi${EXE_EXT}")
     # Archive formats (GH Actions output)
     if [ -n "$ASSET_PLATFORM" ]; then
       if [ -n "$EXE_EXT" ]; then
-        candidates+=("pi-${ASSET_PLATFORM}.zip|${base_v}/pi-${ASSET_PLATFORM}.zip")
+        candidates+=("rpi-${ASSET_PLATFORM}.zip|${base_v}/rpi-${ASSET_PLATFORM}.zip")
       else
-        candidates+=("pi-${ASSET_PLATFORM}.tar.xz|${base_v}/pi-${ASSET_PLATFORM}.tar.xz")
-        candidates+=("pi-${ASSET_PLATFORM}.tar.gz|${base_v}/pi-${ASSET_PLATFORM}.tar.gz")
+        candidates+=("rpi-${ASSET_PLATFORM}.tar.xz|${base_v}/rpi-${ASSET_PLATFORM}.tar.xz")
+        candidates+=("rpi-${ASSET_PLATFORM}.tar.gz|${base_v}/rpi-${ASSET_PLATFORM}.tar.gz")
       fi
     fi
     # Rust target-triple naming
-    candidates+=("pi-${TARGET}${EXE_EXT}|${base_v}/pi-${TARGET}${EXE_EXT}")
-    candidates+=("pi-${OS}-${ARCH}${EXE_EXT}|${base_v}/pi-${OS}-${ARCH}${EXE_EXT}")
+    candidates+=("rpi-${TARGET}${EXE_EXT}|${base_v}/rpi-${TARGET}${EXE_EXT}")
+    candidates+=("rpi-${OS}-${ARCH}${EXE_EXT}|${base_v}/rpi-${OS}-${ARCH}${EXE_EXT}")
   fi
 
   local entry=""
@@ -2390,7 +2390,7 @@ bash install.sh --help
 
 # Explicit custom artifact path (replace values for real run)
 bash install.sh --yes --offline --version v0.0.0 \
-  --artifact-url "file:///tmp/pi-artifact" \
+  --artifact-url "file:///tmp/rpi-artifact" \
   --checksum "<sha256>" \
   --no-completions --no-agent-skills
 
@@ -3025,7 +3025,7 @@ should_skip_reinstall() {
 
   local out
   out="$(capture_version_line "$INSTALL_BIN_PATH")"
-  if ! is_rust_pi_output "$out"; then
+  if ! is_rust_rpi_output "$out"; then
     return 1
   fi
 

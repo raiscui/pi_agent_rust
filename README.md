@@ -660,7 +660,7 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/pi_agent_rust/v0
 # Install from explicit artifact URL + checksum URL
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/pi_agent_rust/v0.2.0/install.sh" | \
   bash -s -- \
-    --artifact-url "https://github.com/Dicklesworthstone/pi_agent_rust/releases/download/v0.2.0/pi-linux-amd64.tar.xz" \
+    --artifact-url "https://github.com/Dicklesworthstone/pi_agent_rust/releases/download/v0.2.0/rpi-linux-amd64.tar.xz" \
     --checksum-url "https://github.com/Dicklesworthstone/pi_agent_rust/releases/download/v0.2.0/SHA256SUMS"
 
 # Skip completion setup (CI/non-interactive minimal install)

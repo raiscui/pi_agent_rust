@@ -676,3 +676,22 @@
 
 ### 总结感悟
 - 二进制改名和配置目录改名需要以运行面扫描收口,仅依赖最初命中列表容易漏掉 provider 示例、规划规范和 fixture。
+
+## [2026-08-12 13:32:03] [Session ID: omx-1786418643597-4bz6s9] 任务名称: rpi 发布、安装与卸载闭环
+
+### 任务内容
+
+- 修复 `rpi` 改名后 release workflow、install/uninstall 和当前发布文档残留的 `pi` binary、asset 与 manifest 名称。
+- 保留 library crate、协议 schema、项目级 `.pi` 和既有 TypeScript `pi` 命令的语义边界。
+
+### 完成过程
+
+- release workflow 的 platform asset、archive root、archive 内 executable、build manifest、版本正则、发布说明和 asset inventory 统一为 `rpi`。
+- installer 与 uninstaller 的 Rust executable 识别、下载候选和 completion 输出改为 `rpi`。
+- README 与 release runbook 的 raw DSR binary、archive、smoke、digest 和 post-public 校验同步为 `rpi`。
+
+### 验证
+
+- `bash tests/installer_regression.sh`: 48 passed,0 failed。
+- `cargo fmt --check`、`cargo check -j 2 --all-targets`、`cargo clippy -j 2 --all-targets -- -D warnings`: 通过。
+- `bash -n`,release workflow YAML 解析和 `git diff --check`: 通过。
